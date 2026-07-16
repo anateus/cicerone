@@ -25,8 +25,11 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	for _, entry := range entries {
-		version, err := strconv.Atoi(strings.SplitN(filepath.Base(entry.Name()), "_", 2)[0])
-		if err != nil || version <= current {
+		version, err := migrationVersion(entry.Name())
+		if err != nil {
+			return err
+		}
+		if version <= current {
 			continue
 		}
 		body, err := migrationFiles.ReadFile("schema/" + entry.Name())
@@ -50,4 +53,17 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		current = version
 	}
 	return nil
+}
+
+func migrationVersion(name string) (int, error) {
+	base := filepath.Base(name)
+	parts := strings.SplitN(base, "_", 2)
+	if len(parts) != 2 || !strings.HasSuffix(parts[1], ".sql") || strings.TrimSuffix(parts[1], ".sql") == "" {
+		return 0, fmt.Errorf("malformed embedded migration filename %q: want NNN_description.sql", name)
+	}
+	version, err := strconv.Atoi(parts[0])
+	if err != nil || version <= 0 {
+		return 0, fmt.Errorf("malformed embedded migration filename %q: version must be a positive integer", name)
+	}
+	return version, nil
 }

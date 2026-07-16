@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -42,6 +44,15 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+	var sqliteVersion string
+	if err := db.QueryRowContext(ctx, `SELECT sqlite_version()`).Scan(&sqliteVersion); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("read SQLite version: %w", err)
+	}
+	if err := validateSQLiteVersion(sqliteVersion); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -49,6 +60,35 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	s := &Store{db: db, writes: make(chan writeRequest), stop: make(chan struct{}), stopped: make(chan struct{})}
 	go s.runWriter()
 	return s, nil
+}
+
+func validateSQLiteVersion(version string) error {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return unsupportedSQLiteVersionError(version)
+	}
+	var parsed [3]int
+	for i, part := range parts {
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			return unsupportedSQLiteVersionError(version)
+		}
+		parsed[i] = value
+	}
+	minimum := [3]int{3, 51, 3}
+	for i := range parsed {
+		if parsed[i] > minimum[i] {
+			return nil
+		}
+		if parsed[i] < minimum[i] {
+			return unsupportedSQLiteVersionError(version)
+		}
+	}
+	return nil
+}
+
+func unsupportedSQLiteVersionError(version string) error {
+	return fmt.Errorf("unsupported SQLite version %q: Cicerone requires SQLite >= 3.51.3 for the WAL-reset fix; rebuild or upgrade with modernc.org/sqlite v1.54.0 or newer", version)
 }
 
 func (s *Store) runWriter() {
@@ -77,6 +117,9 @@ func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
 
 // Write runs fn in a transaction on the store's single writer goroutine.
 func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
+	if fn == nil {
+		return errors.New("write callback is nil")
+	}
 	request := writeRequest{ctx: ctx, fn: fn, done: make(chan error, 1)}
 	select {
 	case s.writes <- request:

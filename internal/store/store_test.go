@@ -10,6 +10,48 @@ import (
 	"testing"
 )
 
+func TestValidateSQLiteVersion(t *testing.T) {
+	for _, version := range []string{"3.51.3", "3.51.10", "4.0.0"} {
+		if err := validateSQLiteVersion(version); err != nil {
+			t.Errorf("validateSQLiteVersion(%q) = %v, want nil", version, err)
+		}
+	}
+	for _, version := range []string{"3.51.2", "3.50.99", "2.99.99", "not-a-version"} {
+		err := validateSQLiteVersion(version)
+		if err == nil {
+			t.Errorf("validateSQLiteVersion(%q) = nil, want error", version)
+			continue
+		}
+		if !strings.Contains(err.Error(), "3.51.3") || !strings.Contains(err.Error(), "modernc.org/sqlite") {
+			t.Errorf("validateSQLiteVersion(%q) error = %q, want minimum and recovery action", version, err)
+		}
+	}
+}
+
+func TestMigrationVersionRejectsMalformedFilename(t *testing.T) {
+	for _, name := range []string{"invalid.sql", "002.sql", "zero_initial.sql"} {
+		_, err := migrationVersion(name)
+		if err == nil {
+			t.Errorf("migrationVersion(%q) = nil error, want malformed filename error", name)
+		}
+		if err != nil && !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not identify %q", err, name)
+		}
+	}
+	got, err := migrationVersion("002_more.sql")
+	if err != nil || got != 2 {
+		t.Fatalf("migrationVersion(valid) = %d, %v; want 2, nil", got, err)
+	}
+}
+
+func TestWriteRejectsNilCallback(t *testing.T) {
+	s := openTestStore(t)
+	err := s.Write(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "nil") {
+		t.Fatalf("Write(nil) = %v, want descriptive error", err)
+	}
+}
+
 func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "cicerone.db"))
