@@ -147,6 +147,55 @@ func TestResolverRejectsOversizeJSONResponse(t *testing.T) {
 	}
 }
 
+func TestResolverFollowsRankedHomepageChangelogAndPreservesProvenance(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	pageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/" {
+			_, _ = w.Write([]byte(`<a href="/noise">Home</a><a href="/changes">Changelog</a>`))
+			return
+		}
+		if r.URL.Path == "/changes" {
+			_, _ = w.Write([]byte(`<main><h1>Changes</h1><h2>5.0.0</h2><ul><li>Linked fix.</li></ul></main>`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer pageServer.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	defer api.Close()
+	fetcher := publicTestFetcher(pageServer)
+	r := NewResolver(cache, api.Client())
+	r.APIBaseURL = api.URL
+	r.Fetcher = fetcher
+	r.Extractor = ReadabilityExtractor{}
+	section, err := r.Resolve(ctx, PackageRef{Name: "widget", RepositoryURL: "https://github.com/acme/widget", Homepage: "http://public.test/", Type: domain.PackageFormula}, "5.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if section.SourceURL != "http://public.test/changes" || !strings.Contains(section.Body, "- Linked fix.") {
+		t.Fatalf("section=%#v", section)
+	}
+	artifacts, err := cache.ChangelogArtifacts(ctx, "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var linked bool
+	for _, a := range artifacts {
+		if a.URL == "http://public.test/changes" && a.ParentID != nil {
+			linked = true
+		}
+	}
+	if !linked {
+		t.Fatalf("linked artifact provenance missing: %#v", artifacts)
+	}
+}
+
 func TestChangelogFileRank(t *testing.T) {
 	tests := []struct {
 		name string

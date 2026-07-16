@@ -27,6 +27,8 @@ type PackageRef struct {
 type Resolver struct {
 	Store      *store.Store
 	Client     *http.Client
+	Fetcher    *Fetcher
+	Extractor  ContentExtractor
 	APIBaseURL string
 	Now        func() time.Time
 }
@@ -104,12 +106,121 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 	if releaseErr == nil {
 		return section, nil
 	}
-	combined := fmt.Errorf("repository changelog: %v; GitHub release: %w", err, releaseErr)
+	section, linkedErr := r.resolveLinked(ctx, id, pkg.Homepage, version)
+	if linkedErr == nil {
+		return section, nil
+	}
+	combined := fmt.Errorf("repository changelog: %v; GitHub release: %v; linked webpage: %w", err, releaseErr, linkedErr)
 	_ = r.Store.RecordChangelogFailure(ctx, backoffKey, r.Now(), combined)
+	refreshed, refreshedErr := r.Store.ChangelogArtifacts(ctx, id)
+	if refreshedErr != nil {
+		return Section{}, refreshedErr
+	}
+	if full, ok := MatchVersion(version, fromStoreArtifacts(refreshed)); ok && full.Confidence > fallback.Confidence {
+		fallback = full
+	}
 	if fallback.Confidence > 0 {
 		return fallback, nil
 	}
 	return Section{}, combined
+}
+
+func (r *Resolver) resolveLinked(ctx context.Context, packageID, seedURL, version string) (Section, error) {
+	if seedURL == "" {
+		return Section{}, errors.New("no linked webpage seed")
+	}
+	fetcher := r.Fetcher
+	if fetcher == nil {
+		fetcher = &Fetcher{}
+	}
+	extractor := r.Extractor
+	if extractor == nil {
+		extractor = ReadabilityExtractor{}
+	}
+	type queued struct {
+		candidate Candidate
+		parent    *string
+	}
+	seed, err := url.Parse(seedURL)
+	if err != nil {
+		return Section{}, err
+	}
+	queue := []queued{{candidate: Candidate{URL: seed, Label: "homepage", Score: 1, Depth: 0}}}
+	seen := map[string]bool{}
+	considered := 0
+	var best Section
+	var failures []string
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		key := item.candidate.URL.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if item.candidate.Depth > 0 {
+			considered++
+			if considered > 5 {
+				break
+			}
+		}
+		retry, retryErr := r.Store.ChangelogRetryAfter(ctx, key)
+		if retryErr != nil {
+			return Section{}, retryErr
+		}
+		if r.Now().Before(retry) {
+			failures = append(failures, fmt.Sprintf("%s backed off", key))
+			continue
+		}
+		fetched, fetchErr := fetcher.Fetch(ctx, key)
+		if fetchErr != nil {
+			_ = r.Store.RecordChangelogFailure(ctx, key, r.Now(), fetchErr)
+			failures = append(failures, fetchErr.Error())
+			continue
+		}
+		var extracted Extracted
+		if fetched.MediaType == "text/html" || fetched.MediaType == "application/xhtml+xml" {
+			extracted, err = extractor.Extract(fetched.FinalURL, fetched.Body)
+		} else {
+			extracted = Extracted{Text: sanitizeText(string(fetched.Body))}
+		}
+		if err != nil {
+			_ = r.Store.RecordChangelogFailure(ctx, key, r.Now(), err)
+			failures = append(failures, err.Error())
+			continue
+		}
+		sum := sha256.Sum256(fetched.Body)
+		saved, saveErr := r.Store.SaveChangelogArtifact(ctx, packageID, store.ChangelogArtifact{URL: fetched.FinalURL.String(), MediaType: fetched.MediaType, ETag: fetched.ETag, LastModified: fetched.LastModified, Hash: hex.EncodeToString(sum[:]), Raw: fetched.Body, Extracted: []byte(extracted.Text), FetchedAt: fetched.FetchedAt, ParentID: item.parent})
+		if saveErr != nil {
+			return Section{}, saveErr
+		}
+		artifact := Artifact{ID: saved.ID, URL: saved.URL, MediaType: saved.MediaType, ETag: saved.ETag, LastModified: saved.LastModified, Hash: saved.Hash, Raw: saved.Raw, Extracted: saved.Extracted, FetchedAt: saved.FetchedAt, ParentID: saved.ParentID}
+		if section, ok := MatchVersion(version, []Artifact{artifact}); ok {
+			if section.Confidence >= .8 {
+				if err := r.persistSection(ctx, section); err != nil {
+					return Section{}, err
+				}
+				return section, nil
+			}
+			if section.Confidence > best.Confidence {
+				best = section
+			}
+		}
+		if item.candidate.Depth < 2 {
+			for _, candidate := range extracted.Links {
+				candidate.Depth = item.candidate.Depth + 1
+				parent := saved.ID
+				queue = append(queue, queued{candidate: candidate, parent: &parent})
+			}
+		}
+	}
+	if best.Confidence > 0 {
+		if err := r.persistSection(ctx, best); err != nil {
+			return Section{}, err
+		}
+		return best, nil
+	}
+	return Section{}, fmt.Errorf("no matching linked webpage (%s)", strings.Join(failures, "; "))
 }
 
 type githubFile struct {
@@ -196,7 +307,7 @@ func (r *Resolver) resolveRelease(ctx context.Context, packageID, packageName, o
 
 func (r *Resolver) persistArtifact(ctx context.Context, packageID, source, media, etag, lastModified string, body []byte) (Artifact, error) {
 	sum := sha256.Sum256(body)
-	a := store.ChangelogArtifact{URL: source, MediaType: media, ETag: etag, LastModified: lastModified, Hash: hex.EncodeToString(sum[:]), Raw: append([]byte(nil), body...), Extracted: append([]byte(nil), body...), FetchedAt: r.Now()}
+	a := store.ChangelogArtifact{URL: source, MediaType: media, ETag: etag, LastModified: lastModified, Hash: hex.EncodeToString(sum[:]), Raw: append([]byte(nil), body...), Extracted: []byte(sanitizeText(string(body))), FetchedAt: r.Now()}
 	saved, err := r.Store.SaveChangelogArtifact(ctx, packageID, a)
 	if err != nil {
 		return Artifact{}, err
