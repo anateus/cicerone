@@ -18,7 +18,12 @@ func TestInstalled(t *testing.T) {
   "formulae": [{
     "name": "ripgrep",
     "full_name": "homebrew/core/ripgrep",
-    "installed": [{"version": "13.0.0"}, {"version": "14.1.1"}],
+    "installed": [
+      {"version": "14.1.1_1"},
+      {"version": "9.10.0"},
+      {"version": "14.1.1-rc1"},
+      {"version": "13.0.0"}
+    ],
     "pinned": true,
     "outdated": true
   }],
@@ -37,7 +42,7 @@ func TestInstalled(t *testing.T) {
 		t.Fatalf("Installed() error = %v", err)
 	}
 	want := []domain.InstalledPackage{
-		{PackageID: "homebrew/core/ripgrep", Name: "homebrew/core/ripgrep", Version: "14.1.1", Type: domain.PackageFormula, Pinned: true, UpgradeAvailable: true},
+		{PackageID: "homebrew/core/ripgrep", Name: "homebrew/core/ripgrep", Version: "14.1.1_1", Type: domain.PackageFormula, Pinned: true, UpgradeAvailable: true},
 		{PackageID: "homebrew/cask/firefox", Name: "homebrew/cask/firefox", Version: "128.0", Type: domain.PackageCask},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
