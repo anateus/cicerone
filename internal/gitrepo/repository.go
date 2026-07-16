@@ -33,6 +33,9 @@ func (r Repository) Ensure(ctx context.Context) error {
 		return nil
 	}
 	if _, err := os.Stat(r.source.Path); err == nil {
+		if err := r.validateOwned(ctx); err != nil {
+			return fmt.Errorf("owned cache %s is incomplete or unexpected: %w; move it aside or remove it after inspection, then retry", r.source.Path, err)
+		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect repository %s: %w", r.source.Path, err)
@@ -43,6 +46,24 @@ func (r Repository) Ensure(ctx context.Context) error {
 	_, err := r.runner.Run(ctx, "git", "clone", "--mirror", "--filter=blob:none", "--", r.source.RemoteURL, r.source.Path)
 	if err != nil {
 		return fmt.Errorf("clone %s: %w", r.source.Name, err)
+	}
+	return nil
+}
+
+func (r Repository) validateOwned(ctx context.Context) error {
+	result, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(result.Stdout)) != "true" {
+		return errors.New("repository is not a bare mirror")
+	}
+	result, err = r.runner.Run(ctx, "git", "-C", r.source.Path, "remote", "get-url", "origin")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(result.Stdout)) != r.source.RemoteURL {
+		return fmt.Errorf("origin does not match %s", r.source.RemoteURL)
 	}
 	return nil
 }

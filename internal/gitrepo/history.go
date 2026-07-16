@@ -40,7 +40,7 @@ func (r Repository) Commits(ctx context.Context, requested Range) ([]Commit, err
 	if revision == "" {
 		revision = "HEAD"
 	}
-	args := []string{"-C", r.source.Path, "log", "--format=%x1e%H%x00%aI%x00%s", "--name-status", "-z", "-M"}
+	args := []string{"-C", r.source.Path, "log", "--format=%H%x00%aI%x00%s%x00", "--name-status", "-z", "-M"}
 	if !requested.Since.IsZero() {
 		args = append(args, "--since="+requested.Since.Format(time.RFC3339Nano))
 	}
@@ -68,54 +68,67 @@ func (r Repository) Blob(ctx context.Context, revision, path string) ([]byte, er
 }
 
 func parseCommits(output []byte) ([]Commit, error) {
-	records := bytes.Split(output, []byte{0x1e})
-	commits := make([]Commit, 0, len(records)-1)
-	for _, record := range records {
-		if len(record) == 0 {
-			continue
+	parts := bytes.Split(output, []byte{0})
+	commits := make([]Commit, 0)
+	for i := 0; i < len(parts); {
+		for i < len(parts) && len(parts[i]) == 0 {
+			i++
 		}
-		fields := bytes.SplitN(record, []byte{0}, 3)
-		if len(fields) != 3 {
+		if i == len(parts) {
+			break
+		}
+		hash := strings.TrimPrefix(string(parts[i]), "\n")
+		if !isObjectID(hash) || i+2 >= len(parts) {
 			return nil, fmt.Errorf("malformed header")
 		}
-		authorTime, err := time.Parse(time.RFC3339, string(fields[1]))
+		authorTime, err := time.Parse(time.RFC3339, string(parts[i+1]))
 		if err != nil {
 			return nil, fmt.Errorf("author time: %w", err)
 		}
-		rest := bytes.TrimPrefix(fields[2], []byte{'\n'})
-		parts := bytes.Split(rest, []byte{0})
-		commit := Commit{Hash: string(fields[0]), AuthorTime: authorTime}
-		if len(parts) > 0 {
-			commit.Subject = strings.TrimSuffix(string(parts[0]), "\n")
-		}
-		parts = parts[1:]
-		for len(parts) > 0 {
-			if len(parts[0]) == 0 {
-				parts = parts[1:]
+		commit := Commit{Hash: hash, AuthorTime: authorTime, Subject: string(parts[i+2])}
+		i += 3
+		for i < len(parts) {
+			if len(parts[i]) == 0 {
+				i++
 				continue
 			}
-			status := strings.TrimPrefix(string(parts[0]), "\n")
-			parts = parts[1:]
+			status := strings.TrimPrefix(string(parts[i]), "\n")
+			if isObjectID(status) {
+				break
+			}
+			i++
 			if status == "" {
 				return nil, fmt.Errorf("empty change status")
 			}
-			if len(parts) == 0 {
+			if i == len(parts) {
 				return nil, fmt.Errorf("missing path for %s", status)
 			}
 			change := Change{Status: status[:1]}
 			if change.Status == "R" || change.Status == "C" {
-				if len(parts) < 2 {
+				if i+1 >= len(parts) {
 					return nil, fmt.Errorf("missing rename path")
 				}
-				change.OldPath, change.Path = string(parts[0]), string(parts[1])
-				parts = parts[2:]
+				change.OldPath, change.Path = string(parts[i]), string(parts[i+1])
+				i += 2
 			} else {
-				change.Path = string(parts[0])
-				parts = parts[1:]
+				change.Path = string(parts[i])
+				i++
 			}
 			commit.Changes = append(commit.Changes, change)
 		}
 		commits = append(commits, commit)
 	}
 	return commits, nil
+}
+
+func isObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

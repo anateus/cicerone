@@ -2,8 +2,10 @@ package gitrepo_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,11 +37,33 @@ func TestOwnedMirrorLifecycleAndLocalFetchGuard(t *testing.T) {
 		}
 	}
 	local := gitrepo.New(gitrepo.Source{Path: t.TempDir()}, runner)
+	if err := local.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if err := local.Fetch(context.Background()); err == nil {
 		t.Fatal("local Fetch error = nil")
 	}
 	if len(runner.RunCalls) != 2 {
 		t.Fatalf("local Fetch executed Git: %#v", runner.RunCalls[2:])
+	}
+}
+
+func TestEnsureRejectsInterruptedOwnedCacheWithoutModifyingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "core.git")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(path, "interrupted-clone")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: path, RemoteURL: "https://example.test/core.git", Owned: true}, execx.NewRunner())
+	err := repository.Ensure(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "remove") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("Ensure error = %v, want explicit cache recovery instruction", err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+		t.Fatalf("interrupted cache was modified: %q, %v", got, err)
 	}
 }
 
@@ -87,5 +111,20 @@ func TestMergeBaseAcrossDivergentBranches(t *testing.T) {
 	}
 	if _, err := repository.Blob(context.Background(), "HEAD", filepath.Join("missing", "file")); err == nil {
 		t.Fatal("Blob missing error = nil")
+	}
+}
+
+func TestCommitsAllowsRecordSeparatorInFilename(t *testing.T) {
+	r := testutil.NewGitRepo(t)
+	at := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	path := "Formula/control" + string([]byte{0x1e}) + "byte.rb"
+	hash := r.Commit(path, "contents", "control-byte path", at)
+	repository := gitrepo.New(gitrepo.Source{Path: r.Path}, execx.NewRunner())
+	commits, err := repository.Commits(context.Background(), gitrepo.Range{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 1 || commits[0].Hash != hash || len(commits[0].Changes) != 1 || commits[0].Changes[0].Path != path {
+		t.Fatalf("commits = %#v", commits)
 	}
 }
