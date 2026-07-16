@@ -56,8 +56,12 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 	if err != nil {
 		return Section{}, err
 	}
+	var fallback Section
 	if section, ok := MatchVersion(version, fromStoreArtifacts(cached)); ok {
-		return section, nil
+		if section.Confidence >= .8 {
+			return section, nil
+		}
+		fallback = section
 	}
 	var cachedSection Section
 	for _, artifact := range cached {
@@ -71,8 +75,11 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 			}
 		}
 	}
-	if cachedSection.Confidence > 0 {
+	if cachedSection.Confidence >= .8 {
 		return cachedSection, nil
+	}
+	if cachedSection.Confidence > fallback.Confidence {
+		fallback = cachedSection
 	}
 	owner, repo, ok := githubRepository(pkg.RepositoryURL)
 	if !ok {
@@ -84,6 +91,9 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 		return Section{}, err
 	}
 	if r.Now().Before(retryAfter) {
+		if fallback.Confidence > 0 {
+			return fallback, nil
+		}
 		return Section{}, fmt.Errorf("changelog refresh backed off until %s", retryAfter.Format(time.RFC3339))
 	}
 	section, err := r.resolveRepositoryFiles(ctx, id, owner, repo, version)
@@ -96,6 +106,9 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 	}
 	combined := fmt.Errorf("repository changelog: %v; GitHub release: %w", err, releaseErr)
 	_ = r.Store.RecordChangelogFailure(ctx, backoffKey, r.Now(), combined)
+	if fallback.Confidence > 0 {
+		return fallback, nil
+	}
 	return Section{}, combined
 }
 
@@ -223,7 +236,15 @@ func (r *Resolver) getJSON(ctx context.Context, endpoint string, dst any) error 
 		return err
 	}
 	defer resp.Body.Close()
-	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(dst)
+	const maximum = 4 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > maximum {
+		return fmt.Errorf("response from %s is too large: limit is %d bytes", endpoint, maximum)
+	}
+	return json.Unmarshal(body, dst)
 }
 func (r *Resolver) getBytes(ctx context.Context, endpoint string) ([]byte, string, string, string, error) {
 	resp, err := r.request(ctx, endpoint)
@@ -231,7 +252,11 @@ func (r *Resolver) getBytes(ctx context.Context, endpoint string) ([]byte, strin
 		return nil, "", "", "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	const maximum = 8 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
+	if err == nil && len(body) > maximum {
+		return nil, "", "", "", fmt.Errorf("response from %s is too large: limit is %d bytes", endpoint, maximum)
+	}
 	return body, resp.Header.Get("Content-Type"), resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), err
 }
 

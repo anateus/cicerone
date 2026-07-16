@@ -95,6 +95,72 @@ func TestResolverBacksOffAfterFailedRefresh(t *testing.T) {
 	}
 }
 
+func TestResolverUsesLowConfidenceCacheOnlyAsFallback(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	if err := cache.UpsertChangelogPackage(ctx, "widget", "widget", "formula"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = cache.SaveChangelogArtifact(ctx, "widget", store.ChangelogArtifact{URL: "https://example.test/weak", Hash: "weak", Raw: []byte{}, Extracted: []byte("Prose mentions 4.0.0 without a heading.")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/releases/tags/4.0.0") {
+			json.NewEncoder(w).Encode(map[string]string{"tag_name": "4.0.0", "body": "Strong release body", "html_url": "https://example.test/release"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	r := NewResolver(cache, server.Client())
+	r.APIBaseURL = server.URL
+	section, err := r.Resolve(ctx, PackageRef{Name: "widget", RepositoryURL: "https://github.com/acme/widget", Type: domain.PackageFormula}, "4.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if section.Confidence != 1 || !strings.Contains(section.Body, "Strong") {
+		t.Fatalf("section=%#v,want strong discovery", section)
+	}
+}
+
+func TestResolverRejectsOversizeResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(make([]byte, (8<<20)+1)) }))
+	defer server.Close()
+	r := NewResolver(nil, server.Client())
+	if _, _, _, _, err := r.getBytes(context.Background(), server.URL); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversize error=%v", err)
+	}
+}
+
+func TestResolverRejectsOversizeJSONResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("[]")); w.Write(make([]byte, 4<<20)) }))
+	defer server.Close()
+	r := NewResolver(nil, server.Client())
+	var value []any
+	if err := r.getJSON(context.Background(), server.URL, &value); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversize JSON error=%v", err)
+	}
+}
+
+func TestChangelogFileRank(t *testing.T) {
+	tests := []struct {
+		name string
+		want int
+	}{{"CHANGELOG", 0}, {"changelog.md", 0}, {"CHANGES.rst", 1}, {"news.txt", 2}, {"HISTORY", 3}, {"history.md", 4}, {"History.txt", 5}, {"RELEASES.md", 6}, {"PROJECT_WHATSNEW.HTML", 7}, {"README.md", 100}, {"HISTORY.rst", 100}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := changelogFileRank(tt.name); got != tt.want {
+				t.Fatalf("rank=%d,want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolverTriesNormalizedGitHubReleaseTagsAndOptionalToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "secret")
 	ctx := context.Background()

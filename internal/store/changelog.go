@@ -38,13 +38,17 @@ func (s *Store) SaveChangelogArtifact(ctx context.Context, packageID string, art
 		if artifact.FetchedAt.IsZero() {
 			fetched = time.Now().UTC().UnixNano()
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO changelog_artifacts(package_id,url,media_type,etag,last_modified,content_hash,discovery_parent,fetched_at,raw_content,extracted_text,extraction_status)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(url,content_hash) DO NOTHING`, packageID, artifact.URL, artifact.MediaType, artifact.ETag, artifact.LastModified, artifact.Hash, parent, fetched, artifact.Raw, artifact.Extracted, "success")
+		_, err := tx.ExecContext(ctx, `INSERT INTO changelog_artifacts(url,media_type,etag,last_modified,content_hash,discovery_parent,fetched_at,raw_content,extracted_text,extraction_status)
+			VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(url,content_hash) DO NOTHING`, artifact.URL, artifact.MediaType, artifact.ETag, artifact.LastModified, artifact.Hash, parent, fetched, artifact.Raw, artifact.Extracted, "success")
 		if err != nil {
 			return err
 		}
 		var id int64
-		return tx.QueryRowContext(ctx, `SELECT id FROM changelog_artifacts WHERE url=? AND content_hash=?`, artifact.URL, artifact.Hash).Scan(&id)
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM changelog_artifacts WHERE url=? AND content_hash=?`, artifact.URL, artifact.Hash).Scan(&id); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO package_changelog_artifacts(package_id,artifact_id) VALUES(?,?) ON CONFLICT DO NOTHING`, packageID, id)
+		return err
 	})
 	if err != nil {
 		return ChangelogArtifact{}, err
@@ -56,7 +60,7 @@ func (s *Store) SaveChangelogArtifact(ctx context.Context, packageID string, art
 }
 
 func (s *Store) ChangelogArtifacts(ctx context.Context, packageID string) ([]ChangelogArtifact, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,url,media_type,etag,last_modified,content_hash,discovery_parent,fetched_at,raw_content,extracted_text FROM changelog_artifacts WHERE package_id=? ORDER BY fetched_at DESC,id DESC`, packageID)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.url,a.media_type,a.etag,a.last_modified,a.content_hash,a.discovery_parent,a.fetched_at,a.raw_content,a.extracted_text FROM changelog_artifacts a JOIN package_changelog_artifacts p ON p.artifact_id=a.id WHERE p.package_id=? ORDER BY a.fetched_at DESC,a.id DESC`, packageID)
 	if err != nil {
 		return nil, err
 	}
