@@ -67,6 +67,32 @@ func TestEnsureRejectsInterruptedOwnedCacheWithoutModifyingIt(t *testing.T) {
 	}
 }
 
+func TestEnsureRejectsBareCloneThatIsNotAMirror(t *testing.T) {
+	source := testutil.NewGitRepo(t)
+	source.Commit("Formula/a.rb", "contents", "initial", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	cache := filepath.Join(t.TempDir(), "core.git")
+	source.Run("clone", "--bare", "--", source.Path, cache)
+	repository := gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: cache, RemoteURL: source.Path, Owned: true}, execx.NewRunner())
+	err := repository.Ensure(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "mirror") || !strings.Contains(err.Error(), "move it aside") {
+		t.Fatalf("Ensure error = %v, want non-mirror recovery guidance", err)
+	}
+	if got := source.Run("-C", cache, "rev-parse", "HEAD"); strings.TrimSpace(got) == "" {
+		t.Fatal("bare cache was modified")
+	}
+}
+
+func TestEnsureAcceptsUsableMirror(t *testing.T) {
+	source := testutil.NewGitRepo(t)
+	source.Commit("Formula/a.rb", "contents", "initial", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	cache := filepath.Join(t.TempDir(), "core.git")
+	source.Run("clone", "--mirror", "--", source.Path, cache)
+	repository := gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: cache, RemoteURL: source.Path, Owned: true}, execx.NewRunner())
+	if err := repository.Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure error = %v", err)
+	}
+}
+
 func TestRepositoryHistoryProtocol(t *testing.T) {
 	r := testutil.NewGitRepo(t)
 	jan1 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)

@@ -65,6 +65,23 @@ func (r Repository) validateOwned(ctx context.Context) error {
 	if strings.TrimSpace(string(result.Stdout)) != r.source.RemoteURL {
 		return fmt.Errorf("origin does not match %s", r.source.RemoteURL)
 	}
+	result, err = r.runner.Run(ctx, "git", "-C", r.source.Path, "config", "--get", "remote.origin.mirror")
+	if err != nil {
+		return fmt.Errorf("read mirror setting: %w", err)
+	}
+	if strings.TrimSpace(string(result.Stdout)) != "true" {
+		return errors.New("repository lacks remote.origin.mirror=true")
+	}
+	result, err = r.runner.Run(ctx, "git", "-C", r.source.Path, "config", "--get-all", "remote.origin.fetch")
+	if err != nil {
+		return fmt.Errorf("read mirror fetch refspec: %w", err)
+	}
+	if strings.TrimSpace(string(result.Stdout)) != "+refs/*:refs/*" {
+		return errors.New("repository lacks the mirror fetch refspec")
+	}
+	if _, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "rev-parse", "--verify", "HEAD"); err != nil {
+		return fmt.Errorf("repository has no usable HEAD: %w", err)
+	}
 	return nil
 }
 
