@@ -1,0 +1,12 @@
+[1;38;2;208;169;255m Cicerone  Package updates                                              [m│[1;38;2;208;169;255m Inspector                                     [m
+ Search:                     Roll up: off                               │ ripgrep                                       
+[1;38;2;25;15;36;48;2;199;155;255m› ripgrep            version  1 → 2                                     [m│ version  1 → 2                                
+    └ version          1 → 2                                            │                                               
+  git                version  1 → 2                                     │ Changelog                                     
+                                                                        │ 2.0                                           
+                                                                        │ Faster search                                 
+                                                                        │ Improved diagnostics                          
+                                                                        │                                               
+                                                                        │                                               
+                                                                        │                                               
+[38;2;239;229;250;48;2;56;38;74m Ready                                                                                                                  [m
