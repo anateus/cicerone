@@ -1,0 +1,140 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"strconv"
+	"time"
+)
+
+type ChangelogArtifact struct {
+	ID, URL, MediaType, ETag, LastModified, Hash string
+	Raw, Extracted                               []byte
+	FetchedAt                                    time.Time
+	ParentID                                     *string
+}
+
+type ChangelogSection struct {
+	ArtifactID, Version, Body string
+	Confidence                float64
+	SourceURL                 string
+}
+
+func (s *Store) UpsertChangelogPackage(ctx context.Context, id, name, packageType string) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO packages(id,name,type) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,type=excluded.type`, id, name, packageType)
+		return err
+	})
+}
+
+func (s *Store) SaveChangelogArtifact(ctx context.Context, packageID string, artifact ChangelogArtifact) (ChangelogArtifact, error) {
+	err := s.Write(ctx, func(tx *sql.Tx) error {
+		parent := ""
+		if artifact.ParentID != nil {
+			parent = *artifact.ParentID
+		}
+		fetched := artifact.FetchedAt.UnixNano()
+		if artifact.FetchedAt.IsZero() {
+			fetched = time.Now().UTC().UnixNano()
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO changelog_artifacts(package_id,url,media_type,etag,last_modified,content_hash,discovery_parent,fetched_at,raw_content,extracted_text,extraction_status)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(url,content_hash) DO NOTHING`, packageID, artifact.URL, artifact.MediaType, artifact.ETag, artifact.LastModified, artifact.Hash, parent, fetched, artifact.Raw, artifact.Extracted, "success")
+		if err != nil {
+			return err
+		}
+		var id int64
+		return tx.QueryRowContext(ctx, `SELECT id FROM changelog_artifacts WHERE url=? AND content_hash=?`, artifact.URL, artifact.Hash).Scan(&id)
+	})
+	if err != nil {
+		return ChangelogArtifact{}, err
+	}
+	var id int64
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM changelog_artifacts WHERE url=? AND content_hash=?`, artifact.URL, artifact.Hash).Scan(&id)
+	artifact.ID = strconv.FormatInt(id, 10)
+	return artifact, err
+}
+
+func (s *Store) ChangelogArtifacts(ctx context.Context, packageID string) ([]ChangelogArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,url,media_type,etag,last_modified,content_hash,discovery_parent,fetched_at,raw_content,extracted_text FROM changelog_artifacts WHERE package_id=? ORDER BY fetched_at DESC,id DESC`, packageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ChangelogArtifact
+	for rows.Next() {
+		var a ChangelogArtifact
+		var id, fetched int64
+		var parent string
+		if err := rows.Scan(&id, &a.URL, &a.MediaType, &a.ETag, &a.LastModified, &a.Hash, &parent, &fetched, &a.Raw, &a.Extracted); err != nil {
+			return nil, err
+		}
+		a.ID = strconv.FormatInt(id, 10)
+		a.FetchedAt = time.Unix(0, fetched).UTC()
+		if parent != "" {
+			a.ParentID = &parent
+		}
+		result = append(result, a)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SaveChangelogSection(ctx context.Context, section ChangelogSection) error {
+	id, err := strconv.ParseInt(section.ArtifactID, 10, 64)
+	if err != nil {
+		return err
+	}
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO changelog_sections(artifact_id,version,content,confidence,source_url) VALUES(?,?,?,?,?)`, id, section.Version, section.Body, section.Confidence, section.SourceURL)
+		return err
+	})
+}
+
+func (s *Store) ChangelogSections(ctx context.Context, artifactID string) ([]ChangelogSection, error) {
+	id, err := strconv.ParseInt(artifactID, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT version,content,confidence,source_url FROM changelog_sections WHERE artifact_id=? ORDER BY id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ChangelogSection
+	for rows.Next() {
+		var v ChangelogSection
+		v.ArtifactID = artifactID
+		if err := rows.Scan(&v.Version, &v.Body, &v.Confidence, &v.SourceURL); err != nil {
+			return nil, err
+		}
+		result = append(result, v)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RecordChangelogFailure(ctx context.Context, url string, at time.Time, failure error) error {
+	if failure == nil {
+		return errors.New("changelog failure is nil")
+	}
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		var id sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM changelog_artifacts WHERE url=? ORDER BY fetched_at DESC,id DESC LIMIT 1`, url).Scan(&id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO changelog_attempts(artifact_id,url,attempted_at,status,error) VALUES(?,?,?,?,?)`, id, url, at.UnixNano(), "failed", failure.Error())
+		return err
+	})
+}
+
+func (s *Store) ChangelogRetryAfter(ctx context.Context, url string) (time.Time, error) {
+	var attempted int64
+	err := s.db.QueryRowContext(ctx, `SELECT attempted_at FROM changelog_attempts WHERE url=? ORDER BY attempted_at DESC LIMIT 1`, url).Scan(&attempted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(0, attempted).UTC().Add(time.Minute), nil
+}

@@ -54,7 +54,7 @@ CREATE UNIQUE INDEX installed_packages_identity ON installed_packages(package_id
 CREATE TABLE changelog_artifacts (
   id INTEGER PRIMARY KEY,
   package_id TEXT REFERENCES packages(id) ON DELETE CASCADE,
-  url TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
   media_type TEXT NOT NULL DEFAULT '',
   etag TEXT NOT NULL DEFAULT '',
   last_modified TEXT NOT NULL DEFAULT '',
@@ -63,17 +63,21 @@ CREATE TABLE changelog_artifacts (
   fetched_at INTEGER NOT NULL DEFAULT 0,
   raw_content TEXT NOT NULL DEFAULT '',
   extracted_text TEXT NOT NULL DEFAULT '',
-  extraction_status TEXT NOT NULL DEFAULT ''
+  extraction_status TEXT NOT NULL DEFAULT '',
+  UNIQUE(url, content_hash)
 );
 CREATE TABLE changelog_sections (
   id INTEGER PRIMARY KEY,
   artifact_id INTEGER NOT NULL REFERENCES changelog_artifacts(id) ON DELETE CASCADE,
   version TEXT NOT NULL DEFAULT '',
-  content TEXT NOT NULL DEFAULT ''
+  content TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0,
+  source_url TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE changelog_attempts (
   id INTEGER PRIMARY KEY,
   artifact_id INTEGER REFERENCES changelog_artifacts(id) ON DELETE CASCADE,
+  url TEXT NOT NULL DEFAULT '',
   attempted_at INTEGER NOT NULL,
   status TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT ''
