@@ -1,0 +1,4 @@
+{
+  "formulae": [{"name":"fixture","full_name":"fixture","installed":[{"version":"1.0"}],"pinned":false,"outdated":true}],
+  "casks": [{"token":"fixture-app","full_token":"fixture-app","installed":"1.0","outdated":true}]
+}

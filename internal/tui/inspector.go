@@ -29,6 +29,10 @@ func (m Model) renderInspector(width int) string {
 	for _, section := range m.changelog {
 		b.WriteString(m.contentLine(" "+section.Version, width))
 		b.WriteByte('\n')
+		if section.SourceURL != "" {
+			b.WriteString(m.contentLine(" Source: "+section.SourceURL, width))
+			b.WriteByte('\n')
+		}
 		for _, line := range strings.Split(section.Body, "\n") {
 			b.WriteString(m.contentLine(" "+line, width))
 			b.WriteByte('\n')

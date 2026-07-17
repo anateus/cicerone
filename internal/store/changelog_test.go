@@ -7,7 +7,32 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"cicerone/internal/domain"
 )
+
+func TestLoadChangelogReturnsCachedSectionForEventVersion(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	event := domain.UpdateEvent{ID: "event", PackageID: "fixture", Name: "fixture", Type: domain.PackageFormula, Kind: domain.EventVersion, NewVersion: "2.0", Repository: "core", Commit: "abc", Time: time.Now()}
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := s.SaveChangelogArtifact(ctx, "fixture", ChangelogArtifact{URL: "https://example.test/changes", Hash: "hash", MediaType: "text/html", Raw: []byte("<p>changes</p>"), Extracted: []byte("changes")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveChangelogSection(ctx, ChangelogSection{ArtifactID: artifact.ID, Version: "2.0", Body: "linked notes", Confidence: 1, SourceURL: artifact.URL}); err != nil {
+		t.Fatal(err)
+	}
+	sections, err := s.LoadChangelog(ctx, event.PackageID, event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 1 || sections[0].SourceURL != artifact.URL || sections[0].Body != "linked notes" {
+		t.Fatalf("LoadChangelog = %#v", sections)
+	}
+}
 
 func TestMigrationUpgradesVersionOneChangelogData(t *testing.T) {
 	ctx := context.Background()

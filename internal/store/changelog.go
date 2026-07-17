@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strconv"
 	"time"
+
+	"cicerone/internal/domain"
 )
 
 type ChangelogArtifact struct {
@@ -19,6 +21,32 @@ type ChangelogSection struct {
 	ArtifactID, Version, Body string
 	Confidence                float64
 	SourceURL                 string
+}
+
+// LoadChangelog returns cached sections matching the selected event version.
+// It performs no network work and is safe on the cached-first startup path.
+func (s *Store) LoadChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]ChangelogSection, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT cs.artifact_id,cs.version,cs.content,cs.confidence,cs.source_url
+		FROM update_events e
+		JOIN package_changelog_artifacts pca ON pca.package_id=e.package_id
+		JOIN changelog_sections cs ON cs.artifact_id=pca.artifact_id
+		WHERE e.id=? AND e.package_id=? AND cs.version=e.new_version
+		ORDER BY cs.confidence DESC,cs.id DESC`, eventID, packageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sections []ChangelogSection
+	for rows.Next() {
+		var section ChangelogSection
+		var artifactID int64
+		if err := rows.Scan(&artifactID, &section.Version, &section.Body, &section.Confidence, &section.SourceURL); err != nil {
+			return nil, err
+		}
+		section.ArtifactID = strconv.FormatInt(artifactID, 10)
+		sections = append(sections, section)
+	}
+	return sections, rows.Err()
 }
 
 func (s *Store) UpsertChangelogPackage(ctx context.Context, id, name, packageType string) error {
