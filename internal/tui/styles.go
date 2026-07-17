@@ -91,7 +91,7 @@ func (m *Model) syncViewports() {
 
 func (m *Model) keepSelectionVisible() {
 	m.syncViewports()
-	line := feedHeaderHeight + m.selected
+	line := m.selectedFeedLine()
 	top, height := m.feedViewport.YOffset(), m.feedViewport.Height()
 	if line < top {
 		top = line
@@ -101,6 +101,17 @@ func (m *Model) keepSelectionVisible() {
 	}
 	m.feedViewport.SetYOffset(top)
 	m.viewportOffset = m.feedViewport.YOffset()
+}
+
+func (m Model) selectedFeedLine() int {
+	line := feedHeaderHeight + m.selected
+	for index := 0; index < m.selected && index < len(m.groups); index++ {
+		group := m.groups[index]
+		if m.expanded[group.ID] && len(group.Events) > 1 {
+			line += len(group.Events) - 1
+		}
+	}
+	return line
 }
 
 type palette struct{ primary, selectedFG, selectedBG, statusFG, statusBG color.Color }

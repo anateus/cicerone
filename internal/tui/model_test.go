@@ -171,6 +171,30 @@ func TestNavigationKeepsSelectionVisibleInRealFeedViewport(t *testing.T) {
 	}
 }
 
+func TestNavigationCountsExpandedChildrenBeforeSelection(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 72, Height: 6})
+	children := []domain.UpdateEvent{
+		event("roll", "rollup"), event("child-1", "rollup"), event("child-2", "rollup"),
+		event("child-3", "rollup"), event("child-4", "rollup"),
+	}
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{
+		{ID: "roll", Events: children},
+		{ID: "next", Events: []domain.UpdateEvent{event("next", "next")}},
+	}})
+	m = update(t, m, ToggleExpanded{})
+	m = update(t, m, key("j"))
+
+	selectedLine := feedHeaderHeight + 1 + len(children) - 1
+	top, height := m.feedViewport.YOffset(), m.feedViewport.Height()
+	if selectedLine < top || selectedLine >= top+height {
+		t.Fatalf("rendered selected line %d outside real viewport [%d,%d)", selectedLine, top, top+height)
+	}
+	if m.viewportOffset != top {
+		t.Fatalf("stored offset %d differs from viewport offset %d", m.viewportOffset, top)
+	}
+}
+
 func TestDatasetRefreshRestoresAnchorCapturedWhenRequestStarted(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m = update(t, m, WindowSize{Width: 72, Height: 4})
