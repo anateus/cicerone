@@ -8,14 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/app"
 	"cicerone/internal/changelog"
 	"cicerone/internal/domain"
-	"cicerone/internal/execx"
 	"cicerone/internal/gitrepo"
 	"cicerone/internal/history"
 	"cicerone/internal/homebrew"
@@ -139,83 +136,21 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
-	paths := app.DefaultPaths(home)
-	for _, dir := range []string{paths.DataDir, paths.CacheDir} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return err
+	var program *tea.Program
+	runtime, err := newRuntime(home, func(msg tea.Msg) {
+		if program != nil {
+			program.Send(msg)
 		}
-	}
-	ctx, stopProcesses := context.WithCancel(context.Background())
-	destination, err := openStore(ctx, paths.DBPath)
+	})
 	if err != nil {
-		stopProcesses()
-		return recoveryError(paths.DBPath, err)
+		return err
 	}
 	defer func() {
-		if closeErr := destination.Close(); runErr == nil {
+		if closeErr := runtime.Close(); runErr == nil {
 			runErr = closeErr
 		}
 	}()
-	defer stopProcesses()
-
-	runner := execx.NewRunner()
-	brew := homebrew.NewClient(runner)
-	var program *tea.Program
-	var repositoriesMu sync.RWMutex
-	repositories := make(map[string]gitrepo.Repository)
-	loadSources := func(loadCtx context.Context) ([]syncer.Source, error) {
-		prefix := ""
-		if result, prefixErr := runner.Run(loadCtx, "brew", "--prefix"); prefixErr == nil {
-			prefix = strings.TrimSpace(string(result.Stdout))
-		}
-		discovered, discoverErr := gitrepo.Discover(loadCtx, prefix, paths.CacheDir, runner)
-		if discoverErr != nil {
-			return nil, discoverErr
-		}
-		sources := make([]syncer.Source, 0, len(discovered))
-		for _, source := range discovered {
-			repository := gitrepo.New(source, runner)
-			repositoriesMu.Lock()
-			repositories[source.Name] = repository
-			repositoriesMu.Unlock()
-			sources = append(sources, repositorySource{source: source, repository: repository, indexer: history.NewIndexer(repository, destination)})
-		}
-		return sources, nil
-	}
-	coordinator := syncer.New(syncer.Dependencies{Installed: brew, Store: syncStore{destination}, LoadSources: loadSources,
-		InitialSince: time.Now().Add(-30 * 24 * time.Hour), Notify: func(msg tea.Msg) {
-			if program != nil {
-				switch event := msg.(type) {
-				case syncer.SyncStarted:
-					program.Send(tui.Notify{Text: "Synchronizing " + event.Source + "…"})
-				case syncer.SyncCommitted:
-					program.Send(tui.Notify{Text: fmt.Sprintf("%s synchronized · %d updates", event.Source, event.Result.Events)})
-				case syncer.SyncFailed:
-					program.Send(tui.Notify{Text: event.Source + " synchronization failed", Err: event.Err})
-				}
-				program.Send(msg)
-			}
-		}})
-	defer coordinator.Close()
-	resolver := changelog.NewResolver(destination, nil, changelog.WithGitHubTokenRunner(execx.NewRunner()))
-	loader := changelogLoader{cache: destination, resolver: resolver, repository: func(loadCtx context.Context, name string) (gitrepo.Repository, error) {
-		repositoriesMu.RLock()
-		repository, ok := repositories[name]
-		repositoriesMu.RUnlock()
-		if !ok {
-			if _, err := loadSources(loadCtx); err != nil {
-				return gitrepo.Repository{}, err
-			}
-			repositoriesMu.RLock()
-			repository, ok = repositories[name]
-			repositoriesMu.RUnlock()
-		}
-		if !ok {
-			return gitrepo.Repository{}, fmt.Errorf("repository %s is unavailable", name)
-		}
-		return repository, nil
-	}}
-	dependencies := tuiDependencies(destination, loader, ctx, func() tea.Msg { coordinator.Start(ctx); return nil }, brew,
+	dependencies := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg { runtime.coordinator.Start(runtime.ctx); return nil }, runtime.brew,
 		func(msg tea.Msg) {
 			if program != nil {
 				program.Send(msg)

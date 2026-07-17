@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"cicerone/internal/app"
 	"cicerone/internal/changelog"
 	"cicerone/internal/domain"
 	"cicerone/internal/execx"
@@ -24,6 +26,45 @@ import (
 type fakeInstalledClient struct {
 	packages []domain.InstalledPackage
 	err      error
+}
+
+type fakeRuntimeRunner struct{}
+
+func (fakeRuntimeRunner) Run(context.Context, string, ...string) (execx.Result, error) {
+	return execx.Result{}, nil
+}
+
+func (fakeRuntimeRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func TestRuntimeServicesWiresTUIDependenciesAndClosesIdempotently(t *testing.T) {
+	previousRunner := newExecRunner
+	previousPaths := runtimePaths
+	newExecRunner = func() execx.Runner { return fakeRuntimeRunner{} }
+	root := t.TempDir()
+	runtimePaths = func(string) app.Paths {
+		return app.Paths{DataDir: filepath.Join(root, "data"), CacheDir: filepath.Join(root, "cache"), DBPath: filepath.Join(root, "data", "runtime.db")}
+	}
+	t.Cleanup(func() { newExecRunner, runtimePaths = previousRunner, previousPaths })
+
+	runtime, err := newRuntime("ignored", func(tea.Msg) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.store == nil || runtime.coordinator == nil || runtime.brew == nil || runtime.changelogs.cache == nil || runtime.changelogs.resolver == nil || runtime.changelogs.repository == nil {
+		t.Fatalf("runtime services not fully wired: %#v", runtime)
+	}
+	deps := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg { return nil }, runtime.brew, func(tea.Msg) {})
+	if deps.Actions == nil || deps.Installed == nil || deps.Changelog == nil {
+		t.Fatalf("TUI dependencies not fully wired: %#v", deps)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatalf("second Close() = %v, want nil", err)
+	}
 }
 
 func (f fakeInstalledClient) Installed(context.Context) ([]domain.InstalledPackage, error) {
