@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"cicerone/internal/domain"
+	"cicerone/internal/store"
 	"cicerone/internal/syncer"
 )
 
@@ -41,6 +43,72 @@ type streamingPlainRuntime struct {
 type synchronizedBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
+}
+
+type realStorePlainRuntime struct {
+	store     *store.Store
+	stream    chan tea.Msg
+	published chan struct{}
+	release   chan struct{}
+	err       error
+}
+
+func (r *realStorePlainRuntime) Preferences(context.Context) (domain.FeedFilter, error) {
+	return domain.FeedFilter{}, nil
+}
+func (r *realStorePlainRuntime) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
+	return r.store.QueryFeed(ctx, filter)
+}
+func (r *realStorePlainRuntime) StartSync(ctx context.Context) {
+	go func() {
+		event := domain.UpdateEvent{ID: "durable-event", PackageID: "durable", Name: "durable", Type: domain.PackageFormula, Kind: domain.EventVersion, NewVersion: "2.0", Repository: "core", Commit: "commit", Time: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)}
+		r.err = r.store.UpsertEvents(ctx, []domain.UpdateEvent{event})
+		if r.err == nil {
+			r.stream <- syncer.SyncProgress{Source: "homebrew-core", Progress: syncer.Progress{Commits: 100, Events: 1, Batches: 1}}
+		}
+		close(r.published)
+	}()
+}
+func (r *realStorePlainRuntime) WaitSync()                                { <-r.release }
+func (r *realStorePlainRuntime) plainNotificationChannel() <-chan tea.Msg { return r.stream }
+func (r *realStorePlainRuntime) plainNotifications() []tea.Msg {
+	return []tea.Msg{syncer.SyncStarted{Source: "homebrew-core"}, syncer.SyncCommitted{Source: "homebrew-core", Result: syncer.Result{Events: 1}}}
+}
+
+func TestRunPlainRendersRealStoreBatchBeforeCompletion(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, filepath.Join(t.TempDir(), "plain.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = destination.Close() })
+	runtime := &realStorePlainRuntime{store: destination, stream: make(chan tea.Msg, 2), published: make(chan struct{}), release: make(chan struct{})}
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(ctx, runtime, &out) }()
+	<-runtime.published
+	if runtime.err != nil {
+		t.Fatal(runtime.err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(out.String(), "durable 2.0") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := out.String(); !strings.Contains(got, "100 commits scanned") || !strings.Contains(got, "durable 2.0 · version · 2026-07-16") {
+		t.Fatalf("real store output before completion=%q", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("completed before release: %v", err)
+	default:
+	}
+	close(runtime.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out.String(), "durable 2.0") != 1 {
+		t.Fatalf("duplicate output=%q", out.String())
+	}
 }
 
 func (b *synchronizedBuffer) Write(p []byte) (int, error) {

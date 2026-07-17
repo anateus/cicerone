@@ -71,21 +71,35 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 	runtime.StartSync(ctx)
 	var liveErrors []error
 	if source, ok := runtime.(plainNotificationStream); ok && source.plainNotificationChannel() != nil {
+		stream := source.plainNotificationChannel()
+		handleProgress := func(msg tea.Msg) {
+			event, ok := msg.(syncer.SyncProgress)
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(out, "%s · %d commits scanned · %d updates · %d batches\n", event.Source, event.Progress.Commits, event.Progress.Events, event.Progress.Batches); err != nil {
+				liveErrors = append(liveErrors, err)
+			}
+			if err := writePlainFeedSeen(ctx, runtime, out, "", seen); err != nil {
+				liveErrors = append(liveErrors, err)
+			}
+		}
 		done := make(chan struct{})
 		go func() { runtime.WaitSync(); close(done) }()
 		for running := true; running; {
 			select {
-			case msg := <-source.plainNotificationChannel():
-				if event, ok := msg.(syncer.SyncProgress); ok {
-					if _, err := fmt.Fprintf(out, "%s · %d commits scanned · %d updates · %d batches\n", event.Source, event.Progress.Commits, event.Progress.Events, event.Progress.Batches); err != nil {
-						liveErrors = append(liveErrors, err)
-					}
-					if err := writePlainFeedSeen(ctx, runtime, out, "", seen); err != nil {
-						liveErrors = append(liveErrors, err)
-					}
-				}
+			case msg := <-stream:
+				handleProgress(msg)
 			case <-done:
 				running = false
+			}
+		}
+		for draining := true; draining; {
+			select {
+			case msg := <-stream:
+				handleProgress(msg)
+			default:
+				draining = false
 			}
 		}
 	} else {
