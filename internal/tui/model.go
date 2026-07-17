@@ -26,6 +26,7 @@ type Dependencies struct {
 	Data      DataSource
 	Changelog ChangelogSource
 	Context   context.Context
+	OnReady   tea.Cmd
 }
 
 type pane uint8
@@ -54,6 +55,7 @@ type Model struct {
 	changelog                                      []store.ChangelogSection
 	feedViewport, inspectorViewport                viewport.Model
 	refreshAnchors                                 map[uint64]domain.Anchor
+	ready                                          bool
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -106,7 +108,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSelection()
 			m.syncViewports()
 		}
-		return m, m.debounceChangelog()
+		cmds := []tea.Cmd{m.debounceChangelog()}
+		if !m.ready {
+			m.ready = true
+			if m.deps.OnReady != nil {
+				cmds = append(cmds, m.deps.OnReady)
+			}
+		}
+		return m, tea.Batch(cmds...)
 	case DatasetChanged:
 		m.stale, m.loading = true, true
 		m.feedRequestID++

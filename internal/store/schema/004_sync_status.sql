@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS repositories (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL DEFAULT '',
+  head_commit TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS sync_runs (
+  id INTEGER PRIMARY KEY,
+  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  error TEXT NOT NULL DEFAULT ''
+);
+ALTER TABLE sync_runs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';
+ALTER TABLE sync_runs ADD COLUMN event_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_runs ADD COLUMN diagnostic_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_runs ADD COLUMN last_success_at INTEGER;

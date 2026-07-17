@@ -222,3 +222,24 @@ func TestNotifyRejectsStaleRequestID(t *testing.T) {
 		t.Fatalf("stale notification replaced current: %q", m.notification)
 	}
 }
+
+func TestReadyCommandStartsOnlyAfterCachedFeedLoads(t *testing.T) {
+	started := false
+	m := NewModel(Dependencies{OnReady: func() tea.Msg { started = true; return nil }})
+	if started {
+		t.Fatal("ready callback ran before cached feed")
+	}
+	_, cmd := m.Update(FeedLoaded{RequestID: 1})
+	if cmd == nil {
+		t.Fatal("cached feed did not schedule ready callback")
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, nested := range batch {
+			_ = nested()
+		}
+	}
+	if !started {
+		t.Fatal("ready callback was not run")
+	}
+}

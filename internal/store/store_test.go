@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateSQLiteVersion(t *testing.T) {
@@ -63,7 +65,7 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	assertPragma(t, store.db, "journal_mode", "wal")
 	assertPragma(t, store.db, "foreign_keys", "1")
 	assertPragma(t, store.db, "busy_timeout", "5000")
-	assertPragma(t, store.db, "user_version", "3")
+	assertPragma(t, store.db, "user_version", "4")
 
 	wantTables := []string{
 		"changelog_artifacts", "changelog_artifacts_fts", "changelog_attempts",
@@ -131,6 +133,36 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	}
 	if ftsMatches != 1 {
 		t.Fatalf("changelog FTS matches = %d, want 1", ftsMatches)
+	}
+}
+
+func TestSyncRunRetainsCountsCursorSuccessAndBoundedError(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	started := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	if err := s.SyncStarted(ctx, "core", started); err != nil {
+		t.Fatal(err)
+	}
+	longError := errors.New(strings.Repeat("x", 2000))
+	if err := s.SyncFinished(ctx, "core", started.Add(time.Minute), SyncResult{Cursor: "abc", Events: 4, Diagnostics: 2}, longError); err != nil {
+		t.Fatal(err)
+	}
+	status, ok, err := s.SyncStatus(ctx, "core")
+	if err != nil || !ok {
+		t.Fatalf("SyncStatus = %+v, %v, %v", status, ok, err)
+	}
+	if status.Cursor != "abc" || status.Events != 4 || status.Diagnostics != 2 || len(status.Error) != 1024 || !status.LastSuccess.IsZero() {
+		t.Fatalf("failure status = %+v", status)
+	}
+	if err := s.SyncStarted(ctx, "core", started.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncFinished(ctx, "core", started.Add(3*time.Minute), SyncResult{Cursor: "def", Events: 5}, nil); err != nil {
+		t.Fatal(err)
+	}
+	status, _, err = s.SyncStatus(ctx, "core")
+	if err != nil || status.Cursor != "def" || status.Events != 5 || !status.LastSuccess.Equal(started.Add(3*time.Minute)) || status.Error != "" {
+		t.Fatalf("success status = %+v, %v", status, err)
 	}
 }
 
