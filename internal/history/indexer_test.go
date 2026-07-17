@@ -178,6 +178,51 @@ func TestIndexerPersistsRenameAlias(t *testing.T) {
 	}
 }
 
+func TestIndexerReconcilesRewrittenHistoryWithoutTouchingUnaffectedEvents(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	base := repo.Commit("Formula/foo.rb", formula("1"), "base", now.Add(-3*time.Hour))
+	abandoned := repo.Commit("Formula/foo.rb", formula("2"), "abandoned", now.Add(-2*time.Hour))
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	idx := NewIndexer(gitrepo.New(source, execx.NewRunner()), s)
+	req := Request{Since: now.Add(-24 * time.Hour)}
+	if _, err := idx.Index(ctx, source, req); err != nil {
+		t.Fatal(err)
+	}
+	other := domain.UpdateEvent{ID: "other:e", PackageID: "other", Name: "other", Type: domain.PackageFormula, Kind: domain.EventVersion, Repository: "other", Commit: "same-name", Time: now.Add(-time.Hour)}
+	if err := s.ApplyHistory(ctx, store.HistoryBatch{Repository: "other", Head: "same-name", Events: []domain.UpdateEvent{other}}); err != nil {
+		t.Fatal(err)
+	}
+	repo.Run("-C", repo.Path, "reset", "--hard", base)
+	replacement := repo.Commit("Formula/foo.rb", formula("3"), "replacement", now.Add(-time.Hour))
+	result, err := idx.Index(ctx, source, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Events != 1 || result.Head != replacement {
+		t.Fatalf("result=%#v", result)
+	}
+	groups, err := s.QueryFeed(ctx, domain.FeedFilter{Now: now, Horizon: 48 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commits := map[string]bool{}
+	for _, g := range groups {
+		for _, event := range g.Events {
+			commits[event.Repository+":"+event.Commit] = true
+		}
+	}
+	if !commits["core:"+base] || !commits["core:"+replacement] || commits["core:"+abandoned] || !commits["other:same-name"] {
+		t.Fatalf("reconciled commits=%v", commits)
+	}
+}
+
 func formula(version string) string {
 	return "class Foo < Formula\n  homepage \"https://example.test\"\n  url \"https://example.test/foo-" + version + ".tgz\"\n  version \"" + version + "\"\nend\n"
 }

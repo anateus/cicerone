@@ -53,3 +53,22 @@ func TestParseDefinitionDiagnosesUnsupportedVersionForms(t *testing.T) {
 		}
 	}
 }
+
+func TestParseDefinitionDoesNotInferOverExplicitUnsupportedVersion(t *testing.T) {
+	for _, body := range []string{
+		"class Foo < Formula\n  url \"https://example.test/foo-1.2.3.tgz\"\n  version ENV.fetch(\"VERSION\")\nend\n",
+		"class Foo < Formula\n  head \"https://example.test/foo.git\"\n  version :unknown\nend\n",
+	} {
+		got, diagnostics := ParseDefinition("Formula/foo.rb", []byte(body))
+		if got.Version != "" || len(diagnostics) == 0 {
+			t.Fatalf("definition=%#v diagnostics=%v", got, diagnostics)
+		}
+	}
+}
+
+func TestParseDefinitionRequiresMatchingQuoteDelimiters(t *testing.T) {
+	got, diagnostics := ParseDefinition("Casks/foo.rb", []byte("cask \"foo\" do\n  version \"1.2.3'\nend\n"))
+	if got.Version != "" || len(diagnostics) == 0 {
+		t.Fatalf("definition=%#v diagnostics=%v", got, diagnostics)
+	}
+}

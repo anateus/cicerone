@@ -17,12 +17,12 @@ type Definition struct {
 
 var (
 	quotedToken = func(name string) *regexp.Regexp {
-		return regexp.MustCompile(`(?m)^\s*` + name + `\s+(["'])([^"']*)["']\s*(?:#.*)?$`)
+		return regexp.MustCompile(`(?m)^\s*` + name + `\s+(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$`)
 	}
 	revisionToken      = regexp.MustCompile(`(?m)^\s*revision\s+(\d+)\s*(?:#.*)?$`)
-	caskNameToken      = regexp.MustCompile(`(?m)^\s*cask\s+(["'])([^"']+)["']\s+do\s*(?:#.*)?$`)
+	caskNameToken      = regexp.MustCompile(`(?m)^\s*cask\s+(?:"([^"]+)"|'([^']+)')\s+do\s*(?:#.*)?$`)
 	latestToken        = regexp.MustCompile(`(?m)^\s*version\s+:latest\s*(?:#.*)?$`)
-	headToken          = regexp.MustCompile(`(?m)^\s*head\s+(["'])([^"']+)["'](?:\s*,.*)?$`)
+	headToken          = regexp.MustCompile(`(?m)^\s*head\s+(?:"([^"]+)"|'([^']+)')(?:\s*,.*)?$`)
 	unsupportedVersion = regexp.MustCompile(`(?m)^\s*version\s+[^"':\s].*$`)
 	versionLine        = regexp.MustCompile(`(?m)^\s*version\s+(.+?)\s*(?:#.*)?$`)
 	urlVersion         = regexp.MustCompile(`(?i)(?:^|[-_/])v?(\d+(?:\.\d+)+(?:[-._][0-9A-Za-z]+)?)`)
@@ -38,8 +38,8 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 	d := &Definition{Name: name, FullName: name, Type: typ}
 	text := string(content)
 	if m := caskNameToken.FindStringSubmatch(text); len(m) > 0 {
-		d.Name = m[2]
-		d.FullName = m[2]
+		d.Name = firstNonempty(m[1], m[2])
+		d.FullName = d.Name
 		d.Type = domain.PackageCask
 	}
 	d.Homepage = quotedValue(quotedToken("homepage"), text)
@@ -48,7 +48,8 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 	if strings.Contains(d.Version, "#{") {
 		d.Version = ""
 	}
-	if d.Version == "" && d.Type == domain.PackageFormula {
+	hasExplicitVersion := versionLine.MatchString(text)
+	if d.Version == "" && !hasExplicitVersion && d.Type == domain.PackageFormula {
 		if m := urlVersion.FindStringSubmatch(d.URL); len(m) > 0 {
 			d.Version = m[1]
 		}
@@ -56,7 +57,7 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 	if d.Version == "" && latestToken.MatchString(text) {
 		d.Version = "latest"
 	}
-	if d.Version == "" && headToken.MatchString(text) {
+	if d.Version == "" && !hasExplicitVersion && headToken.MatchString(text) {
 		d.Version = "HEAD"
 	}
 	if m := revisionToken.FindStringSubmatch(text); len(m) > 0 {
@@ -71,7 +72,15 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 
 func quotedValue(re *regexp.Regexp, text string) string {
 	if m := re.FindStringSubmatch(text); len(m) > 0 {
-		return m[2]
+		return firstNonempty(m[1], m[2])
+	}
+	return ""
+}
+func firstNonempty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
 	}
 	return ""
 }

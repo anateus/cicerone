@@ -55,6 +55,10 @@ func TestHistoryDiagnosticsPersistWithoutEventsAndRollbackAtomically(t *testing.
 	if err != nil || len(got) != 1 {
 		t.Fatalf("diagnostics=%#v err=%v", got, err)
 	}
+	state, ok, err := s.HistoryState(ctx, "core")
+	if err != nil || !ok || state.Head != "c1" || !state.Since.IsZero() {
+		t.Fatalf("atomic state=%#v ok=%v err=%v", state, ok, err)
+	}
 }
 
 func TestRewriteRemovesOnlyAffectedSourceAliasAndDiagnostic(t *testing.T) {
