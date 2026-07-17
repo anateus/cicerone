@@ -1,11 +1,70 @@
 package store
 
 import (
-	"cicerone/internal/domain"
 	"context"
 	"testing"
 	"time"
+
+	"cicerone/internal/domain"
 )
+
+func TestApplyHistoryBatchPublishesRowsBeforeFinalize(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	event := domain.UpdateEvent{ID: "new-event", PackageID: "new", Name: "new", Type: domain.PackageFormula, Kind: domain.EventVersion, Repository: "core", Commit: "new", Time: time.Unix(20, 0)}
+	batch := HistoryBatch{Repository: "core", Path: "/repo", Head: "new", Since: time.Unix(1, 0).UTC(), Events: []domain.UpdateEvent{event}, Aliases: []HistoryAlias{{Alias: "old-name", PackageID: "new", Commit: "new"}}, Diagnostics: []HistoryDiagnostic{{Commit: "new", Message: "note"}}}
+	if err := s.ApplyHistoryBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.QueryFeed(ctx, domain.FeedFilter{})
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("groups=%#v err=%v", groups, err)
+	}
+	if got, err := s.ResolveHistoryPackageID(ctx, "core", "old-name"); err != nil || got != "new" {
+		t.Fatalf("alias=%q err=%v", got, err)
+	}
+	if diagnostics, err := s.HistoryDiagnostics(ctx, "core"); err != nil || len(diagnostics) != 1 {
+		t.Fatalf("diagnostics=%#v err=%v", diagnostics, err)
+	}
+	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || ok {
+		t.Fatalf("state=%#v ok=%v err=%v", state, ok, err)
+	}
+	if err := s.FinalizeHistory(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || !ok || state.Head != "new" {
+		t.Fatalf("final state=%#v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestFinalizeHistoryDefersRewriteDeletion(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	old := domain.UpdateEvent{ID: "old-event", PackageID: "pkg", Name: "pkg", Type: domain.PackageFormula, Kind: domain.EventVersion, Repository: "core", Commit: "old", Time: time.Unix(10, 0)}
+	if err := s.ApplyHistory(ctx, HistoryBatch{Repository: "core", Head: "old", Events: []domain.UpdateEvent{old}, Aliases: []HistoryAlias{{Alias: "old-name", PackageID: "pkg", Commit: "old"}}, Diagnostics: []HistoryDiagnostic{{Commit: "old", Message: "old"}}}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := old
+	replacement.ID, replacement.Commit, replacement.Time = "new-event", "new", time.Unix(20, 0)
+	batch := HistoryBatch{Repository: "core", Head: "new", Events: []domain.UpdateEvent{replacement}, RemoveCommits: []string{"old"}}
+	if err := s.ApplyHistoryBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	groups, _ := s.QueryFeed(ctx, domain.FeedFilter{})
+	if len(groups) != 2 {
+		t.Fatalf("before finalize groups=%#v", groups)
+	}
+	if err := s.FinalizeHistory(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	groups, _ = s.QueryFeed(ctx, domain.FeedFilter{})
+	if len(groups) != 1 || groups[0].Events[0].ID != "new-event" {
+		t.Fatalf("after finalize groups=%#v", groups)
+	}
+	if got, _ := s.ResolveHistoryPackageID(ctx, "core", "old-name"); got != "old-name" {
+		t.Fatalf("old alias survived as %q", got)
+	}
+}
 
 func TestHistoryCoverageAndAliasesAreRepositoryScoped(t *testing.T) {
 	ctx := context.Background()
