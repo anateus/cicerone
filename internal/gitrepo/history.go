@@ -1,9 +1,12 @@
 package gitrepo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -36,11 +39,20 @@ func (r Repository) MergeBase(ctx context.Context, a, b string) (string, error) 
 }
 
 func (r Repository) Commits(ctx context.Context, requested Range) ([]Commit, error) {
+	var commits []Commit
+	err := r.WalkCommits(ctx, requested, func(commit Commit) error {
+		commits = append(commits, commit)
+		return nil
+	})
+	return commits, err
+}
+
+func commitArgs(path string, requested Range) []string {
 	revision := requested.Revision
 	if revision == "" {
 		revision = "HEAD"
 	}
-	args := []string{"-C", r.source.Path, "log", "--format=%H%x00%aI%x00%s%x00", "--name-status", "-z", "-M"}
+	args := []string{"-C", path, "log", "--format=%H%x00%aI%x00%s%x00", "--name-status", "-z", "-M"}
 	if !requested.Since.IsZero() {
 		args = append(args, "--since="+requested.Since.Format(time.RFC3339Nano))
 	}
@@ -48,15 +60,93 @@ func (r Repository) Commits(ctx context.Context, requested Range) ([]Commit, err
 		args = append(args, "--until="+requested.Until.Format(time.RFC3339Nano))
 	}
 	args = append(args, revision, "--")
-	result, err := r.runner.Run(ctx, "git", args...)
-	if err != nil {
-		return nil, fmt.Errorf("read commits: %w", err)
+	return args
+}
+
+func (r Repository) WalkCommits(ctx context.Context, requested Range, yield func(Commit) error) (err error) {
+	if yield == nil {
+		return errors.New("commit callback is nil")
 	}
-	commits, err := parseCommits(result.Stdout)
+	stream, err := r.runner.Stream(ctx, "git", commitArgs(r.source.Path, requested)...)
 	if err != nil {
-		return nil, fmt.Errorf("parse commits: %w", err)
+		return fmt.Errorf("read commits: %w", err)
 	}
-	return commits, nil
+	defer func() { err = errors.Join(err, stream.Close()) }()
+	reader := bufio.NewReader(stream)
+	next := func() (string, error) {
+		for {
+			token, readErr := reader.ReadString(0)
+			token = strings.TrimSuffix(token, "\x00")
+			if token != "" {
+				return token, readErr
+			}
+			if readErr != nil {
+				return "", readErr
+			}
+		}
+	}
+	readHeader := func(hash string) (Commit, error) {
+		encodedTime, readErr := next()
+		if readErr != nil {
+			return Commit{}, fmt.Errorf("malformed header")
+		}
+		authorTime, parseErr := time.Parse(time.RFC3339, encodedTime)
+		if parseErr != nil {
+			return Commit{}, fmt.Errorf("author time: %w", parseErr)
+		}
+		subject, readErr := next()
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return Commit{}, readErr
+		}
+		return Commit{Hash: hash, AuthorTime: authorTime, Subject: subject}, nil
+	}
+	hash, readErr := next()
+	if errors.Is(readErr, io.EOF) && hash == "" {
+		return nil
+	}
+	hash = strings.TrimPrefix(hash, "\n")
+	if !isObjectID(hash) {
+		return fmt.Errorf("parse commits: malformed header")
+	}
+	commit, err := readHeader(hash)
+	if err != nil {
+		return fmt.Errorf("parse commits: %w", err)
+	}
+	for {
+		token, tokenErr := next()
+		if errors.Is(tokenErr, io.EOF) && token == "" {
+			return yield(commit)
+		}
+		token = strings.TrimPrefix(token, "\n")
+		if isObjectID(token) {
+			if err := yield(commit); err != nil {
+				return err
+			}
+			commit, err = readHeader(token)
+			if err != nil {
+				return fmt.Errorf("parse commits: %w", err)
+			}
+			continue
+		}
+		if token == "" {
+			return fmt.Errorf("parse commits: empty change status")
+		}
+		path, pathErr := next()
+		if path == "" || (pathErr != nil && !errors.Is(pathErr, io.EOF)) {
+			return fmt.Errorf("parse commits: missing path for %s", token)
+		}
+		change := Change{Status: token[:1]}
+		if change.Status == "R" || change.Status == "C" {
+			newPath, newPathErr := next()
+			if newPath == "" || (newPathErr != nil && !errors.Is(newPathErr, io.EOF)) {
+				return fmt.Errorf("parse commits: missing rename path")
+			}
+			change.OldPath, change.Path = path, newPath
+		} else {
+			change.Path = path
+		}
+		commit.Changes = append(commit.Changes, change)
+	}
 }
 
 func (r Repository) Blob(ctx context.Context, revision, path string) ([]byte, error) {

@@ -2,6 +2,7 @@ package gitrepo_test
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,50 @@ import (
 	"cicerone/internal/gitrepo"
 	"cicerone/internal/testutil"
 )
+
+type pipeRunner struct{ reader io.ReadCloser }
+
+func (r *pipeRunner) Run(context.Context, string, ...string) (execx.Result, error) {
+	return execx.Result{}, nil
+}
+func (r *pipeRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
+	return r.reader, nil
+}
+
+func TestWalkCommitsYieldsBeforeEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	repository := gitrepo.New(gitrepo.Source{Path: "/repo"}, &pipeRunner{reader: reader})
+	yielded := make(chan gitrepo.Commit, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- repository.WalkCommits(context.Background(), gitrepo.Range{Revision: "HEAD"}, func(commit gitrepo.Commit) error {
+			yielded <- commit
+			return nil
+		})
+	}()
+	firstHash := strings.Repeat("1", 40)
+	secondHash := strings.Repeat("2", 40)
+	firstTime := "2026-01-01T00:00:00Z"
+	secondTime := "2026-01-02T00:00:00Z"
+	_, _ = writer.Write([]byte(firstHash + "\x00" + firstTime + "\x00first\x00\nM\x00Formula/a.rb\x00\n" + secondHash + "\x00" + secondTime + "\x00second\x00"))
+	select {
+	case got := <-yielded:
+		if got.Hash != firstHash || got.Subject != "first" || len(got.Changes) != 1 || got.Changes[0] != (gitrepo.Change{Status: "M", Path: "Formula/a.rb"}) {
+			t.Fatalf("first commit = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first commit was not yielded before EOF")
+	}
+	_, _ = writer.Write([]byte("\nR100\x00Formula/old.rb\x00Formula/new.rb\x00"))
+	_ = writer.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got := <-yielded
+	if got.Hash != secondHash || len(got.Changes) != 1 || got.Changes[0] != (gitrepo.Change{Status: "R", OldPath: "Formula/old.rb", Path: "Formula/new.rb"}) {
+		t.Fatalf("second commit = %#v", got)
+	}
+}
 
 func TestOwnedMirrorLifecycleAndLocalFetchGuard(t *testing.T) {
 	runner := &testutil.Runner{}
