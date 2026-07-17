@@ -305,7 +305,7 @@ func shellQuote(value string) string {
 
 const helpText = `Cicerone — a cached Homebrew update feed
 
-Usage: cicerone [--help]
+Usage: cicerone [--help] [--plain]
 
 Keys: h/j/k/l or arrows navigate · enter opens details · space expands · a installs/upgrades · q/esc quit
 
@@ -319,6 +319,9 @@ func execute(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, _ = io.WriteString(stdout, helpText)
 		return 0
+	}
+	if len(args) == 1 && args[0] == "--plain" {
+		return executePlain(stdout, stderr)
 	}
 	if len(args) != 0 {
 		fmt.Fprintf(stderr, "unknown argument %q\n\n%s", args[0], helpText)

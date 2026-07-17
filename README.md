@@ -23,6 +23,11 @@ If `/usr/local/bin` is not writable, choose a user-owned directory already liste
 
 Run `./cicerone --help` without opening the TUI. Cicerone's MVP is macOS-only; Linuxbrew support is deferred.
 
+Run `./cicerone --plain` for a one-shot plaintext feed. It prints cached rows,
+performs real read-only Homebrew metadata synchronization, prints refreshed
+rows, and exits. This may update Cicerone's database and Cicerone-owned Git
+caches, but it never installs, upgrades, or uninstalls Homebrew packages.
+
 ## Keys
 
 | Key | Action |
