@@ -1,11 +1,19 @@
 package homebrew
 
-import "cicerone/internal/execx"
+import (
+	"context"
+	"os/exec"
+
+	"cicerone/internal/execx"
+)
 
 type Client struct {
-	runner execx.Runner
+	runner         execx.Runner
+	commandContext func(context.Context, string, ...string) *exec.Cmd
 }
 
 func NewClient(runner execx.Runner) *Client {
-	return &Client{runner: runner}
+	return &Client{runner: runner, commandContext: func(_ context.Context, name string, args ...string) *exec.Cmd {
+		return exec.Command(name, args...)
+	}}
 }

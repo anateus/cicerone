@@ -47,6 +47,9 @@ func (m Model) render() string {
 		inspector := viewportContent(m.inspectorViewport, m.renderInspector(right), right, h-statusHeight, 0)
 		body = joinColumns(feed, inspector, left, right)
 	}
+	if modal := m.renderActionModal(); modal != "" {
+		body = modal + "\n" + body
+	}
 	lines := strings.Split(body, "\n")
 	maxBody := h - statusHeight
 	if len(lines) > maxBody {

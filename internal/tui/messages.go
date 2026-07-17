@@ -2,6 +2,7 @@ package tui
 
 import (
 	"cicerone/internal/domain"
+	"cicerone/internal/homebrew"
 	"cicerone/internal/store"
 )
 
@@ -42,3 +43,13 @@ type ToggleRollUp struct{}
 type ToggleExpanded struct{}
 type SearchChanged struct{ Text string }
 type SetLightMode struct{ Light bool }
+
+type ActionRequested struct{ Action homebrew.Action }
+type ActionConfirmed struct{}
+type ActionOutput struct{ Output string }
+type ActionFinished struct {
+	Action homebrew.Action
+	Output string
+	Err    error
+}
+type installedRefreshed struct{ Err error }

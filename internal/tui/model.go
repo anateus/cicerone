@@ -2,11 +2,13 @@ package tui
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"cicerone/internal/domain"
+	"cicerone/internal/homebrew"
 	"cicerone/internal/store"
 )
 
@@ -22,11 +24,17 @@ type ChangelogSource interface {
 	LoadChangelog(context.Context, domain.PackageID, domain.EventID) ([]store.ChangelogSection, error)
 }
 
+type ActionRunner interface {
+	RunAction(context.Context, homebrew.Action, io.Writer) error
+}
+
 type Dependencies struct {
 	Data      DataSource
 	Changelog ChangelogSource
 	Context   context.Context
 	OnReady   tea.Cmd
+	Actions   ActionRunner
+	Send      func(tea.Msg)
 }
 
 type pane uint8
@@ -56,6 +64,11 @@ type Model struct {
 	feedViewport, inspectorViewport                viewport.Model
 	refreshAnchors                                 map[uint64]domain.Anchor
 	ready                                          bool
+	pendingAction                                  *homebrew.Action
+	actionResult                                   *homebrew.Action
+	actionRunning                                  bool
+	actionOutput                                   string
+	actionAnchor                                   domain.Anchor
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -181,6 +194,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SetLightMode:
 		m.light = msg.Light
 		m.syncViewports()
+	case ActionRequested:
+		if m.actionRunning || m.pendingAction != nil || m.actionResult != nil {
+			return m, nil
+		}
+		action := msg.Action
+		m.pendingAction = &action
+		m.actionAnchor = m.anchor()
+	case ActionConfirmed:
+		if m.pendingAction == nil || m.actionRunning {
+			return m, nil
+		}
+		action := *m.pendingAction
+		m.pendingAction, m.actionRunning, m.actionOutput = nil, true, ""
+		return m, m.runAction(action)
+	case ActionOutput:
+		if m.actionRunning {
+			m.actionOutput = msg.Output
+		}
+	case ActionFinished:
+		if !m.actionRunning {
+			return m, nil
+		}
+		m.actionRunning, m.actionOutput = false, msg.Output
+		if msg.Err != nil {
+			m.err, m.actionResult = msg.Err, &msg.Action
+			m.notification = "Error: " + msg.Err.Error()
+			return m, nil
+		}
+		m.actionOutput, m.actionResult = "", nil
+		return m, m.refreshInstalled()
+	case installedRefreshed:
+		if msg.Err != nil {
+			m.err = msg.Err
+			return m, nil
+		}
+		m.stale, m.loading = true, true
+		m.feedRequestID++
+		m.refreshAnchors[m.feedRequestID] = m.actionAnchor
+		return m, m.queryFeed(m.feedRequestID)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -190,6 +242,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View { return tea.NewView(m.render()) }
 
 func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.pendingAction != nil {
+		switch key.String() {
+		case "y", "enter":
+			return m.Update(ActionConfirmed{})
+		case "n", "esc":
+			m.pendingAction = nil
+		}
+		return m, nil
+	}
+	if m.actionResult != nil {
+		if key.String() == "esc" {
+			m.actionResult, m.actionOutput = nil, ""
+		}
+		return m, nil
+	}
+	if m.actionRunning {
+		return m, nil
+	}
 	switch key.String() {
 	case "j", "down":
 		if m.selected+1 < len(m.groups) {
