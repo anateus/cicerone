@@ -11,6 +11,16 @@ go build -trimpath ./cmd/cicerone
 ./cicerone
 ```
 
+Install the binary on your `PATH` with either:
+
+```sh
+go install ./cmd/cicerone
+# or, after the build above:
+install -m 0755 ./cicerone /usr/local/bin/cicerone
+```
+
+If `/usr/local/bin` is not writable, choose a user-owned directory already listed in `PATH` (for example `~/bin`).
+
 Run `./cicerone --help` without opening the TUI. Cicerone's MVP is macOS-only; Linuxbrew support is deferred.
 
 ## Keys

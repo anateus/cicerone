@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"cicerone/internal/app"
+	"cicerone/internal/changelog"
 	"cicerone/internal/domain"
 	"cicerone/internal/execx"
 	"cicerone/internal/gitrepo"
@@ -24,6 +27,8 @@ import (
 type syncStore struct{ *store.Store }
 
 var openStore = openStorePreservingFailures
+var renameFile = os.Rename
+var storeOpen = store.Open
 
 type installedReader interface {
 	Installed(context.Context) ([]domain.InstalledPackage, error)
@@ -36,6 +41,64 @@ type installedWriter interface {
 type installedRefresher struct {
 	client installedReader
 	store  installedWriter
+}
+
+type changelogResolver interface {
+	Resolve(context.Context, changelog.PackageRef, string) (changelog.Section, error)
+}
+
+type changelogCache interface {
+	LoadChangelog(context.Context, domain.PackageID, domain.EventID) ([]store.ChangelogSection, error)
+	ChangelogTarget(context.Context, domain.PackageID, domain.EventID) (store.ChangelogTarget, error)
+}
+
+type changelogLoader struct {
+	cache      changelogCache
+	resolver   changelogResolver
+	repository func(context.Context, string) (gitrepo.Repository, error)
+}
+
+func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]store.ChangelogSection, error) {
+	cached, err := l.cache.LoadChangelog(ctx, packageID, eventID)
+	if err != nil || len(cached) > 0 {
+		return cached, err
+	}
+	target, err := l.cache.ChangelogTarget(ctx, packageID, eventID)
+	if err != nil {
+		return nil, err
+	}
+	repository, err := l.repository(ctx, target.Repository)
+	if err != nil {
+		return nil, err
+	}
+	body, err := repository.Blob(ctx, target.Commit, target.DefinitionPath)
+	if err != nil {
+		return nil, err
+	}
+	definition, _ := history.ParseDefinition(target.DefinitionPath, body)
+	if definition == nil {
+		return nil, fmt.Errorf("parse changelog metadata for %s", target.Name)
+	}
+	repositoryURL := githubRepositoryURL(definition.Homepage, definition.URL)
+	section, err := l.resolver.Resolve(ctx, changelog.PackageRef{Name: target.Name, FullName: string(target.PackageID), Homepage: definition.Homepage, RepositoryURL: repositoryURL, Type: target.Type}, target.Version)
+	if err != nil {
+		return nil, err
+	}
+	return []store.ChangelogSection{{ArtifactID: section.ArtifactID, Version: section.Version, Body: section.Body, Confidence: section.Confidence, SourceURL: section.SourceURL}}, nil
+}
+
+func githubRepositoryURL(values ...string) string {
+	for _, value := range values {
+		parsed, err := url.Parse(value)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
+			continue
+		}
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return "https://github.com/" + parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
+		}
+	}
+	return ""
 }
 
 func (r installedRefresher) RefreshInstalled(ctx context.Context) error {
@@ -98,6 +161,8 @@ func run() (runErr error) {
 	runner := execx.NewRunner()
 	brew := homebrew.NewClient(runner)
 	var program *tea.Program
+	var repositoriesMu sync.RWMutex
+	repositories := make(map[string]gitrepo.Repository)
 	loadSources := func(loadCtx context.Context) ([]syncer.Source, error) {
 		prefix := ""
 		if result, prefixErr := runner.Run(loadCtx, "brew", "--prefix"); prefixErr == nil {
@@ -110,6 +175,9 @@ func run() (runErr error) {
 		sources := make([]syncer.Source, 0, len(discovered))
 		for _, source := range discovered {
 			repository := gitrepo.New(source, runner)
+			repositoriesMu.Lock()
+			repositories[source.Name] = repository
+			repositoriesMu.Unlock()
 			sources = append(sources, repositorySource{source: source, repository: repository, indexer: history.NewIndexer(repository, destination)})
 		}
 		return sources, nil
@@ -129,7 +197,25 @@ func run() (runErr error) {
 			}
 		}})
 	defer coordinator.Close()
-	dependencies := tuiDependencies(destination, ctx, func() tea.Msg { coordinator.Start(ctx); return nil }, brew,
+	resolver := changelog.NewResolver(destination, nil)
+	loader := changelogLoader{cache: destination, resolver: resolver, repository: func(loadCtx context.Context, name string) (gitrepo.Repository, error) {
+		repositoriesMu.RLock()
+		repository, ok := repositories[name]
+		repositoriesMu.RUnlock()
+		if !ok {
+			if _, err := loadSources(loadCtx); err != nil {
+				return gitrepo.Repository{}, err
+			}
+			repositoriesMu.RLock()
+			repository, ok = repositories[name]
+			repositoriesMu.RUnlock()
+		}
+		if !ok {
+			return gitrepo.Repository{}, fmt.Errorf("repository %s is unavailable", name)
+		}
+		return repository, nil
+	}}
+	dependencies := tuiDependencies(destination, loader, ctx, func() tea.Msg { coordinator.Start(ctx); return nil }, brew,
 		func(msg tea.Msg) {
 			if program != nil {
 				program.Send(msg)
@@ -141,9 +227,9 @@ func run() (runErr error) {
 	return runErr
 }
 
-func tuiDependencies(destination *store.Store, ctx context.Context, onReady tea.Cmd, brew *homebrew.Client, send func(tea.Msg)) tui.Dependencies {
+func tuiDependencies(destination *store.Store, changelogs tui.ChangelogSource, ctx context.Context, onReady tea.Cmd, brew *homebrew.Client, send func(tea.Msg)) tui.Dependencies {
 	return tui.Dependencies{
-		Data: destination, Changelog: destination, Context: ctx, OnReady: onReady,
+		Data: destination, Changelog: changelogs, Context: ctx, OnReady: onReady,
 		Actions: brew, Installed: installedRefresher{client: brew, store: destination}, Send: send,
 	}
 }
@@ -155,7 +241,7 @@ func openStorePreservingFailures(ctx context.Context, path string) (*store.Store
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return store.Open(ctx, path)
+			return storeOpen(ctx, path)
 		}
 		return nil, err
 	}
@@ -168,8 +254,11 @@ func openStorePreservingFailures(ctx context.Context, path string) (*store.Store
 	}
 	temporaryPath := temporary.Name()
 	_ = temporary.Close()
+	promoted := false
 	cleanup := func() {
-		_ = os.Remove(temporaryPath)
+		if !promoted {
+			_ = os.Remove(temporaryPath)
+		}
 		_ = os.Remove(temporaryPath + "-wal")
 		_ = os.Remove(temporaryPath + "-shm")
 	}
@@ -186,14 +275,51 @@ func openStorePreservingFailures(ctx context.Context, path string) (*store.Store
 			return nil, sidecarErr
 		}
 	}
-	checked, err := store.Open(ctx, temporaryPath)
+	checked, err := storeOpen(ctx, temporaryPath)
 	if err != nil {
 		return nil, err
 	}
 	if err := checked.Close(); err != nil {
 		return nil, err
 	}
-	return store.Open(ctx, path)
+	backupPath := temporaryPath + ".original"
+	if err := copyFile(path, backupPath, info.Mode().Perm()); err != nil {
+		return nil, err
+	}
+	defer os.Remove(backupPath)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if sidecar, sidecarErr := os.Stat(path + suffix); sidecarErr == nil {
+			if err := copyFile(path+suffix, backupPath+suffix, sidecar.Mode().Perm()); err != nil {
+				return nil, err
+			}
+			defer os.Remove(backupPath + suffix)
+		}
+	}
+	if err := renameFile(temporaryPath, path); err != nil {
+		return nil, fmt.Errorf("promote migrated database: %w", err)
+	}
+	promoted = true
+	// The promoted database was cleanly closed and contains any committed WAL
+	// content from the copied snapshot. Old sidecars belong to the replaced inode.
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
+	opened, err := storeOpen(ctx, path)
+	if err == nil {
+		return opened, nil
+	}
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
+	if restoreErr := renameFile(backupPath, path); restoreErr != nil {
+		return nil, fmt.Errorf("open promoted database: %v; restore original: %w", err, restoreErr)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, sidecarErr := os.Stat(backupPath + suffix); sidecarErr == nil {
+			if restoreErr := renameFile(backupPath+suffix, path+suffix); restoreErr != nil {
+				return nil, fmt.Errorf("open promoted database: %v; restore original %s: %w", err, suffix, restoreErr)
+			}
+		}
+	}
+	return nil, err
 }
 
 func copyFile(source, destination string, mode os.FileMode) error {

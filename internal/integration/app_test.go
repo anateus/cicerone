@@ -35,6 +35,18 @@ type fixtureRunner struct {
 	calls     int
 }
 
+type denyingRunner struct{ calls atomic.Int32 }
+
+func (r *denyingRunner) Run(context.Context, string, ...string) (execx.Result, error) {
+	r.calls.Add(1)
+	return execx.Result{}, os.ErrNotExist
+}
+
+func (r *denyingRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
+	r.calls.Add(1)
+	return nil, os.ErrNotExist
+}
+
 type publicResolver struct{}
 
 func (publicResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
@@ -181,9 +193,10 @@ func TestCachedRestartNeedsNoHTTPOrGitAndReturnsSameFeed(t *testing.T) {
 	if !reflect.DeepEqual(gotFeed, wantFeed) {
 		t.Fatalf("offline feed changed:\ngot  %#v\nwant %#v", gotFeed, wantFeed)
 	}
-	var gitDiscoveryCalls atomic.Int32
+	offlineGit := &denyingRunner{}
+	offlineCache := t.TempDir()
 	coordinator := syncer.New(syncer.Dependencies{LoadSources: func(context.Context) ([]syncer.Source, error) {
-		gitDiscoveryCalls.Add(1)
+		_, _ = gitrepo.Discover(ctx, "", offlineCache, offlineGit)
 		return nil, nil
 	}})
 	defer coordinator.Close()
@@ -195,7 +208,7 @@ func TestCachedRestartNeedsNoHTTPOrGitAndReturnsSameFeed(t *testing.T) {
 	if !strings.Contains(updated.View().Content, "fixture") {
 		t.Fatalf("cached feed was not rendered before background start:\n%s", updated.View().Content)
 	}
-	if calls := gitDiscoveryCalls.Load(); calls != 0 {
+	if calls := offlineGit.calls.Load(); calls != 0 {
 		t.Fatalf("cached restart made %d Git discovery calls before rendering", calls)
 	}
 	if batch, ok := readyCmd().(tea.BatchMsg); ok {
@@ -204,10 +217,10 @@ func TestCachedRestartNeedsNoHTTPOrGitAndReturnsSameFeed(t *testing.T) {
 		}
 	}
 	deadline := time.Now().Add(time.Second)
-	for gitDiscoveryCalls.Load() == 0 && time.Now().Before(deadline) {
+	for offlineGit.calls.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if gitDiscoveryCalls.Load() == 0 {
+	if offlineGit.calls.Load() == 0 {
 		t.Fatal("background coordinator did not start after cached feed render")
 	}
 	offlineResolver := changelog.NewResolver(restarted, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

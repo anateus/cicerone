@@ -23,6 +23,22 @@ type ChangelogSection struct {
 	SourceURL                 string
 }
 
+type ChangelogTarget struct {
+	PackageID                                 domain.PackageID
+	EventID                                   domain.EventID
+	Name, Version, Repository, DefinitionPath string
+	Type                                      domain.PackageType
+	Commit                                    string
+}
+
+func (s *Store) ChangelogTarget(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) (ChangelogTarget, error) {
+	var target ChangelogTarget
+	err := s.db.QueryRowContext(ctx, `SELECT e.package_id,e.id,p.name,p.type,e.new_version,e.repository,e.definition_path,e.commit_hash
+		FROM update_events e JOIN packages p ON p.id=e.package_id WHERE e.id=? AND e.package_id=?`, eventID, packageID).
+		Scan(&target.PackageID, &target.EventID, &target.Name, &target.Type, &target.Version, &target.Repository, &target.DefinitionPath, &target.Commit)
+	return target, err
+}
+
 // LoadChangelog returns cached sections matching the selected event version.
 // It performs no network work and is safe on the cached-first startup path.
 func (s *Store) LoadChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]ChangelogSection, error) {
