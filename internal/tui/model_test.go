@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -50,6 +51,91 @@ func update(t *testing.T, m Model, msg tea.Msg) Model {
 	return next.(Model)
 }
 
+func updateAndRunCommand(t *testing.T, m Model, msg tea.Msg) (Model, tea.Msg) {
+	t.Helper()
+	next, cmd := m.Update(msg)
+	if cmd == nil {
+		return next.(Model), nil
+	}
+	return next.(Model), cmd()
+}
+
+func TestGlobalQuitKeys(t *testing.T) {
+	states := []struct {
+		name  string
+		model func() Model
+	}{
+		{name: "normal", model: func() Model { return NewModel(Dependencies{}) }},
+		{name: "error", model: func() Model {
+			m := NewModel(Dependencies{})
+			m.err = errors.New("visible error")
+			return m
+		}},
+		{name: "pending-action", model: func() Model {
+			m := NewModel(Dependencies{})
+			a := action()
+			m.pendingAction = &a
+			return m
+		}},
+		{name: "action-running", model: func() Model {
+			m := NewModel(Dependencies{})
+			m.actionRunning = true
+			return m
+		}},
+		{name: "action-result", model: func() Model {
+			m := NewModel(Dependencies{})
+			a := action()
+			m.actionResult = &a
+			return m
+		}},
+		{name: "detail-open", model: func() Model {
+			m := NewModel(Dependencies{})
+			m.detailOpen = true
+			return m
+		}},
+	}
+
+	for _, state := range states {
+		for _, quitKey := range []string{"q", "esc"} {
+			t.Run(state.name+"/"+quitKey, func(t *testing.T) {
+				_, msg := updateAndRunCommand(t, state.model(), key(quitKey))
+				if _, ok := msg.(tea.QuitMsg); !ok {
+					t.Fatalf("command result = %T, want tea.QuitMsg", msg)
+				}
+			})
+		}
+	}
+}
+
+func TestHorizontalNavigationAliases(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		width      int
+		startFocus pane
+		startOpen  bool
+		keys       []string
+		wantFocus  pane
+		wantOpen   bool
+	}{
+		{name: "wide feed", width: 120, startFocus: inspectorPane, keys: []string{"h", "left"}, wantFocus: feedPane},
+		{name: "wide inspector", width: 120, startFocus: feedPane, keys: []string{"l", "right"}, wantFocus: inspectorPane},
+		{name: "narrow close", width: 99, startOpen: true, keys: []string{"h", "left"}, wantOpen: false},
+		{name: "narrow open", width: 99, startOpen: false, keys: []string{"l", "right"}, wantOpen: true},
+	} {
+		for _, navigationKey := range tt.keys {
+			t.Run(tt.name+"/"+navigationKey, func(t *testing.T) {
+				m := NewModel(Dependencies{})
+				m.width, m.focus, m.detailOpen = tt.width, tt.startFocus, tt.startOpen
+				m.groups = groups("a")
+				m = update(t, m, key(navigationKey))
+				if m.focus != tt.wantFocus || m.detailOpen != tt.wantOpen {
+					t.Fatalf("focus/detailOpen = %v/%t, want %v/%t", m.focus, m.detailOpen, tt.wantFocus, tt.wantOpen)
+				}
+			})
+		}
+	}
+}
+
 func TestModelPreservesInteractionStateAcrossDatasetChange(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m = update(t, m, WindowSize{Width: 120, Height: 5})
@@ -94,9 +180,9 @@ func TestNarrowInspectorIsSeparateDetailScreen(t *testing.T) {
 	if !m.detailOpen {
 		t.Fatal("enter did not open narrow detail screen")
 	}
-	m = update(t, m, key("esc"))
+	m = update(t, m, key("h"))
 	if m.detailOpen {
-		t.Fatal("escape did not return to feed")
+		t.Fatal("h did not return to feed")
 	}
 }
 

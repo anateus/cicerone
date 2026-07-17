@@ -372,7 +372,7 @@ const helpText = `Cicerone — a cached Homebrew update feed
 
 Usage: cicerone [--help]
 
-Keys: j/k or arrows move · enter opens details · space expands · a installs/upgrades · esc closes
+Keys: h/j/k/l or arrows navigate · enter opens details · space expands · a installs/upgrades · q/esc quit
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
 Cached data is displayed before background Homebrew/Git refreshes begin.

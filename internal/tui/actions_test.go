@@ -56,7 +56,7 @@ func TestActionRequiresExplicitConfirmationAndPreservesAnchor(t *testing.T) {
 	if got := m.anchor(); got != want {
 		t.Fatalf("modal changed underlying anchor: %#v != %#v", got, want)
 	}
-	m = update(t, m, key("esc"))
+	m = update(t, m, key("n"))
 	if m.pendingAction != nil || runner.count() != 0 {
 		t.Fatal("dismissal executed action")
 	}
@@ -149,7 +149,7 @@ func TestActionKeyRequestsInstallOrUpgradeAndIsDocumented(t *testing.T) {
 	}
 }
 
-func TestFailedActionRetainsOutputAndStatusErrorUntilDismissed(t *testing.T) {
+func TestFailedActionRetainsOutputAndStatusError(t *testing.T) {
 	boom := errors.New("brew failed")
 	m := NewModel(Dependencies{})
 	m.actionRunning = true
@@ -163,10 +163,6 @@ func TestFailedActionRetainsOutputAndStatusErrorUntilDismissed(t *testing.T) {
 	m = update(t, m, key("j"))
 	if m.actionOutput == "" {
 		t.Fatal("ordinary key dismissed failure")
-	}
-	m = update(t, m, key("esc"))
-	if m.actionResult != nil || m.actionOutput != "" || m.err != nil || m.notification != "" {
-		t.Fatal("escape did not dismiss failure output")
 	}
 }
 

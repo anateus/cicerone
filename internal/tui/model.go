@@ -248,20 +248,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View { return tea.NewView(m.render()) }
 
 func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	}
 	if m.pendingAction != nil {
 		switch key.String() {
 		case "y", "enter":
 			return m.Update(ActionConfirmed{})
-		case "n", "esc":
+		case "n":
 			m.pendingAction = nil
 		}
 		return m, nil
 	}
 	if m.actionResult != nil {
-		if key.String() == "esc" {
-			m.actionResult, m.actionOutput = nil, ""
-			m.err, m.notification = nil, ""
-		}
 		return m, nil
 	}
 	if m.actionRunning {
@@ -282,6 +282,18 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.keepSelectionVisible()
 			return m, m.debounceChangelog()
 		}
+	case "h", "left":
+		if m.width >= 100 {
+			m.focus = feedPane
+		} else {
+			m.detailOpen = false
+		}
+	case "l", "right":
+		if m.width >= 100 {
+			m.focus = inspectorPane
+		} else if len(m.groups) > 0 {
+			m.detailOpen = true
+		}
 	case "tab":
 		if m.width >= 100 {
 			if m.focus == feedPane {
@@ -297,9 +309,6 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.width >= 100 {
 			m.focus = inspectorPane
 		}
-	case "esc":
-		m.detailOpen = false
-		m.focus = feedPane
 	case " ":
 		if len(m.groups) > 0 {
 			m.expanded[m.groups[m.selected].ID] = !m.expanded[m.groups[m.selected].ID]
