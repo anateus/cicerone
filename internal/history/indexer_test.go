@@ -64,6 +64,29 @@ func TestIndexerPersistsRangeAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestIndexerTreatsSyncBookkeepingRowAsUnindexed(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	head := repo.Commit("Formula/foo.rb", formula("1"), "add", now.Add(-time.Hour))
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.SyncStarted(ctx, "core", now); err != nil {
+		t.Fatal(err)
+	}
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	result, err := NewIndexer(gitrepo.New(source, execx.NewRunner()), s).Index(ctx, source, Request{Since: now.Add(-24 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Head != head || result.Events != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestIndexerExtendsRangeBackward(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)

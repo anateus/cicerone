@@ -69,6 +69,9 @@ func (s *Store) HistoryState(ctx context.Context, repository string) (HistorySta
 	if err != nil {
 		return HistoryState{}, false, err
 	}
+	if strings.TrimSpace(result.Head) == "" {
+		return HistoryState{}, false, nil
+	}
 	if encodedSince != "" {
 		result.Since, err = time.Parse(time.RFC3339Nano, encodedSince)
 		if err != nil {
