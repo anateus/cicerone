@@ -310,3 +310,38 @@ func TestDiscoverLinksPrioritizesSelectedVersion(t *testing.T) {
 		t.Fatalf("candidates=%#v", got)
 	}
 }
+
+func TestDiscoverLinksDoesNotPartiallyMatchSelectedVersion(t *testing.T) {
+	base, _ := url.Parse("https://example.test/")
+	got := DiscoverLinks(base, []byte(`<a href="/changelog">Changelog</a><a href="/releases/11.2.3">Version 11.2.3 notes</a>`), "1.2.3")
+	if len(got) != 2 || got[0].URL.Path != "/changelog" {
+		t.Fatalf("candidates=%#v", got)
+	}
+}
+
+func TestFetcherCanceledWaiterCleansUpHostGate(t *testing.T) {
+	f := &Fetcher{}
+	release1, err := f.acquire(context.Background(), "public.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release2, err := f.acquire(context.Background(), "public.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, err := f.acquire(ctx, "public.test"); result <- err }()
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter error=%v", err)
+	}
+	release1()
+	release2()
+	f.mu.Lock()
+	retained := len(f.hosts)
+	f.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("retained host gates=%d", retained)
+	}
+}

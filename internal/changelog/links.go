@@ -95,7 +95,7 @@ func nodeText(n *html.Node) []string {
 func linkScore(label, href, selectedVersion string) float64 {
 	s := strings.ToLower(label + " " + href)
 	switch {
-	case selectedVersion != "" && strings.Contains(normalizeVersion(s), selectedVersion):
+	case selectedVersion != "" && containsVersionToken(s, selectedVersion):
 		return 1.1
 	case strings.Contains(s, "changelog"):
 		return 1
@@ -112,4 +112,13 @@ func linkScore(label, href, selectedVersion string) float64 {
 	default:
 		return 0
 	}
+}
+
+func containsVersionToken(text, selectedVersion string) bool {
+	for _, match := range versionToken.FindAllStringSubmatch(text, -1) {
+		if len(match) > 1 && normalizeVersion(match[1]) == selectedVersion {
+			return true
+		}
+	}
+	return false
 }
