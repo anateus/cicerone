@@ -84,10 +84,13 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 		fallback = cachedSection
 	}
 	owner, repo, ok := githubRepository(pkg.RepositoryURL)
-	if !ok {
-		return Section{}, fmt.Errorf("unsupported repository URL %q", pkg.RepositoryURL)
+	backoffKey := pkg.Homepage
+	if ok {
+		backoffKey = strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + owner + "/" + repo
 	}
-	backoffKey := strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + owner + "/" + repo
+	if backoffKey == "" {
+		backoffKey = pkg.RepositoryURL
+	}
 	retryAfter, err := r.Store.ChangelogRetryAfter(ctx, backoffKey)
 	if err != nil {
 		return Section{}, err
@@ -98,19 +101,26 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 		}
 		return Section{}, fmt.Errorf("changelog refresh backed off until %s", retryAfter.Format(time.RFC3339))
 	}
-	section, err := r.resolveRepositoryFiles(ctx, id, owner, repo, version)
-	if err == nil {
-		return section, nil
-	}
-	section, releaseErr := r.resolveRelease(ctx, id, pkg.Name, owner, repo, version)
-	if releaseErr == nil {
-		return section, nil
+	var section Section
+	var repositoryErr, releaseErr error
+	if ok {
+		section, repositoryErr = r.resolveRepositoryFiles(ctx, id, owner, repo, version)
+		if repositoryErr == nil {
+			return section, nil
+		}
+		section, releaseErr = r.resolveRelease(ctx, id, pkg.Name, owner, repo, version)
+		if releaseErr == nil {
+			return section, nil
+		}
+	} else {
+		repositoryErr = fmt.Errorf("unsupported repository URL %q", pkg.RepositoryURL)
+		releaseErr = errors.New("structured release unavailable")
 	}
 	section, linkedErr := r.resolveLinked(ctx, id, pkg.Homepage, version)
 	if linkedErr == nil {
 		return section, nil
 	}
-	combined := fmt.Errorf("repository changelog: %v; GitHub release: %v; linked webpage: %w", err, releaseErr, linkedErr)
+	combined := fmt.Errorf("repository changelog: %v; GitHub release: %v; linked webpage: %w", repositoryErr, releaseErr, linkedErr)
 	_ = r.Store.RecordChangelogFailure(ctx, backoffKey, r.Now(), combined)
 	refreshed, refreshedErr := r.Store.ChangelogArtifacts(ctx, id)
 	if refreshedErr != nil {
@@ -179,8 +189,10 @@ func (r *Resolver) resolveLinked(ctx context.Context, packageID, seedURL, versio
 			continue
 		}
 		var extracted Extracted
+		var discovered []Candidate
 		if fetched.MediaType == "text/html" || fetched.MediaType == "application/xhtml+xml" {
 			extracted, err = extractor.Extract(fetched.FinalURL, fetched.Body)
+			discovered = DiscoverLinks(fetched.FinalURL, fetched.Body, version)
 		} else {
 			extracted = Extracted{Text: sanitizeText(string(fetched.Body))}
 		}
@@ -196,7 +208,7 @@ func (r *Resolver) resolveLinked(ctx context.Context, packageID, seedURL, versio
 		}
 		artifact := Artifact{ID: saved.ID, URL: saved.URL, MediaType: saved.MediaType, ETag: saved.ETag, LastModified: saved.LastModified, Hash: saved.Hash, Raw: saved.Raw, Extracted: saved.Extracted, FetchedAt: saved.FetchedAt, ParentID: saved.ParentID}
 		if section, ok := MatchVersion(version, []Artifact{artifact}); ok {
-			if section.Confidence >= .8 {
+			if section.Confidence >= .8 && item.candidate.Depth > 0 {
 				if err := r.persistSection(ctx, section); err != nil {
 					return Section{}, err
 				}
@@ -207,7 +219,7 @@ func (r *Resolver) resolveLinked(ctx context.Context, packageID, seedURL, versio
 			}
 		}
 		if item.candidate.Depth < 2 {
-			for _, candidate := range extracted.Links {
+			for _, candidate := range discovered {
 				candidate.Depth = item.candidate.Depth + 1
 				parent := saved.ID
 				queue = append(queue, queued{candidate: candidate, parent: &parent})

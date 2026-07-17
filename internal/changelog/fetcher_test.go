@@ -3,11 +3,13 @@ package changelog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,6 +126,96 @@ func TestFetcherRevalidatesEveryRedirectAndLimitsRedirects(t *testing.T) {
 	}
 }
 
+func TestFetcherAcceptsExactlyThreeRedirectsAndRejectsFour(t *testing.T) {
+	for _, tc := range []struct {
+		redirects int
+		wantErr   bool
+	}{{3, false}, {4, true}} {
+		t.Run(fmt.Sprintf("redirects_%d", tc.redirects), func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				n, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/"))
+				if n < tc.redirects {
+					http.Redirect(w, r, fmt.Sprintf("/%d", n+1), http.StatusFound)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("ok"))
+			}))
+			defer server.Close()
+			_, err := publicTestFetcher(server).Fetch(context.Background(), "http://public.test/0")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
+			}
+			wantRequests := tc.redirects + 1
+			if tc.wantErr {
+				wantRequests = tc.redirects
+			}
+			if requests != wantRequests {
+				t.Fatalf("requests=%d want=%d", requests, wantRequests)
+			}
+		})
+	}
+}
+
+func TestFetcherLimitsConcurrencyAtRedirectDestinationHost(t *testing.T) {
+	var active, maximum atomic.Int32
+	entered := make(chan struct{}, 3)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Host, "origin") {
+			http.Redirect(w, r, "http://target.test/end", http.StatusFound)
+			return
+		}
+		n := active.Add(1)
+		defer active.Add(-1)
+		for {
+			old := maximum.Load()
+			if n <= old || maximum.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	f := publicTestFetcher(server)
+	f.Resolver = staticResolver{"origin1.test": {netip.MustParseAddr("192.0.2.1")}, "origin2.test": {netip.MustParseAddr("192.0.2.2")}, "origin3.test": {netip.MustParseAddr("192.0.2.3")}, "target.test": {netip.MustParseAddr("192.0.2.4")}}
+	var wg sync.WaitGroup
+	wg.Add(3)
+	for i := 1; i <= 3; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(), fmt.Sprintf("http://origin%d.test/start", i))
+		}(i)
+	}
+	<-entered
+	<-entered
+	thirdEntered := false
+	select {
+	case <-entered:
+		thirdEntered = true
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	wg.Wait()
+	if thirdEntered {
+		t.Fatal("third redirected request entered")
+	}
+	if maximum.Load() != 2 {
+		t.Fatalf("maximum=%d", maximum.Load())
+	}
+	f.mu.Lock()
+	retainedHosts := len(f.hosts)
+	f.mu.Unlock()
+	if retainedHosts != 0 {
+		t.Fatalf("retained host gates=%d", retainedHosts)
+	}
+}
+
 func TestFetcherRejectsMediaTypeAndOversize(t *testing.T) {
 	for _, tc := range []struct {
 		name, media string
@@ -208,5 +300,13 @@ func TestDiscoverLinksScoresNormalizesDeduplicatesAndCaps(t *testing.T) {
 			t.Fatalf("duplicate %s", c.URL)
 		}
 		seen[c.URL.String()] = true
+	}
+}
+
+func TestDiscoverLinksPrioritizesSelectedVersion(t *testing.T) {
+	base, _ := url.Parse("https://example.test/")
+	got := DiscoverLinks(base, []byte(`<a href="/changelog">Changelog</a><a href="/releases/8.2.1">Version 8.2.1 notes</a>`), "8.2.1")
+	if len(got) != 2 || got[0].URL.Path != "/releases/8.2.1" {
+		t.Fatalf("candidates=%#v", got)
 	}
 }

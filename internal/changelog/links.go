@@ -16,7 +16,7 @@ type Candidate struct {
 	Depth int
 }
 
-func DiscoverLinks(base *url.URL, content []byte) []Candidate {
+func DiscoverLinks(base *url.URL, content []byte, selectedVersion ...string) []Candidate {
 	if base == nil {
 		return nil
 	}
@@ -37,7 +37,11 @@ func DiscoverLinks(base *url.URL, content []byte) []Candidate {
 			}
 			label := strings.Join(nodeText(n), " ")
 			label = strings.Join(strings.Fields(label), " ")
-			score := linkScore(label, href)
+			version := ""
+			if len(selectedVersion) > 0 {
+				version = normalizeVersion(selectedVersion[0])
+			}
+			score := linkScore(label, href, version)
 			if score > 0 {
 				if ref, e := url.Parse(href); e == nil {
 					u := base.ResolveReference(ref)
@@ -88,9 +92,11 @@ func nodeText(n *html.Node) []string {
 	return out
 }
 
-func linkScore(label, href string) float64 {
+func linkScore(label, href, selectedVersion string) float64 {
 	s := strings.ToLower(label + " " + href)
 	switch {
+	case selectedVersion != "" && strings.Contains(normalizeVersion(s), selectedVersion):
+		return 1.1
 	case strings.Contains(s, "changelog"):
 		return 1
 	case strings.Contains(s, "release notes"):

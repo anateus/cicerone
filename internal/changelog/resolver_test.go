@@ -196,6 +196,181 @@ func TestResolverFollowsRankedHomepageChangelogAndPreservesProvenance(t *testing
 	}
 }
 
+func TestResolverUsesHomepageWithoutGitHubRepository(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/" {
+			_, _ = w.Write([]byte(`<a href="/changes">Changelog</a>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<article><h1>6.0.0</h1><ul><li>Generic source.</li></ul></article>`))
+	}))
+	defer page.Close()
+	r := NewResolver(cache, nil)
+	r.Fetcher = publicTestFetcher(page)
+	r.Extractor = ReadabilityExtractor{}
+	section, err := r.Resolve(ctx, PackageRef{Name: "widget", Homepage: "http://public.test/", Type: domain.PackageFormula}, "6.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(section.Body, "Generic source") {
+		t.Fatalf("section=%#v", section)
+	}
+}
+
+func TestResolverPrefersLabeledPageOverExactSeedAndCapsDiscovery(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	if err := cache.UpsertChangelogPackage(ctx, "widget", "widget", "formula"); err != nil {
+		t.Fatal(err)
+	}
+	requests := map[string]int{}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests[r.URL.Path]++
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<main><h1>7.0.0</h1><p>Seed full document.</p><a href="/changelog">Changelog</a><a href="/release">Release</a><a href="/changes">Changes</a><a href="/history">History</a><a href="/v7">7.0.0 notes</a><a href="/sixth">Changelog archive</a></main>`))
+		case "/changelog":
+			_, _ = w.Write([]byte(`<article><h1>7.0.0</h1><p>Labeled winner.</p><a href="/depth2">Changelog detail</a></article>`))
+		default:
+			_, _ = w.Write([]byte(`<article><p>no selected version</p></article>`))
+		}
+	}))
+	defer page.Close()
+	r := NewResolver(cache, nil)
+	r.Fetcher = publicTestFetcher(page)
+	r.Extractor = ReadabilityExtractor{}
+	section, err := r.resolveLinked(ctx, "widget", "http://public.test/", "7.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(section.Body, "Labeled winner") {
+		t.Fatalf("section=%#v", section)
+	}
+	total := 0
+	for _, n := range requests {
+		total += n
+	}
+	if total > 6 {
+		t.Fatalf("requests=%d want seed + at most five candidates: %#v", total, requests)
+	}
+	if requests["/depth2"] != 0 {
+		t.Fatalf("returned winner should stop before depth two: %#v", requests)
+	}
+}
+
+func TestResolverRecordsFailureAndBacksOffLinkedURL(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	calls := 0
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "fail", http.StatusServiceUnavailable)
+	}))
+	defer page.Close()
+	r := NewResolver(cache, nil)
+	r.Fetcher = publicTestFetcher(page)
+	now := time.Unix(9000, 0).UTC()
+	r.Now = func() time.Time { return now }
+	if _, err := r.resolveLinked(ctx, "widget", "http://public.test/", "1.0.0"); err == nil {
+		t.Fatal("first resolve succeeded")
+	}
+	before := calls
+	if _, err := r.resolveLinked(ctx, "widget", "http://public.test/", "1.0.0"); err == nil || !strings.Contains(err.Error(), "backed off") {
+		t.Fatalf("second error=%v", err)
+	}
+	if calls != before {
+		t.Fatalf("backoff made %d requests", calls-before)
+	}
+}
+
+func TestResolverLimitsDiscoveryToTwoHopsAndFiveCandidates(t *testing.T) {
+	t.Run("two hops", func(t *testing.T) {
+		ctx := context.Background()
+		cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cache.Close()
+		if err := cache.UpsertChangelogPackage(ctx, "widget", "widget", "formula"); err != nil {
+			t.Fatal(err)
+		}
+		requests := map[string]int{}
+		page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests[r.URL.Path]++
+			w.Header().Set("Content-Type", "text/html")
+			switch r.URL.Path {
+			case "/":
+				_, _ = w.Write([]byte(`<a href="/d1">Changelog</a>`))
+			case "/d1":
+				_, _ = w.Write([]byte(`<a href="/d2">Changelog detail</a>`))
+			case "/d2":
+				_, _ = w.Write([]byte(`<a href="/d3">Changelog deeper</a>`))
+			default:
+				_, _ = w.Write([]byte(`<h1>9.0.0</h1>`))
+			}
+		}))
+		defer page.Close()
+		r := NewResolver(cache, nil)
+		r.Fetcher = publicTestFetcher(page)
+		r.Extractor = ReadabilityExtractor{}
+		if _, err := r.resolveLinked(ctx, "widget", "http://public.test/", "9.0.0"); err == nil {
+			t.Fatal("unexpected match")
+		}
+		if requests["/d2"] != 1 || requests["/d3"] != 0 {
+			t.Fatalf("requests=%#v", requests)
+		}
+	})
+	t.Run("five candidates", func(t *testing.T) {
+		ctx := context.Background()
+		cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cache.Close()
+		if err := cache.UpsertChangelogPackage(ctx, "widget", "widget", "formula"); err != nil {
+			t.Fatal(err)
+		}
+		requests := map[string]int{}
+		page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests[r.URL.Path]++
+			w.Header().Set("Content-Type", "text/html")
+			if r.URL.Path == "/" {
+				_, _ = w.Write([]byte(`<a href="/1">Changelog 1</a><a href="/2">Changelog 2</a><a href="/3">Changelog 3</a><a href="/4">Changelog 4</a><a href="/5">Changelog 5</a><a href="/6">Changelog 6</a>`))
+				return
+			}
+			_, _ = w.Write([]byte(`<p>not selected</p>`))
+		}))
+		defer page.Close()
+		r := NewResolver(cache, nil)
+		r.Fetcher = publicTestFetcher(page)
+		r.Extractor = ReadabilityExtractor{}
+		_, _ = r.resolveLinked(ctx, "widget", "http://public.test/", "9.0.0")
+		total := 0
+		for _, n := range requests {
+			total += n
+		}
+		if total != 6 || requests["/6"] != 0 {
+			t.Fatalf("requests=%#v total=%d", requests, total)
+		}
+	})
+}
+
 func TestChangelogFileRank(t *testing.T) {
 	tests := []struct {
 		name string

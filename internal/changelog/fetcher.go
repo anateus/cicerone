@@ -37,7 +37,12 @@ type Fetcher struct {
 	TLSConfig   *tls.Config
 
 	mu    sync.Mutex
-	hosts map[string]chan struct{}
+	hosts map[string]*hostGate
+}
+
+type hostGate struct {
+	sem  chan struct{}
+	refs int
 }
 
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
@@ -48,12 +53,6 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
 	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && unsafeIP(ip) {
 		return Fetched{}, fmt.Errorf("private or unsafe address %s", ip)
 	}
-	release, err := f.acquire(ctx, strings.ToLower(u.Hostname()))
-	if err != nil {
-		return Fetched{}, err
-	}
-	defer release()
-
 	timeout := f.Timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -95,7 +94,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
 		TLSClientConfig:       f.TLSConfig,
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	client := &http.Client{Transport: hostLimitedTransport{fetcher: f, next: transport}, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 3 {
 			return errors.New("redirect limit exceeded")
 		}
@@ -142,6 +141,33 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
 	return Fetched{FinalURL: resp.Request.URL, MediaType: mediaType, ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified"), Body: body, FetchedAt: now}, nil
 }
 
+type hostLimitedTransport struct {
+	fetcher *Fetcher
+	next    http.RoundTripper
+}
+
+func (t hostLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	release, err := t.fetcher.acquire(req.Context(), strings.ToLower(req.URL.Hostname()))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := t.next.RoundTrip(req)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	resp.Body = &releaseBody{ReadCloser: resp.Body, release: release}
+	return resp, nil
+}
+
+type releaseBody struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (b *releaseBody) Close() error { err := b.ReadCloser.Close(); b.once.Do(b.release); return err }
+
 func unsafeIP(ip netip.Addr) bool {
 	return !ip.IsValid() || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
@@ -149,18 +175,32 @@ func unsafeIP(ip netip.Addr) bool {
 func (f *Fetcher) acquire(ctx context.Context, host string) (func(), error) {
 	f.mu.Lock()
 	if f.hosts == nil {
-		f.hosts = make(map[string]chan struct{})
+		f.hosts = make(map[string]*hostGate)
 	}
-	sem := f.hosts[host]
-	if sem == nil {
-		sem = make(chan struct{}, 2)
-		f.hosts[host] = sem
+	gate := f.hosts[host]
+	if gate == nil {
+		gate = &hostGate{sem: make(chan struct{}, 2)}
+		f.hosts[host] = gate
 	}
+	gate.refs++
 	f.mu.Unlock()
 	select {
-	case sem <- struct{}{}:
-		return func() { <-sem }, nil
+	case gate.sem <- struct{}{}:
+		return func() {
+			<-gate.sem
+			f.releaseGate(host, gate)
+		}, nil
 	case <-ctx.Done():
+		f.releaseGate(host, gate)
 		return nil, ctx.Err()
+	}
+}
+
+func (f *Fetcher) releaseGate(host string, gate *hostGate) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gate.refs--
+	if gate.refs == 0 && f.hosts[host] == gate {
+		delete(f.hosts, host)
 	}
 }
