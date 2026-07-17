@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,86 @@ type failOnceStatusWriter struct {
 	buffer *bytes.Buffer
 	err    error
 	failed bool
+}
+
+type streamingPlainRuntime struct {
+	mu          sync.Mutex
+	queryCount  int
+	stream      chan tea.Msg
+	release     chan struct{}
+	incremental chan struct{}
+}
+
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func (r *streamingPlainRuntime) Preferences(context.Context) (domain.FeedFilter, error) {
+	return domain.FeedFilter{}, nil
+}
+func (r *streamingPlainRuntime) QueryFeed(context.Context, domain.FeedFilter) ([]domain.FeedGroup, error) {
+	r.mu.Lock()
+	r.queryCount++
+	count := r.queryCount
+	r.mu.Unlock()
+	if count == 1 {
+		return nil, nil
+	}
+	if count == 2 {
+		close(r.incremental)
+	}
+	return []domain.FeedGroup{plainGroup("2.0")}, nil
+}
+func (r *streamingPlainRuntime) StartSync(context.Context) {
+	r.stream <- syncer.SyncProgress{Source: "homebrew-core", Progress: syncer.Progress{Commits: 100, Events: 1, Batches: 1}}
+}
+func (r *streamingPlainRuntime) WaitSync()                                { <-r.release }
+func (r *streamingPlainRuntime) plainNotificationChannel() <-chan tea.Msg { return r.stream }
+func (r *streamingPlainRuntime) plainNotifications() []tea.Msg {
+	return []tea.Msg{syncer.SyncStarted{Source: "homebrew-core"}, syncer.SyncCommitted{Source: "homebrew-core", Result: syncer.Result{Events: 1}}}
+}
+
+func TestRunPlainRendersBatchesBeforeCompletion(t *testing.T) {
+	runtime := &streamingPlainRuntime{stream: make(chan tea.Msg, 2), release: make(chan struct{}), incremental: make(chan struct{})}
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(context.Background(), runtime, &out) }()
+	select {
+	case <-runtime.incremental:
+	case <-time.After(time.Second):
+		t.Fatal("incremental feed was not queried")
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(out.String(), "foo 2.0") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := out.String(); !strings.Contains(got, "100 commits scanned") || !strings.Contains(got, "foo 2.0") {
+		t.Fatalf("output before completion=%q", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("completed before release: %v", err)
+	default:
+	}
+	close(runtime.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out.String(), "foo 2.0") != 1 || strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("output=%q", out.String())
+	}
 }
 
 func (w *failOnceStatusWriter) Write(p []byte) (int, error) {

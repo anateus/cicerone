@@ -24,19 +24,24 @@ type plainRuntime interface {
 type plainNotificationSource interface {
 	plainNotifications() []tea.Msg
 }
+type plainNotificationStream interface{ plainNotificationChannel() <-chan tea.Msg }
 
 type productionPlainRuntime struct {
 	services *runtimeServices
 	mu       sync.Mutex
 	events   []tea.Msg
+	stream   chan tea.Msg
 }
 
 func (r *productionPlainRuntime) notify(msg tea.Msg) {
 	switch msg.(type) {
-	case syncer.SyncStarted, syncer.SyncCommitted, syncer.SyncFailed:
+	case syncer.SyncStarted, syncer.SyncProgress, syncer.SyncCommitted, syncer.SyncFailed:
 		r.mu.Lock()
 		r.events = append(r.events, msg)
 		r.mu.Unlock()
+		if r.stream != nil {
+			r.stream <- msg
+		}
 	}
 }
 
@@ -56,15 +61,38 @@ func (r *productionPlainRuntime) plainNotifications() []tea.Msg {
 	defer r.mu.Unlock()
 	return append([]tea.Msg(nil), r.events...)
 }
+func (r *productionPlainRuntime) plainNotificationChannel() <-chan tea.Msg { return r.stream }
 
 func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
-	if err := writePlainFeed(ctx, runtime, out, "Cached feed"); err != nil {
+	seen := make(map[domain.EventID]bool)
+	if err := writePlainFeedSeen(ctx, runtime, out, "Cached feed", seen); err != nil {
 		return err
 	}
 	runtime.StartSync(ctx)
-	runtime.WaitSync()
+	var liveErrors []error
+	if source, ok := runtime.(plainNotificationStream); ok && source.plainNotificationChannel() != nil {
+		done := make(chan struct{})
+		go func() { runtime.WaitSync(); close(done) }()
+		for running := true; running; {
+			select {
+			case msg := <-source.plainNotificationChannel():
+				if event, ok := msg.(syncer.SyncProgress); ok {
+					if _, err := fmt.Fprintf(out, "%s · %d commits scanned · %d updates · %d batches\n", event.Source, event.Progress.Commits, event.Progress.Events, event.Progress.Batches); err != nil {
+						liveErrors = append(liveErrors, err)
+					}
+					if err := writePlainFeedSeen(ctx, runtime, out, "", seen); err != nil {
+						liveErrors = append(liveErrors, err)
+					}
+				}
+			case <-done:
+				running = false
+			}
+		}
+	} else {
+		runtime.WaitSync()
+	}
 
-	var failures []error
+	failures := liveErrors
 	if source, ok := runtime.(plainNotificationSource); ok {
 		type sourceNotifications struct {
 			started bool
@@ -112,13 +140,17 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 			}
 		}
 	}
-	if err := writePlainFeed(ctx, runtime, out, "Refreshed feed"); err != nil {
+	if err := writePlainFeedSeen(ctx, runtime, out, "Refreshed feed", seen); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
 }
 
 func writePlainFeed(ctx context.Context, runtime plainRuntime, out io.Writer, heading string) error {
+	return writePlainFeedSeen(ctx, runtime, out, heading, make(map[domain.EventID]bool))
+}
+
+func writePlainFeedSeen(ctx context.Context, runtime plainRuntime, out io.Writer, heading string, seen map[domain.EventID]bool) error {
 	filter, err := runtime.Preferences(ctx)
 	if err != nil {
 		return err
@@ -127,11 +159,17 @@ func writePlainFeed(ctx context.Context, runtime plainRuntime, out io.Writer, he
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(out, heading); err != nil {
-		return err
+	if heading != "" {
+		if _, err := fmt.Fprintln(out, heading); err != nil {
+			return err
+		}
 	}
 	for _, group := range groups {
 		for _, event := range group.Events {
+			if seen[event.ID] {
+				continue
+			}
+			seen[event.ID] = true
 			value := event.NewVersion
 			if value == "" {
 				value = event.NewRevision
@@ -152,7 +190,7 @@ func executePlainProduction(stdout, stderr io.Writer) (code int) {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	plain := &productionPlainRuntime{}
+	plain := &productionPlainRuntime{stream: make(chan tea.Msg, 32)}
 	services, err := newRuntime(home, plain.notify)
 	if err != nil {
 		fmt.Fprintln(stderr, err)

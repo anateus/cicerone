@@ -27,6 +27,10 @@ Run `./cicerone --plain` for a one-shot plaintext feed. It prints cached rows,
 performs real read-only Homebrew metadata synchronization, prints refreshed
 rows, and exits. This may update Cicerone's database and Cicerone-owned Git
 caches, but it never installs, upgrades, or uninstalls Homebrew packages.
+On a first run, history is streamed into durable 100-commit batches. Plain mode
+prints numeric progress and newly queryable rows after each batch. Interrupted
+scans retain valid rows without advancing the completed cursor, so retry is safe
+and idempotent.
 
 ## Keys
 
