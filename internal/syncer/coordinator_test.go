@@ -3,6 +3,8 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -287,6 +289,36 @@ func TestSourceDiscoveryStartsAfterCachedFeed(t *testing.T) {
 	c.Start(context.Background())
 	waitClosed(t, loaded, "source discovery")
 	c.Close()
+}
+
+func TestCoordinatorPublishesDurableBatchProgress(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	job := fakeJob{name: "core", destination: destination, index: func(_ context.Context, req Request) (Result, error) {
+		req.Progress(Progress{Commits: 100, Events: 8, Batches: 1})
+		req.Progress(Progress{Commits: 150, Events: 12, Batches: 2})
+		return Result{Events: 12}, nil
+	}}
+	var messages []tea.Msg
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) { messages = append(messages, msg) }})
+	c.Start(context.Background())
+	c.Wait()
+	var sequence []string
+	for _, message := range messages {
+		switch event := message.(type) {
+		case SyncStarted:
+			sequence = append(sequence, "started")
+		case SyncProgress:
+			sequence = append(sequence, fmt.Sprintf("progress-%d", event.Progress.Batches))
+		case tui.DatasetChanged:
+			sequence = append(sequence, "changed")
+		case SyncCommitted:
+			sequence = append(sequence, "committed")
+		}
+	}
+	want := []string{"started", "progress-1", "changed", "progress-2", "changed", "committed", "changed"}
+	if !slices.Equal(sequence, want) {
+		t.Fatalf("sequence=%v want=%v", sequence, want)
+	}
 }
 
 func TestRepositoryConcurrencyIsTwoAndFailuresAreIsolated(t *testing.T) {

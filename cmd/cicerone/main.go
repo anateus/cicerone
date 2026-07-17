@@ -127,7 +127,11 @@ func (s repositorySource) Refresh(ctx context.Context) error {
 	return nil
 }
 func (s repositorySource) Index(ctx context.Context, req syncer.Request) (syncer.Result, error) {
-	result, err := s.indexer.Index(ctx, s.source, history.Request{Since: req.Since, Installed: req.Installed, Kinds: req.Kinds})
+	result, err := s.indexer.Index(ctx, s.source, history.Request{Since: req.Since, Installed: req.Installed, Kinds: req.Kinds, Progress: func(progress history.Progress) {
+		if req.Progress != nil {
+			req.Progress(syncer.Progress{Commits: progress.Commits, Events: progress.Events, Diagnostics: progress.Diagnostics, Batches: progress.Batches})
+		}
+	}})
 	return syncer.Result{Events: result.Events, Diagnostics: result.Diagnostics, Cursor: result.Head, Since: result.Since}, err
 }
 

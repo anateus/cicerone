@@ -28,7 +28,9 @@ type Request struct {
 	Since     time.Time
 	Installed []domain.PackageID
 	Kinds     map[domain.EventKind]bool
+	Progress  func(Progress)
 }
+type Progress struct{ Commits, Events, Diagnostics, Batches int }
 type Result struct {
 	Events, Diagnostics int
 	Cursor              string
@@ -57,6 +59,11 @@ type SyncCommitted struct {
 	Source string
 	At     time.Time
 	Result Result
+}
+type SyncProgress struct {
+	Source   string
+	At       time.Time
+	Progress Progress
 }
 type SyncFailed struct {
 	Source string
@@ -237,6 +244,10 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 		c.mu.Lock()
 		req.Installed = append([]domain.PackageID(nil), c.installed...)
 		c.mu.Unlock()
+		req.Progress = func(progress Progress) {
+			c.notify(SyncProgress{Source: source.Name(), At: c.deps.Now(), Progress: progress})
+			c.notify(tui.DatasetChanged{})
+		}
 		result, err = source.Index(ctx, req)
 	}
 	ended := c.deps.Now()
