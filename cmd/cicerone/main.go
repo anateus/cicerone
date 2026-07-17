@@ -286,16 +286,17 @@ func openStorePreservingFailures(ctx context.Context, path string) (*store.Store
 	if err := copyFile(path, backupPath, info.Mode().Perm()); err != nil {
 		return nil, err
 	}
-	defer os.Remove(backupPath)
+	backupPaths := []string{backupPath}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		if sidecar, sidecarErr := os.Stat(path + suffix); sidecarErr == nil {
 			if err := copyFile(path+suffix, backupPath+suffix, sidecar.Mode().Perm()); err != nil {
 				return nil, err
 			}
-			defer os.Remove(backupPath + suffix)
+			backupPaths = append(backupPaths, backupPath+suffix)
 		}
 	}
 	if err := renameFile(temporaryPath, path); err != nil {
+		removeFiles(backupPaths)
 		return nil, fmt.Errorf("promote migrated database: %w", err)
 	}
 	promoted = true
@@ -305,21 +306,38 @@ func openStorePreservingFailures(ctx context.Context, path string) (*store.Store
 	_ = os.Remove(path + "-shm")
 	opened, err := storeOpen(ctx, path)
 	if err == nil {
+		removeFiles(backupPaths)
 		return opened, nil
 	}
 	_ = os.Remove(path + "-wal")
 	_ = os.Remove(path + "-shm")
 	if restoreErr := renameFile(backupPath, path); restoreErr != nil {
-		return nil, fmt.Errorf("open promoted database: %v; restore original: %w", err, restoreErr)
+		return nil, fmt.Errorf("open promoted database: %v; restore original: %v; preserved backups: %s", err, restoreErr, strings.Join(existingFiles(backupPaths), ", "))
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		if _, sidecarErr := os.Stat(backupPath + suffix); sidecarErr == nil {
 			if restoreErr := renameFile(backupPath+suffix, path+suffix); restoreErr != nil {
-				return nil, fmt.Errorf("open promoted database: %v; restore original %s: %w", err, suffix, restoreErr)
+				return nil, fmt.Errorf("open promoted database: %v; restore original %s: %v; preserved backups: %s", err, suffix, restoreErr, strings.Join(existingFiles(backupPaths), ", "))
 			}
 		}
 	}
 	return nil, err
+}
+
+func removeFiles(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
+}
+
+func existingFiles(paths []string) []string {
+	var existing []string
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			existing = append(existing, path)
+		}
+	}
+	return existing
 }
 
 func copyFile(source, destination string, mode os.FileMode) error {

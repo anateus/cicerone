@@ -310,6 +310,80 @@ func TestPostPromotionOpenFailureRestoresDatabaseAndSidecars(t *testing.T) {
 	}
 }
 
+func TestDatabaseRestoreFailurePreservesOriginalBackupPath(t *testing.T) {
+	path := newClosedStoreFile(t)
+	previousOpen, previousRename := storeOpen, renameFile
+	openCalls, renameCalls := 0, 0
+	storeOpen = func(ctx context.Context, candidate string) (*store.Store, error) {
+		openCalls++
+		if openCalls == 2 {
+			return nil, errors.New("injected final open failure")
+		}
+		return store.Open(ctx, candidate)
+	}
+	renameFile = func(from, to string) error {
+		renameCalls++
+		if renameCalls == 2 {
+			return errors.New("injected database restore failure")
+		}
+		return os.Rename(from, to)
+	}
+	t.Cleanup(func() { storeOpen, renameFile = previousOpen, previousRename })
+	_, err := openStorePreservingFailures(context.Background(), path)
+	if err == nil {
+		t.Fatal("restore error = nil")
+	}
+	backups, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".cicerone-open-check-*.original"))
+	if len(backups) != 1 || !strings.Contains(err.Error(), backups[0]) {
+		t.Fatalf("preserved backups = %v, error = %v", backups, err)
+	}
+}
+
+func TestSidecarRestoreFailurePreservesSidecarBackupPath(t *testing.T) {
+	path := newClosedStoreFile(t)
+	if err := os.WriteFile(path+"-wal", []byte("original wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousOpen, previousRename := storeOpen, renameFile
+	openCalls, renameCalls := 0, 0
+	storeOpen = func(ctx context.Context, candidate string) (*store.Store, error) {
+		openCalls++
+		if openCalls == 2 {
+			return nil, errors.New("injected final open failure")
+		}
+		return store.Open(ctx, candidate)
+	}
+	renameFile = func(from, to string) error {
+		renameCalls++
+		if renameCalls == 3 {
+			return errors.New("injected sidecar restore failure")
+		}
+		return os.Rename(from, to)
+	}
+	t.Cleanup(func() { storeOpen, renameFile = previousOpen, previousRename })
+	_, err := openStorePreservingFailures(context.Background(), path)
+	if err == nil {
+		t.Fatal("restore error = nil")
+	}
+	backups, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".cicerone-open-check-*.original-wal"))
+	if len(backups) != 1 || !strings.Contains(err.Error(), backups[0]) {
+		t.Fatalf("preserved backups = %v, error = %v", backups, err)
+	}
+}
+
+func newClosedStoreFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cicerone.db")
+	db, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestProductionTUIDependenciesWireActionsInstalledAndSend(t *testing.T) {
 	destination, err := store.Open(context.Background(), ":memory:")
 	if err != nil {
