@@ -16,7 +16,12 @@ type Request struct {
 	Since     time.Time
 	Installed []domain.PackageID
 	Kinds     map[domain.EventKind]bool
+	Progress  func(Progress)
 }
+type Progress struct{ Commits, Events, Diagnostics, Batches int }
+
+const historyBatchCommits = 100
+
 type Result struct {
 	Events, Diagnostics int
 	Head                string
@@ -98,20 +103,36 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	var events []domain.UpdateEvent
 	var aliases []store.HistoryAlias
 	var persistedDiagnostics []store.HistoryDiagnostic
-	diagnostics := 0
-	for rangeIndex, r := range ranges {
-		commits, e := i.repository.Commits(ctx, r)
-		if e != nil {
-			return Result{}, e
+	progress := Progress{}
+	batchCommits := 0
+	flush := func() error {
+		if batchCommits == 0 {
+			return nil
 		}
-		for _, commit := range commits {
+		if err := i.store.ApplyHistoryBatch(ctx, store.HistoryBatch{Repository: source.Name, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics}); err != nil {
+			return err
+		}
+		progress.Batches++
+		if req.Progress != nil {
+			req.Progress(progress)
+		}
+		events = nil
+		aliases = nil
+		persistedDiagnostics = nil
+		batchCommits = 0
+		return nil
+	}
+	for rangeIndex, r := range ranges {
+		e := i.repository.WalkCommits(ctx, r, func(commit gitrepo.Commit) error {
 			if seen[commit.Hash] {
-				continue
+				return nil
 			}
 			if rangeIndex == fallbackIndex && !since.IsZero() && !commit.AuthorTime.Before(since) {
-				continue
+				return nil
 			}
 			seen[commit.Hash] = true
+			progress.Commits++
+			batchCommits++
 			for _, change := range commit.Changes {
 				if filepath.Ext(change.Path) != ".rb" && filepath.Ext(change.OldPath) != ".rb" {
 					continue
@@ -122,16 +143,16 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				}
 				before, bd, e := i.definition(ctx, commit.Hash+"^", beforePath, change.Status == "A")
 				if e != nil {
-					return Result{}, e
+					return e
 				}
 				after, ad, e := i.definition(ctx, commit.Hash, change.Path, change.Status == "D")
 				if e != nil {
-					return Result{}, e
+					return e
 				}
-				diagnostics += len(bd) + len(ad)
+				progress.Diagnostics += len(bd) + len(ad)
 				classification := Classify(before, after)
 				if classification.Ambiguous {
-					diagnostics++
+					progress.Diagnostics++
 					classification.Kind = domain.EventMetadata
 				}
 				for _, message := range append(append([]string{}, bd...), ad...) {
@@ -172,14 +193,25 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 					event.NewRevision = after.Revision
 				}
 				events = append(events, event)
+				progress.Events++
 				delete(missing, key)
 			}
+			if batchCommits == historyBatchCommits {
+				return flush()
+			}
+			return nil
+		})
+		if e != nil {
+			return Result{}, e
 		}
 	}
-	if err := i.store.ApplyHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, RemoveCommits: remove}); err != nil {
+	if err := flush(); err != nil {
 		return Result{}, err
 	}
-	return Result{Events: len(events), Diagnostics: diagnostics, Head: head, Since: since}, nil
+	if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, RemoveCommits: remove}); err != nil {
+		return Result{}, err
+	}
+	return Result{Events: progress.Events, Diagnostics: progress.Diagnostics, Head: head, Since: since}, nil
 }
 
 func (i *Indexer) definition(ctx context.Context, revision, path string, absent bool) (*Definition, []string, error) {

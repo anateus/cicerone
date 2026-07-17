@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -85,6 +86,68 @@ func TestIndexerTreatsSyncBookkeepingRowAsUnindexed(t *testing.T) {
 	if result.Head != head || result.Events != 1 {
 		t.Fatalf("result=%#v", result)
 	}
+}
+
+func TestIndexerPublishesBatchesBeforeCompletion(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	for version := 0; version < 101; version++ {
+		repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-101)*time.Minute))
+	}
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	firstBatch := make(chan Progress, 1)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, indexErr := NewIndexer(gitrepo.New(source, execx.NewRunner()), s).Index(ctx, source, Request{Since: now.Add(-24 * time.Hour), Progress: func(progress Progress) {
+			if progress.Batches == 1 {
+				firstBatch <- progress
+				<-release
+			}
+		}})
+		done <- indexErr
+	}()
+	progress := <-firstBatch
+	if progress.Commits != 100 || progress.Events != 100 {
+		t.Fatalf("first progress=%#v", progress)
+	}
+	groups, err := s.QueryFeed(ctx, domain.FeedFilter{})
+	if err != nil || countEvents(groups) != 100 {
+		t.Fatalf("visible events=%d err=%v", countEvents(groups), err)
+	}
+	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || ok {
+		t.Fatalf("partial state=%#v ok=%v err=%v", state, ok, err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("index completed before release: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	groups, err = s.QueryFeed(ctx, domain.FeedFilter{})
+	if err != nil || countEvents(groups) != 101 {
+		t.Fatalf("final events=%d err=%v", countEvents(groups), err)
+	}
+	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || !ok || state.Head == "" {
+		t.Fatalf("final state=%#v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func countEvents(groups []domain.FeedGroup) int {
+	total := 0
+	for _, group := range groups {
+		total += len(group.Events)
+	}
+	return total
 }
 
 func TestIndexerExtendsRangeBackward(t *testing.T) {
