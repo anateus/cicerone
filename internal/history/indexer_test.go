@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -139,6 +140,47 @@ func TestIndexerPublishesBatchesBeforeCompletion(t *testing.T) {
 	}
 	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || !ok || state.Head == "" {
 		t.Fatalf("final state=%#v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	for version := 0; version < 101; version++ {
+		repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-101)*time.Minute))
+	}
+	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	indexer := NewIndexer(gitrepo.New(source, execx.NewRunner()), s)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = indexer.Index(ctx, source, Request{Since: now.Add(-24 * time.Hour), Progress: func(progress Progress) {
+		if progress.Batches == 1 {
+			cancel()
+		}
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled index error=%v", err)
+	}
+	if state, ok, err := s.HistoryState(context.Background(), "core"); err != nil || ok {
+		t.Fatalf("cancelled state=%#v ok=%v err=%v", state, ok, err)
+	}
+	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{})
+	if err != nil || countEvents(groups) != 100 {
+		t.Fatalf("partial events=%d err=%v", countEvents(groups), err)
+	}
+	if _, err := indexer.Index(context.Background(), source, Request{Since: now.Add(-24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = s.QueryFeed(context.Background(), domain.FeedFilter{})
+	if err != nil || countEvents(groups) != 101 {
+		t.Fatalf("retried events=%d err=%v", countEvents(groups), err)
+	}
+	if state, ok, err := s.HistoryState(context.Background(), "core"); err != nil || !ok || state.Head == "" {
+		t.Fatalf("retried state=%#v ok=%v err=%v", state, ok, err)
 	}
 }
 
