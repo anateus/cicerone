@@ -1,16 +1,19 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
+	"cicerone/internal/domain"
 	"github.com/charmbracelet/x/ansi"
 )
 
 const narrowBreakpoint = 100
 const statusHeight = 1
+const feedHeaderHeight = 2
 
 func (m Model) render() string {
 	w, h := m.width, m.height
@@ -63,6 +66,43 @@ func viewportContent(v viewport.Model, content string, width, height, offset int
 	return v.View()
 }
 
+func (m *Model) syncViewports() {
+	w, h := m.width, m.height
+	if w <= 0 {
+		w = 80
+	}
+	if h <= 0 {
+		h = 24
+	}
+	feedWidth, inspectorWidth := w, w
+	if w >= narrowBreakpoint {
+		feedWidth = w * 3 / 5
+		inspectorWidth = w - feedWidth - 1
+	}
+	m.feedViewport.SetWidth(feedWidth)
+	m.feedViewport.SetHeight(h - statusHeight)
+	m.feedViewport.SetContent(m.renderFeed(feedWidth))
+	m.feedViewport.SetYOffset(m.viewportOffset)
+	m.viewportOffset = m.feedViewport.YOffset()
+	m.inspectorViewport.SetWidth(inspectorWidth)
+	m.inspectorViewport.SetHeight(h - statusHeight)
+	m.inspectorViewport.SetContent(m.renderInspector(inspectorWidth))
+}
+
+func (m *Model) keepSelectionVisible() {
+	m.syncViewports()
+	line := feedHeaderHeight + m.selected
+	top, height := m.feedViewport.YOffset(), m.feedViewport.Height()
+	if line < top {
+		top = line
+	}
+	if line >= top+height {
+		top = line - height + 1
+	}
+	m.feedViewport.SetYOffset(top)
+	m.viewportOffset = m.feedViewport.YOffset()
+}
+
 type palette struct{ primary, selectedFG, selectedBG, statusFG, statusBG color.Color }
 
 func (m Model) palette() palette {
@@ -87,12 +127,23 @@ func (m Model) statusLine(text string, width int) string {
 	return lipgloss.NewStyle().Foreground(p.statusFG).Background(p.statusBG).Render(fit(" "+text, width))
 }
 
+func (m Model) feedTitle(width int) string                { return m.titleLine(" Cicerone  Package updates", width) }
+func (m Model) contentLine(text string, width int) string { return fit(text, width) }
+func (m Model) feedControls(width int) string {
+	return fit(fmt.Sprintf(" Search: %s  Roll up: %s", fit(m.filter.Query, 18), onOff(m.filter.RollUp)), width)
+}
+func (m Model) feedGroupRow(marker string, e domain.UpdateEvent, width int) string {
+	return fit(marker+fit(e.Name, 18)+" "+fit(string(e.Kind), 8)+" "+e.OldVersion+" → "+e.NewVersion, width)
+}
+func (m Model) feedChildRow(e domain.UpdateEvent, width int) string {
+	return fit("    └ "+fit(string(e.Kind), 16)+" "+e.OldVersion+" → "+e.NewVersion, width)
+}
+
 func fit(s string, width int) string {
-	r := []rune(s)
-	if len(r) > width {
-		return string(r[:width])
+	if ansi.StringWidth(s) > width {
+		return ansi.Truncate(s, width, "")
 	}
-	return s + strings.Repeat(" ", width-len(r))
+	return s + strings.Repeat(" ", width-ansi.StringWidth(s))
 }
 
 func joinColumns(left, right string, lw, rw int) string {

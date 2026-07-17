@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cicerone/internal/domain"
 	"cicerone/internal/store"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestGoldenViews(t *testing.T) {
@@ -65,6 +67,20 @@ func TestStatusHasFixedHeight(t *testing.T) {
 	progress := m.View().Content
 	if lineCount(ready) != 8 || lineCount(progress) != 8 {
 		t.Fatalf("status changed screen height: %d, %d", lineCount(ready), lineCount(progress))
+	}
+}
+
+func TestWideUnicodeFrameUsesTerminalCellWidths(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 104, 8, false
+	e := event("unicode", "工具🔧")
+	e.Name = "工具🔧"
+	m.groups = []domain.FeedGroup{{ID: e.ID, Events: []domain.UpdateEvent{e}}}
+	m.notification = "同步完成 ✓"
+	for i, line := range strings.Split(m.View().Content, "\n") {
+		if got := ansi.StringWidth(line); got != m.width {
+			t.Fatalf("line %d cell width = %d, want %d: %q", i+1, got, m.width, line)
+		}
 	}
 }
 

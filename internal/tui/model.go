@@ -50,8 +50,10 @@ type Model struct {
 	notification                                   string
 	light                                          bool
 	feedRequestID, changelogRequestID, selectionID uint64
+	notifyRequestID                                uint64
 	changelog                                      []store.ChangelogSection
 	feedViewport, inspectorViewport                viewport.Model
+	refreshAnchors                                 map[uint64]domain.Anchor
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -62,7 +64,7 @@ func NewModel(deps Dependencies) Model {
 	}
 	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true, feedRequestID: 1,
 		filter:       domain.FeedFilter{Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{}},
-		feedViewport: viewport.New(), inspectorViewport: viewport.New()}
+		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor)}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -80,24 +82,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.width >= 100 {
 			m.detailOpen = false
 		}
+		m.syncViewports()
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.width >= narrowBreakpoint {
+			m.detailOpen = false
+		}
+		m.syncViewports()
 	case FeedLoaded:
 		if msg.RequestID != m.feedRequestID {
 			return m, nil
 		}
-		anchor := m.anchor()
+		anchor, captured := m.refreshAnchors[msg.RequestID]
+		if !captured {
+			anchor = m.anchor()
+		}
+		delete(m.refreshAnchors, msg.RequestID)
 		m.loading, m.stale, m.err = false, false, msg.Err
 		if msg.Err == nil {
 			m.groups = msg.Groups
 			restored := domain.RestoreSelection(anchor, m.groups)
 			m.selected, m.viewportOffset = restored.FallbackIndex, restored.ViewportOffset
 			m.clampSelection()
+			m.syncViewports()
 		}
 		return m, m.debounceChangelog()
 	case DatasetChanged:
 		m.stale, m.loading = true, true
 		m.feedRequestID++
+		m.refreshAnchors[m.feedRequestID] = m.anchor()
 		return m, m.queryFeed(m.feedRequestID)
 	case PreferencesLoaded:
 		if msg.Err == nil {
@@ -127,6 +140,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ToggleExpanded:
 		if len(m.groups) > 0 {
 			m.expanded[m.groups[m.selected].ID] = !m.expanded[m.groups[m.selected].ID]
+			m.syncViewports()
 		}
 	case ChangelogDebounced:
 		if msg.SelectionID != m.selectionID || len(m.groups) == 0 {
@@ -142,8 +156,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err, m.changelog = msg.Err, msg.Sections
 	case Notify:
+		if msg.RequestID != 0 && msg.RequestID < m.notifyRequestID {
+			return m, nil
+		}
 		if msg.SelectionID != 0 && msg.SelectionID != m.selectionID {
 			return m, nil
+		}
+		if msg.RequestID > m.notifyRequestID {
+			m.notifyRequestID = msg.RequestID
 		}
 		m.notification = msg.Text
 		if msg.Err != nil {
@@ -151,6 +171,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case SetLightMode:
 		m.light = msg.Light
+		m.syncViewports()
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -165,12 +186,14 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.selected+1 < len(m.groups) {
 			m.selected++
 			m.selectionID++
+			m.keepSelectionVisible()
 			return m, m.debounceChangelog()
 		}
 	case "k", "up":
 		if m.selected > 0 {
 			m.selected--
 			m.selectionID++
+			m.keepSelectionVisible()
 			return m, m.debounceChangelog()
 		}
 	case "tab":
