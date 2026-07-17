@@ -166,6 +166,29 @@ func TestSyncRunRetainsCountsCursorSuccessAndBoundedError(t *testing.T) {
 	}
 }
 
+func TestSyncFinishedRejectsMissingRun(t *testing.T) {
+	s := openTestStore(t)
+	err := s.SyncFinished(context.Background(), "missing", time.Now(), SyncResult{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no active sync run") {
+		t.Fatalf("SyncFinished missing run error = %v", err)
+	}
+}
+
+func TestSyncFinishedRejectsAlreadyCompletedRun(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.SyncStarted(ctx, "core", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncFinished(ctx, "core", time.Now(), SyncResult{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	err := s.SyncFinished(ctx, "core", time.Now(), SyncResult{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no active sync run") {
+		t.Fatalf("second SyncFinished error = %v", err)
+	}
+}
+
 func assertPragma(t *testing.T, db *sql.DB, name, want string) {
 	t.Helper()
 	var got string

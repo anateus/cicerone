@@ -24,7 +24,6 @@ type Store interface {
 	SyncStarted(context.Context, string, time.Time) error
 	SyncFinished(context.Context, string, time.Time, Result, error) error
 }
-
 type Request struct {
 	Since     time.Time
 	Installed []domain.PackageID
@@ -50,7 +49,6 @@ type Dependencies struct {
 	Now          func() time.Time
 	InitialSince time.Time
 }
-
 type SyncStarted struct {
 	Source string
 	At     time.Time
@@ -65,23 +63,33 @@ type SyncFailed struct {
 	At     time.Time
 	Err    error
 }
+type operation struct {
+	source  string
+	req     Request
+	refresh bool
+}
 
 type Coordinator struct {
-	deps      Dependencies
-	mu        sync.Mutex
-	root      context.Context
-	cancel    context.CancelFunc
-	sem       chan struct{}
-	wg        sync.WaitGroup
-	installed []domain.PackageID
-	closed    bool
+	deps                          Dependencies
+	mu                            sync.Mutex
+	cond                          *sync.Cond
+	root                          context.Context
+	cancel                        context.CancelFunc
+	sem                           chan struct{}
+	active                        int
+	installed                     []domain.PackageID
+	closed, started, sourcesReady bool
+	pending                       []operation
 }
 
 func New(deps Dependencies) *Coordinator {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	return &Coordinator{deps: deps, sem: make(chan struct{}, 2)}
+	c := &Coordinator{deps: deps, sem: make(chan struct{}, 2)}
+	c.sourcesReady = deps.LoadSources == nil
+	c.cond = sync.NewCond(&c.mu)
+	return c
 }
 
 func (c *Coordinator) context(parent context.Context) (context.Context, bool) {
@@ -105,12 +113,19 @@ func (c *Coordinator) Start(ctx context.Context) {
 	if !ok {
 		return
 	}
-	if c.deps.Cache != nil {
-		_ = c.deps.Cache.LoadCached(root)
+	c.mu.Lock()
+	if c.started || c.closed {
+		c.mu.Unlock()
+		return
 	}
-	c.wg.Add(1)
+	c.started = true
+	c.active++
+	c.mu.Unlock()
 	go func() {
-		defer c.wg.Done()
+		defer c.done()
+		if c.deps.Cache != nil {
+			_ = c.deps.Cache.LoadCached(root)
+		}
 		if err := c.refreshInstalled(root); err != nil {
 			c.notify(SyncFailed{Source: "installed", At: c.deps.Now(), Err: bounded(err)})
 			if errors.Is(err, context.Canceled) {
@@ -125,13 +140,23 @@ func (c *Coordinator) Start(ctx context.Context) {
 				c.notify(SyncFailed{Source: "repositories", At: c.deps.Now(), Err: bounded(err)})
 				return
 			}
-			c.mu.Lock()
-			c.deps.Sources = sources
+		}
+		c.mu.Lock()
+		if c.closed {
 			c.mu.Unlock()
+			return
 		}
+		c.deps.Sources = append([]Source(nil), sources...)
+		c.sourcesReady = true
 		for _, source := range sources {
-			c.schedule(root, source, Request{Since: c.deps.InitialSince.UTC()}, true)
+			c.scheduleLocked(root, source, Request{Since: c.deps.InitialSince.UTC()}, true)
 		}
+		pending := c.pending
+		c.pending = nil
+		for _, op := range pending {
+			c.scheduleOperationLocked(root, op)
+		}
+		c.mu.Unlock()
 	}()
 }
 
@@ -158,13 +183,14 @@ func (c *Coordinator) refreshInstalled(ctx context.Context) error {
 	return nil
 }
 
-func (c *Coordinator) schedule(ctx context.Context, source Source, req Request, refresh bool) {
-	if source == nil {
+// scheduleLocked accepts work while holding mu, before any goroutine can race Close.
+func (c *Coordinator) scheduleLocked(ctx context.Context, source Source, req Request, refresh bool) {
+	if source == nil || c.closed {
 		return
 	}
-	c.wg.Add(1)
+	c.active++
 	go func() {
-		defer c.wg.Done()
+		defer c.done()
 		select {
 		case c.sem <- struct{}{}:
 		case <-ctx.Done():
@@ -175,10 +201,22 @@ func (c *Coordinator) schedule(ctx context.Context, source Source, req Request, 
 	}()
 }
 
+func (c *Coordinator) scheduleOperationLocked(ctx context.Context, op operation) {
+	for _, source := range c.deps.Sources {
+		if op.source == "" || source.Name() == op.source {
+			c.scheduleLocked(ctx, source, op.req, op.refresh)
+		}
+	}
+}
+func (c *Coordinator) done() { c.mu.Lock(); c.active--; c.cond.Broadcast(); c.mu.Unlock() }
+
 func (c *Coordinator) run(ctx context.Context, source Source, req Request, refresh bool) {
 	started := c.deps.Now()
 	if c.deps.Store != nil {
-		_ = c.deps.Store.SyncStarted(ctx, source.Name(), started)
+		if err := c.deps.Store.SyncStarted(ctx, source.Name(), started); err != nil {
+			c.notify(SyncFailed{Source: source.Name(), At: c.deps.Now(), Err: bounded(err)})
+			return
+		}
 	}
 	c.notify(SyncStarted{Source: source.Name(), At: started})
 	var result Result
@@ -212,42 +250,61 @@ func (c *Coordinator) Retry(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	for _, source := range c.deps.Sources {
-		if source.Name() == name {
-			c.schedule(root, source, Request{}, true)
-			return
-		}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
 	}
+	op := operation{source: name, refresh: true}
+	if !c.sourcesReady {
+		c.pending = append(c.pending, op)
+		return
+	}
+	c.scheduleOperationLocked(root, op)
 }
-
 func (c *Coordinator) EnsureRange(ctx context.Context, since time.Time) {
 	root, ok := c.context(ctx)
 	if !ok {
 		return
 	}
-	for _, source := range c.deps.Sources {
-		c.schedule(root, source, Request{Since: since.UTC()}, false)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
 	}
+	op := operation{req: Request{Since: since.UTC()}}
+	if !c.sourcesReady {
+		c.pending = append(c.pending, op)
+		return
+	}
+	c.scheduleOperationLocked(root, op)
 }
-
 func (c *Coordinator) notify(msg tea.Msg) {
 	if c.deps.Notify != nil {
 		c.deps.Notify(msg)
 	}
 }
-func (c *Coordinator) Wait() { c.wg.Wait() }
+func (c *Coordinator) Wait() {
+	c.mu.Lock()
+	for c.active > 0 {
+		c.cond.Wait()
+	}
+	c.mu.Unlock()
+}
 func (c *Coordinator) Close() {
 	c.mu.Lock()
 	if !c.closed {
 		c.closed = true
+		c.pending = nil
 		if c.cancel != nil {
 			c.cancel()
 		}
 	}
+	for c.active > 0 {
+		c.cond.Wait()
+	}
 	c.mu.Unlock()
-	c.wg.Wait()
 }
-
 func bounded(err error) error {
 	if err == nil {
 		return nil

@@ -36,9 +36,10 @@ func (f fakeInstalled) Installed(ctx context.Context) ([]domain.InstalledPackage
 }
 
 type fakeDestination struct {
-	mu               sync.Mutex
-	installed        bool
-	starts, finishes []string
+	mu                  sync.Mutex
+	installed           bool
+	starts, finishes    []string
+	startErr, finishErr error
 }
 
 func (f *fakeDestination) SetInstalled(context.Context, []domain.InstalledPackage) error {
@@ -51,13 +52,104 @@ func (f *fakeDestination) SyncStarted(_ context.Context, source string, _ time.T
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, source)
-	return nil
+	return f.startErr
 }
 func (f *fakeDestination) SyncFinished(_ context.Context, source string, _ time.Time, _ Result, _ error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finishes = append(f.finishes, source)
-	return nil
+	return f.finishErr
+}
+
+func TestRetryAndEnsureRangeQueueDuringDiscovery(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	discoveryStarted, releaseDiscovery := make(chan struct{}), make(chan struct{})
+	requests := make(chan Request, 3)
+	var refreshes atomic.Int32
+	job := fakeJob{name: "core", destination: destination, refresh: func(context.Context) error { refreshes.Add(1); return nil }, index: func(_ context.Context, req Request) (Result, error) { requests <- req; return Result{}, nil }}
+	c := New(Dependencies{Store: destination, LoadSources: func(ctx context.Context) ([]Source, error) {
+		close(discoveryStarted)
+		select {
+		case <-releaseDiscovery:
+			return []Source{job}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}})
+	c.Start(context.Background())
+	<-discoveryStarted
+	since := time.Now().Add(-180 * 24 * time.Hour).UTC()
+	c.Retry(context.Background(), "core")
+	c.EnsureRange(context.Background(), since)
+	close(releaseDiscovery)
+	c.Wait()
+	if refreshes.Load() != 2 {
+		t.Fatalf("refreshes = %d, want startup and retry", refreshes.Load())
+	}
+	seenRange := false
+	for range 3 {
+		if req := <-requests; req.Since.Equal(since) {
+			seenRange = true
+		}
+	}
+	if !seenRange {
+		t.Fatal("queued range request was dropped")
+	}
+}
+
+func TestCloseDuringDiscoveryAndCallsAfterCloseDoNoWork(t *testing.T) {
+	discoveryStarted := make(chan struct{})
+	loaderStopped := make(chan struct{})
+	var work atomic.Int32
+	c := New(Dependencies{LoadSources: func(ctx context.Context) ([]Source, error) {
+		work.Add(1)
+		close(discoveryStarted)
+		<-ctx.Done()
+		close(loaderStopped)
+		return nil, ctx.Err()
+	}})
+	c.Start(context.Background())
+	<-discoveryStarted
+	done := make(chan struct{})
+	go func() { c.Close(); close(done) }()
+	waitClosed(t, loaderStopped, "discovery cancellation")
+	waitClosed(t, done, "close")
+	c.Retry(context.Background(), "core")
+	c.EnsureRange(context.Background(), time.Now())
+	c.Start(context.Background())
+	if work.Load() != 1 {
+		t.Fatalf("source loads = %d, want only initial load", work.Load())
+	}
+}
+
+func TestSyncStartedPersistenceFailureSkipsSourceWorkAndCommit(t *testing.T) {
+	destination := &fakeDestination{installed: true, startErr: errors.New("start write failed")}
+	var indexed atomic.Int32
+	var messages []tea.Msg
+	var mu sync.Mutex
+	job := fakeJob{name: "core", destination: destination, index: func(context.Context, Request) (Result, error) { indexed.Add(1); return Result{}, nil }}
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) { mu.Lock(); messages = append(messages, msg); mu.Unlock() }})
+	c.Start(context.Background())
+	c.Wait()
+	if indexed.Load() != 0 {
+		t.Fatal("indexed after SyncStarted persistence failed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	failed, committed, changed := 0, 0, 0
+	for _, msg := range messages {
+		switch msg.(type) {
+		case SyncFailed:
+			failed++
+		case SyncCommitted:
+			committed++
+		case tui.DatasetChanged:
+			changed++
+		}
+	}
+	if failed != 1 || committed != 0 || changed != 0 {
+		t.Fatalf("messages failed=%d committed=%d changed=%d", failed, committed, changed)
+	}
 }
 
 type fakeJob struct {

@@ -45,7 +45,7 @@ func (s repositorySource) Index(ctx context.Context, req syncer.Request) (syncer
 	return syncer.Result{Events: result.Events, Diagnostics: result.Diagnostics, Cursor: result.Head, Since: result.Since}, err
 }
 
-func run() error {
+func run() (runErr error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -62,6 +62,12 @@ func run() error {
 		stopProcesses()
 		return err
 	}
+	defer func() {
+		if closeErr := destination.Close(); runErr == nil {
+			runErr = closeErr
+		}
+	}()
+	defer stopProcesses()
 
 	runner := execx.NewRunner()
 	var program *tea.Program
@@ -95,16 +101,11 @@ func run() error {
 				program.Send(msg)
 			}
 		}})
+	defer coordinator.Close()
 	model := tui.New(tui.Dependencies{Data: destination, Context: ctx, OnReady: func() tea.Msg { coordinator.Start(ctx); return nil }})
 	program = tea.NewProgram(model)
-	_, runErr := program.Run()
-	coordinator.Close()
-	stopProcesses()
-	closeErr := destination.Close()
-	if runErr != nil {
-		return runErr
-	}
-	return closeErr
+	_, runErr = program.Run()
+	return runErr
 }
 
 func main() {

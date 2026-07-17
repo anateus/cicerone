@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -46,8 +47,18 @@ func (s *Store) SyncFinished(ctx context.Context, source string, at time.Time, r
 		if syncErr == nil {
 			lastSuccess = sql.NullInt64{Int64: at.UnixNano(), Valid: true}
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE sync_runs SET completed_at=?,error=?,cursor=?,event_count=?,diagnostic_count=?,last_success_at=? WHERE id=(SELECT id FROM sync_runs WHERE repository_id=? ORDER BY id DESC LIMIT 1)`, at.UnixNano(), errorText, result.Cursor, result.Events, result.Diagnostics, lastSuccess, source)
-		return err
+		updated, err := tx.ExecContext(ctx, `UPDATE sync_runs SET completed_at=?,error=?,cursor=?,event_count=?,diagnostic_count=?,last_success_at=? WHERE id=(SELECT id FROM sync_runs WHERE repository_id=? AND completed_at IS NULL ORDER BY id DESC LIMIT 1)`, at.UnixNano(), errorText, result.Cursor, result.Events, result.Diagnostics, lastSuccess, source)
+		if err != nil {
+			return err
+		}
+		rows, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return fmt.Errorf("no active sync run for %s", source)
+		}
+		return nil
 	})
 }
 
