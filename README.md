@@ -53,7 +53,7 @@ Cached feed and changelog content remains readable offline. See [Cache and recov
 
 ## GitHub access
 
-Public GitHub release and repository APIs work without authentication but are rate-limited. Set `GITHUB_TOKEN` to send `Authorization: Bearer …` on GitHub API requests. Cicerone does not persist or print the token. Use a minimally scoped token suitable for repositories whose changelogs you inspect.
+For GitHub API access, `GITHUB_TOKEN` takes precedence. If it is unset or empty, Cicerone tries `gh auth token`. When authentication is unavailable, Cicerone falls back to the public rate-limited API. Tokens are never persisted or printed.
 
 ## Tests
 

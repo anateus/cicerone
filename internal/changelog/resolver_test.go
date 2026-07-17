@@ -3,6 +3,8 @@ package changelog
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,8 +13,103 @@ import (
 	"time"
 
 	"cicerone/internal/domain"
+	"cicerone/internal/execx"
 	"cicerone/internal/store"
+	"github.com/google/go-cmp/cmp"
 )
+
+type runnerCall struct {
+	name string
+	args []string
+}
+
+type recordingRunner struct {
+	result execx.Result
+	err    error
+	calls  []runnerCall
+}
+
+func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (execx.Result, error) {
+	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
+	return r.result, r.err
+}
+
+func (r *recordingRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
+	return nil, errors.New("unexpected Stream call")
+}
+
+func TestResolverGitHubTokenPrefersEnvironment(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", " environment-token ")
+	runner := &recordingRunner{result: execx.Result{Stdout: []byte("cli-token\n")}}
+	r := NewResolver(nil, nil, WithGitHubTokenRunner(runner))
+	if r.githubToken != "environment-token" {
+		t.Fatalf("token=%q", r.githubToken)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("calls=%v", runner.calls)
+	}
+}
+
+func TestResolverGitHubTokenFallsBackToCLI(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	runner := &recordingRunner{result: execx.Result{Stdout: []byte("cli-token\n")}}
+	r := NewResolver(nil, nil, WithGitHubTokenRunner(runner))
+	if r.githubToken != "cli-token" {
+		t.Fatalf("token=%q", r.githubToken)
+	}
+	if diff := cmp.Diff([]runnerCall{{name: "gh", args: []string{"auth", "token"}}}, runner.calls, cmp.AllowUnexported(runnerCall{})); diff != "" {
+		t.Fatal(diff)
+	}
+}
+
+func TestResolverGitHubTokenUnavailable(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	tests := []struct {
+		name   string
+		result execx.Result
+		err    error
+	}{
+		{name: "runner error", err: errors.New("gh unavailable")},
+		{name: "whitespace stdout", result: execx.Result{Stdout: []byte(" \n\t")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingRunner{result: tt.result, err: tt.err}
+			r := NewResolver(nil, nil, WithGitHubTokenRunner(runner))
+			if r.githubToken != "" {
+				t.Fatalf("token=%q", r.githubToken)
+			}
+		})
+	}
+}
+
+func TestResolverGitHubTokenResolvedOnceAndUsedForRequests(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	runner := &recordingRunner{result: execx.Result{Stdout: []byte("cli-token\n")}}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer cli-token" {
+			t.Errorf("authorization=%q", got)
+		}
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+	r := NewResolver(nil, server.Client(), WithGitHubTokenRunner(runner))
+	for range 2 {
+		resp, err := r.request(context.Background(), server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d", requests)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%v", runner.calls)
+	}
+}
 
 func TestResolverUsesRepositoryFilenameOrderAndCachesResult(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "")
@@ -406,7 +503,7 @@ func TestResolverTriesNormalizedGitHubReleaseTagsAndOptionalToken(t *testing.T) 
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	r := NewResolver(cache, server.Client())
+	r := NewResolver(cache, server.Client(), WithGitHubTokenRunner(nil))
 	r.APIBaseURL = server.URL
 	section, err := r.Resolve(ctx, PackageRef{Name: "widget", RepositoryURL: "https://github.com/acme/widget", Type: domain.PackageFormula}, "2.0.0")
 	if err != nil {

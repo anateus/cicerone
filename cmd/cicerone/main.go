@@ -197,7 +197,7 @@ func run() (runErr error) {
 			}
 		}})
 	defer coordinator.Close()
-	resolver := changelog.NewResolver(destination, nil)
+	resolver := changelog.NewResolver(destination, nil, changelog.WithGitHubTokenRunner(execx.NewRunner()))
 	loader := changelogLoader{cache: destination, resolver: resolver, repository: func(loadCtx context.Context, name string) (gitrepo.Repository, error) {
 		repositoriesMu.RLock()
 		repository, ok := repositories[name]

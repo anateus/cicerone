@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cicerone/internal/domain"
+	"cicerone/internal/execx"
 	"cicerone/internal/store"
 )
 
@@ -25,19 +26,39 @@ type PackageRef struct {
 }
 
 type Resolver struct {
-	Store      *store.Store
-	Client     *http.Client
-	Fetcher    *Fetcher
-	Extractor  ContentExtractor
-	APIBaseURL string
-	Now        func() time.Time
+	Store       *store.Store
+	Client      *http.Client
+	Fetcher     *Fetcher
+	Extractor   ContentExtractor
+	APIBaseURL  string
+	Now         func() time.Time
+	githubToken string
 }
 
-func NewResolver(cache *store.Store, client *http.Client) *Resolver {
+type ResolverOption func(*Resolver)
+
+func WithGitHubTokenRunner(runner execx.Runner) ResolverOption {
+	return func(r *Resolver) {
+		r.githubToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+		if r.githubToken != "" || runner == nil {
+			return
+		}
+		result, err := runner.Run(context.Background(), "gh", "auth", "token")
+		if err == nil {
+			r.githubToken = strings.TrimSpace(string(result.Stdout))
+		}
+	}
+}
+
+func NewResolver(cache *store.Store, client *http.Client, options ...ResolverOption) *Resolver {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Resolver{Store: cache, Client: client, APIBaseURL: "https://api.github.com", Now: func() time.Time { return time.Now().UTC() }}
+	r := &Resolver{Store: cache, Client: client, APIBaseURL: "https://api.github.com", Now: func() time.Time { return time.Now().UTC() }}
+	for _, option := range options {
+		option(r)
+	}
+	return r
 }
 
 func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) (Section, error) {
@@ -338,8 +359,8 @@ func (r *Resolver) request(ctx context.Context, endpoint string) (*http.Response
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if r.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+r.githubToken)
 	}
 	resp, err := r.Client.Do(req)
 	if err != nil {
