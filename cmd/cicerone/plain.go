@@ -95,13 +95,19 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 		for _, name := range sources {
 			record := bySource[name]
 			if record.started {
-				fmt.Fprintf(out, "Synchronizing %s…\n", name)
+				if _, err := fmt.Fprintf(out, "Synchronizing %s…\n", name); err != nil {
+					failures = append(failures, err)
+				}
 			}
 			switch event := record.result.(type) {
 			case syncer.SyncCommitted:
-				fmt.Fprintf(out, "%s synchronized · %d updates\n", name, event.Result.Events)
+				if _, err := fmt.Fprintf(out, "%s synchronized · %d updates\n", name, event.Result.Events); err != nil {
+					failures = append(failures, err)
+				}
 			case syncer.SyncFailed:
-				fmt.Fprintf(out, "%s synchronization failed · %v\n", name, event.Err)
+				if _, err := fmt.Fprintf(out, "%s synchronization failed · %v\n", name, event.Err); err != nil {
+					failures = append(failures, err)
+				}
 				failures = append(failures, event.Err)
 			}
 		}

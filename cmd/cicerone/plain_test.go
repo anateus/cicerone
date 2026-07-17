@@ -23,6 +23,20 @@ type fakePlainRuntime struct {
 	waited        bool
 }
 
+type failOnceStatusWriter struct {
+	buffer *bytes.Buffer
+	err    error
+	failed bool
+}
+
+func (w *failOnceStatusWriter) Write(p []byte) (int, error) {
+	if !w.failed && bytes.HasPrefix(p, []byte("Synchronizing ")) {
+		w.failed = true
+		return len(p) / 2, w.err
+	}
+	return w.buffer.Write(p)
+}
+
 func (f *fakePlainRuntime) Preferences(context.Context) (domain.FeedFilter, error) {
 	return domain.FeedFilter{}, nil
 }
@@ -103,6 +117,28 @@ func TestRunPlainReturnsCollectedSyncFailures(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "homebrew-cask synchronization failed · network unavailable\n") {
 		t.Fatalf("failure output missing detail:\n%s", got)
+	}
+}
+
+func TestRunPlainReturnsStatusWriteErrorWithCollectedSyncFailure(t *testing.T) {
+	wantSyncErr := errors.New("network unavailable")
+	wantWriteErr := errors.New("broken pipe")
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{
+		out: &out, queries: [][]domain.FeedGroup{nil, nil},
+		notifications: []tea.Msg{
+			syncer.SyncStarted{Source: "homebrew-cask"},
+			syncer.SyncFailed{Source: "homebrew-cask", Err: wantSyncErr},
+		},
+	}
+	writer := &failOnceStatusWriter{buffer: &out, err: wantWriteErr}
+
+	err := runPlain(context.Background(), runtime, writer)
+	if !errors.Is(err, wantWriteErr) {
+		t.Fatalf("runPlain error = %v, want wrapped writer error %v", err, wantWriteErr)
+	}
+	if !errors.Is(err, wantSyncErr) {
+		t.Fatalf("runPlain error = %v, want wrapped sync error %v", err, wantSyncErr)
 	}
 }
 
