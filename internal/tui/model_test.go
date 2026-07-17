@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,29 @@ func TestModelPreservesInteractionStateAcrossDatasetChange(t *testing.T) {
 	}
 	if !m.filter.Kinds[domain.EventRevision] || !m.filter.RollUp || m.filter.Query != "openssl" {
 		t.Fatalf("filter state lost: %#v", m.filter)
+	}
+}
+
+func TestSyncProgressRendersAuthoritativeCounts(t *testing.T) {
+	m := NewModel(Dependencies{})
+	next, cmd := m.Update(SyncProgress{Source: "homebrew-core", Commits: 100, Events: 8, Batches: 1})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("progress did not start spinner")
+	}
+	view := m.render()
+	for _, want := range []string{"homebrew-core", "100 commits scanned", "8 updates", "1 batches"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q: %q", want, view)
+		}
+	}
+	m = update(t, m, SyncProgress{Source: "homebrew-core", Commits: 200, Events: 12, Batches: 2})
+	if got := m.syncProgress["homebrew-core"]; got.Commits != 200 || got.Events != 12 {
+		t.Fatalf("progress=%#v", got)
+	}
+	m = update(t, m, SyncDone{Source: "homebrew-core"})
+	if len(m.activeSync) != 0 {
+		t.Fatalf("active=%v", m.activeSync)
 	}
 }
 

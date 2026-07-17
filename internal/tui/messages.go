@@ -14,6 +14,11 @@ type FeedLoaded struct {
 
 type DatasetChanged struct{ Stale bool }
 type WindowSize struct{ Width, Height int }
+type SyncProgress struct {
+	Source                                string
+	Commits, Events, Diagnostics, Batches int
+}
+type SyncDone struct{ Source string }
 
 type ChangelogLoaded struct {
 	RequestID   uint64

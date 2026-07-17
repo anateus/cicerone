@@ -33,6 +33,9 @@ func (m Model) render() string {
 			status = "Ready"
 		}
 	}
+	if len(m.activeSync) > 0 {
+		status = m.spinner.View() + " " + status
+	}
 	var body string
 	if w < narrowBreakpoint {
 		if m.detailOpen {

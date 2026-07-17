@@ -80,9 +80,13 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 			switch event := msg.(type) {
 			case syncer.SyncStarted:
 				notify(tui.Notify{Text: "Synchronizing " + event.Source + "…"})
+			case syncer.SyncProgress:
+				notify(tui.SyncProgress{Source: event.Source, Commits: event.Progress.Commits, Events: event.Progress.Events, Diagnostics: event.Progress.Diagnostics, Batches: event.Progress.Batches})
 			case syncer.SyncCommitted:
+				notify(tui.SyncDone{Source: event.Source})
 				notify(tui.Notify{Text: fmt.Sprintf("%s synchronized · %d updates", event.Source, event.Result.Events)})
 			case syncer.SyncFailed:
+				notify(tui.SyncDone{Source: event.Source})
 				notify(tui.Notify{Text: event.Source + " synchronization failed", Err: event.Err})
 			}
 			notify(msg)

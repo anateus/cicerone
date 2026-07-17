@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"cicerone/internal/domain"
@@ -74,6 +76,9 @@ type Model struct {
 	actionRunning                                  bool
 	actionOutput                                   string
 	actionAnchor                                   domain.Anchor
+	syncProgress                                   map[string]SyncProgress
+	activeSync                                     map[string]bool
+	spinner                                        spinner.Model
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -84,7 +89,8 @@ func NewModel(deps Dependencies) Model {
 	}
 	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true, feedRequestID: 1,
 		filter:       domain.FeedFilter{Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{}},
-		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor)}
+		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor),
+		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool), spinner: spinner.New(spinner.WithSpinner(spinner.Dot))}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -139,6 +145,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.feedRequestID++
 		m.refreshAnchors[m.feedRequestID] = m.anchor()
 		return m, m.queryFeed(m.feedRequestID)
+	case SyncProgress:
+		wasInactive := len(m.activeSync) == 0
+		m.syncProgress[msg.Source] = msg
+		m.activeSync[msg.Source] = true
+		m.notification = fmt.Sprintf("%s · %d commits scanned · %d updates · %d batches", msg.Source, msg.Commits, msg.Events, msg.Batches)
+		if wasInactive {
+			return m, m.spinner.Tick
+		}
+	case SyncDone:
+		delete(m.activeSync, msg.Source)
+	case spinner.TickMsg:
+		if len(m.activeSync) == 0 {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	case PreferencesLoaded:
 		if msg.Err == nil {
 			msg.Filter.Now = m.filter.Now
