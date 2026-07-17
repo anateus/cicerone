@@ -44,3 +44,12 @@ func TestParseDefinitionRejectsComputedRubyWithoutEvaluation(t *testing.T) {
 		t.Fatalf("got %#v diagnostics %v", got, diagnostics)
 	}
 }
+
+func TestParseDefinitionDiagnosesUnsupportedVersionForms(t *testing.T) {
+	for _, value := range []string{`:unknown`, `ENV.fetch("VERSION")`, `"1.#{patch}"`} {
+		got, diagnostics := ParseDefinition("Casks/foo.rb", []byte("cask \"foo\" do\n  version "+value+"\nend\n"))
+		if got.Version != "" || len(diagnostics) == 0 {
+			t.Fatalf("version %s: got %#v diagnostics %v", value, got, diagnostics)
+		}
+	}
+}

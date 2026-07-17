@@ -24,6 +24,7 @@ var (
 	latestToken        = regexp.MustCompile(`(?m)^\s*version\s+:latest\s*(?:#.*)?$`)
 	headToken          = regexp.MustCompile(`(?m)^\s*head\s+(["'])([^"']+)["'](?:\s*,.*)?$`)
 	unsupportedVersion = regexp.MustCompile(`(?m)^\s*version\s+[^"':\s].*$`)
+	versionLine        = regexp.MustCompile(`(?m)^\s*version\s+(.+?)\s*(?:#.*)?$`)
 	urlVersion         = regexp.MustCompile(`(?i)(?:^|[-_/])v?(\d+(?:\.\d+)+(?:[-._][0-9A-Za-z]+)?)`)
 )
 
@@ -44,6 +45,9 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 	d.Homepage = quotedValue(quotedToken("homepage"), text)
 	d.URL = quotedValue(quotedToken("url"), text)
 	d.Version = quotedValue(quotedToken("version"), text)
+	if strings.Contains(d.Version, "#{") {
+		d.Version = ""
+	}
 	if d.Version == "" && d.Type == domain.PackageFormula {
 		if m := urlVersion.FindStringSubmatch(d.URL); len(m) > 0 {
 			d.Version = m[1]
@@ -59,7 +63,7 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 		d.Revision = m[1]
 	}
 	var diagnostics []string
-	if d.Version == "" && unsupportedVersion.MatchString(text) {
+	if d.Version == "" && (unsupportedVersion.MatchString(text) || versionLine.MatchString(text)) {
 		diagnostics = append(diagnostics, "unsupported computed version expression")
 	}
 	return d, diagnostics

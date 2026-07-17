@@ -24,6 +24,9 @@ func Classify(before, after *Definition) Classification {
 		return Classification{Kind: domain.EventVersion}
 	}
 	if after == nil {
+		if before.Version == "" {
+			return Classification{Ambiguous: true, Diagnostic: "definition version could not be derived"}
+		}
 		return Classification{Kind: domain.EventMetadata}
 	}
 	if before.Version == "" || after.Version == "" {

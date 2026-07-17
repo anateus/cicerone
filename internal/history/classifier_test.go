@@ -18,6 +18,8 @@ func TestClassifyPriorityAndLifecycle(t *testing.T) {
 		{"revision wins", &base, ptrDef(with(base, "1", "1", "b")), domain.EventRevision, false},
 		{"metadata", &base, ptrDef(with(base, "1", "0", "b")), domain.EventMetadata, false},
 		{"missing identity", &Definition{Version: "1"}, &Definition{Version: "2"}, "", true},
+		{"missing version before edit", &Definition{Name: "foo", Type: domain.PackageFormula}, &Definition{Name: "foo", Type: domain.PackageFormula, Homepage: "new"}, "", true},
+		{"missing version deletion", &Definition{Name: "foo", Type: domain.PackageFormula}, nil, "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -14,21 +14,49 @@ type HistoryState struct {
 	Since time.Time
 }
 type HistoryAlias struct {
-	Alias     string
-	PackageID domain.PackageID
+	Alias              string
+	PackageID          domain.PackageID
+	Repository, Commit string
 }
+type HistoryDiagnostic struct{ Repository, Commit, Path, Message string }
 type HistoryBatch struct {
 	Repository, Path, Head string
 	Since                  time.Time
 	Events                 []domain.UpdateEvent
 	Aliases                []HistoryAlias
+	Diagnostics            []HistoryDiagnostic
 	RemoveCommits          []string
 }
 
-func (s *Store) HasHistoryEvent(ctx context.Context, packageID domain.PackageID, kind domain.EventKind) (bool, error) {
+func (s *Store) HasHistoryEvent(ctx context.Context, repository string, packageID domain.PackageID, kind domain.EventKind) (bool, error) {
 	var found bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM update_events WHERE package_id=? AND kind=?)`, packageID, kind).Scan(&found)
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM update_events WHERE repository=? AND package_id=? AND kind=?)`, repository, packageID, kind).Scan(&found)
 	return found, err
+}
+
+func (s *Store) ResolveHistoryPackageID(ctx context.Context, repository string, id domain.PackageID) (domain.PackageID, error) {
+	var result domain.PackageID
+	err := s.db.QueryRowContext(ctx, `SELECT package_id FROM history_aliases WHERE repository=? AND alias=?`, repository, id).Scan(&result)
+	if err == sql.ErrNoRows {
+		return id, nil
+	}
+	return result, err
+}
+func (s *Store) HistoryDiagnostics(ctx context.Context, repository string) ([]HistoryDiagnostic, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repository,commit_hash,definition_path,message FROM history_diagnostics WHERE repository=? ORDER BY commit_hash,definition_path,message`, repository)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HistoryDiagnostic
+	for rows.Next() {
+		var d HistoryDiagnostic
+		if err := rows.Scan(&d.Repository, &d.Commit, &d.Path, &d.Message); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) HistoryState(ctx context.Context, repository string) (HistoryState, bool, error) {
@@ -61,6 +89,12 @@ func (s *Store) ApplyHistory(ctx context.Context, batch HistoryBatch) error {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM update_events WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`)`, args...); err != nil {
 				return err
 			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM history_aliases WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`)`, args...); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM history_diagnostics WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`)`, args...); err != nil {
+				return err
+			}
 		}
 		for _, event := range batch.Events {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO packages(id,name,type) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,type=excluded.type`, event.PackageID, event.Name, event.Type); err != nil {
@@ -74,7 +108,20 @@ func (s *Store) ApplyHistory(ctx context.Context, batch HistoryBatch) error {
 			if strings.TrimSpace(alias.Alias) == "" {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO package_aliases(alias,package_id) VALUES(?,?) ON CONFLICT(alias) DO UPDATE SET package_id=excluded.package_id`, alias.Alias, alias.PackageID); err != nil {
+			repository := alias.Repository
+			if repository == "" {
+				repository = batch.Repository
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO history_aliases(repository,alias,package_id,commit_hash) VALUES(?,?,?,?) ON CONFLICT(repository,alias) DO UPDATE SET package_id=excluded.package_id,commit_hash=excluded.commit_hash`, repository, alias.Alias, alias.PackageID, alias.Commit); err != nil {
+				return err
+			}
+		}
+		for _, d := range batch.Diagnostics {
+			repository := d.Repository
+			if repository == "" {
+				repository = batch.Repository
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO history_diagnostics(repository,commit_hash,definition_path,message) VALUES(?,?,?,?) ON CONFLICT DO NOTHING`, repository, d.Commit, d.Path, d.Message); err != nil {
 				return err
 			}
 		}

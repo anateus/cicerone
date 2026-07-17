@@ -72,12 +72,16 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	}
 	seen := map[string]bool{}
 	missing := map[string]bool{}
-	for _, packageID := range req.Installed {
+	for _, installedID := range req.Installed {
+		packageID, e := i.store.ResolveHistoryPackageID(ctx, source.Name, installedID)
+		if e != nil {
+			return Result{}, e
+		}
 		for _, kind := range []domain.EventKind{domain.EventVersion, domain.EventRevision, domain.EventMetadata} {
 			if len(req.Kinds) > 0 && !req.Kinds[kind] {
 				continue
 			}
-			has, e := i.store.HasHistoryEvent(ctx, packageID, kind)
+			has, e := i.store.HasHistoryEvent(ctx, source.Name, packageID, kind)
 			if e != nil {
 				return Result{}, e
 			}
@@ -93,6 +97,7 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	}
 	var events []domain.UpdateEvent
 	var aliases []store.HistoryAlias
+	var persistedDiagnostics []store.HistoryDiagnostic
 	diagnostics := 0
 	for rangeIndex, r := range ranges {
 		commits, e := i.repository.Commits(ctx, r)
@@ -111,7 +116,11 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				if filepath.Ext(change.Path) != ".rb" && filepath.Ext(change.OldPath) != ".rb" {
 					continue
 				}
-				before, bd, e := i.definition(ctx, commit.Hash+"^", change.OldPath, change.Status == "A")
+				beforePath := change.Path
+				if change.OldPath != "" {
+					beforePath = change.OldPath
+				}
+				before, bd, e := i.definition(ctx, commit.Hash+"^", beforePath, change.Status == "A")
 				if e != nil {
 					return Result{}, e
 				}
@@ -125,8 +134,11 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 					diagnostics++
 					classification.Kind = domain.EventMetadata
 				}
-				if len(req.Kinds) > 0 && !req.Kinds[classification.Kind] {
-					continue
+				for _, message := range append(append([]string{}, bd...), ad...) {
+					persistedDiagnostics = append(persistedDiagnostics, store.HistoryDiagnostic{Repository: source.Name, Commit: commit.Hash, Path: change.Path, Message: message})
+				}
+				if classification.Diagnostic != "" {
+					persistedDiagnostics = append(persistedDiagnostics, store.HistoryDiagnostic{Repository: source.Name, Commit: commit.Hash, Path: change.Path, Message: classification.Diagnostic})
 				}
 				identity := after
 				if identity == nil {
@@ -138,6 +150,12 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				pkgID := domain.PackageID(identity.FullName)
 				if pkgID == "" {
 					pkgID = domain.PackageID(identity.Name)
+				}
+				if change.Status == "R" && before != nil && before.FullName != identity.FullName {
+					aliases = append(aliases, store.HistoryAlias{Alias: before.FullName, PackageID: pkgID, Repository: source.Name, Commit: commit.Hash})
+				}
+				if len(req.Kinds) > 0 && !req.Kinds[classification.Kind] {
+					continue
 				}
 				key := string(pkgID) + "\x00" + string(classification.Kind)
 				if rangeIndex == fallbackIndex && !missing[key] {
@@ -155,13 +173,10 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				}
 				events = append(events, event)
 				delete(missing, key)
-				if change.Status == "R" && before != nil && before.FullName != identity.FullName {
-					aliases = append(aliases, store.HistoryAlias{Alias: before.FullName, PackageID: pkgID})
-				}
 			}
 		}
 	}
-	if err := i.store.ApplyHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, Events: events, Aliases: aliases, RemoveCommits: remove}); err != nil {
+	if err := i.store.ApplyHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, RemoveCommits: remove}); err != nil {
 		return Result{}, err
 	}
 	return Result{Events: len(events), Diagnostics: diagnostics, Head: head, Since: since}, nil

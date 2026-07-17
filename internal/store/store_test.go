@@ -63,11 +63,11 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	assertPragma(t, store.db, "journal_mode", "wal")
 	assertPragma(t, store.db, "foreign_keys", "1")
 	assertPragma(t, store.db, "busy_timeout", "5000")
-	assertPragma(t, store.db, "user_version", "2")
+	assertPragma(t, store.db, "user_version", "3")
 
 	wantTables := []string{
 		"changelog_artifacts", "changelog_artifacts_fts", "changelog_attempts",
-		"changelog_sections", "installed_packages", "package_aliases", "package_changelog_artifacts", "packages",
+		"changelog_sections", "history_aliases", "history_diagnostics", "installed_packages", "package_aliases", "package_changelog_artifacts", "packages",
 		"packages_fts", "preferences", "repositories", "repository_ranges", "sync_runs",
 		"update_events",
 	}
