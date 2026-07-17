@@ -113,6 +113,7 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 			return nil, err
 		}
 		event.Time = time.Unix(0, timestamp).UTC()
+		event.Installed = isInstalled
 		events = append(events, event)
 		if isInstalled {
 			installed[event.PackageID] = true

@@ -35,4 +35,5 @@ type UpdateEvent struct {
 	Commit         string
 	Time           time.Time
 	Diagnostic     string
+	Installed      bool
 }

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -13,8 +12,6 @@ import (
 )
 
 const actionOutputInterval = 50 * time.Millisecond
-
-type installedRefresher interface{ RefreshInstalled(context.Context) error }
 
 func (m Model) renderActionModal() string {
 	if m.pendingAction != nil {
@@ -47,10 +44,10 @@ func (m Model) runAction(action homebrew.Action) tea.Cmd {
 
 func (m Model) refreshInstalled() tea.Cmd {
 	return func() tea.Msg {
-		if source, ok := m.deps.Data.(installedRefresher); ok {
-			return installedRefreshed{Err: source.RefreshInstalled(m.deps.Context)}
+		if m.deps.Installed == nil {
+			return installedRefreshed{Err: fmt.Errorf("installed-state refresh is unavailable")}
 		}
-		return installedRefreshed{}
+		return installedRefreshed{Err: m.deps.Installed.RefreshInstalled(m.deps.Context)}
 	}
 }
 

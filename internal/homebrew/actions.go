@@ -65,8 +65,7 @@ func (c *Client) RunAction(ctx context.Context, action Action, output io.Writer)
 		return fmt.Errorf("start brew: %w", err)
 	}
 
-	retained := NewRetainedOutput()
-	w := io.MultiWriter(retained, &synchronizedWriter{writer: output})
+	w := &synchronizedWriter{writer: output}
 	var copies sync.WaitGroup
 	copies.Add(2)
 	go func() { defer copies.Done(); _, _ = io.Copy(w, stdout) }()
@@ -84,7 +83,7 @@ func (c *Client) RunAction(ctx context.Context, action Action, output io.Writer)
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(os.Interrupt)
 		}
-		timer := time.NewTimer(2 * time.Second)
+		timer := time.NewTimer(c.cancelGrace)
 		defer timer.Stop()
 		select {
 		case <-done:

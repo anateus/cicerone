@@ -30,12 +30,12 @@ func (f *fakeActions) RunAction(_ context.Context, _ homebrew.Action, w io.Write
 }
 func (f *fakeActions) count() int { f.mu.Lock(); defer f.mu.Unlock(); return f.calls }
 
-type refreshData struct {
-	fakeData
+type fakeInstalled struct {
 	refreshes int
+	err       error
 }
 
-func (f *refreshData) RefreshInstalled(context.Context) error { f.refreshes++; return nil }
+func (f *fakeInstalled) RefreshInstalled(context.Context) error { f.refreshes++; return f.err }
 
 func action() homebrew.Action {
 	return homebrew.Action{Kind: homebrew.Upgrade, Package: "pkg-b", Type: domain.PackageFormula}
@@ -84,8 +84,9 @@ func TestConfirmationRunsOnceAndDisablesDuplicates(t *testing.T) {
 }
 
 func TestSuccessfulActionRefreshesInstalledStateThenRequeries(t *testing.T) {
-	data := &refreshData{}
-	m := NewModel(Dependencies{Data: data, Actions: &fakeActions{}})
+	data := &fakeData{}
+	installed := &fakeInstalled{}
+	m := NewModel(Dependencies{Data: data, Installed: installed, Actions: &fakeActions{}})
 	m.actionRunning = true
 	before := m.feedRequestID
 	next, cmd := m.Update(ActionFinished{Action: action()})
@@ -94,12 +95,57 @@ func TestSuccessfulActionRefreshesInstalledStateThenRequeries(t *testing.T) {
 		t.Fatal("success did not schedule installed refresh")
 	}
 	msg := cmd()
-	if data.refreshes != 1 {
-		t.Fatalf("refreshes = %d", data.refreshes)
+	if installed.refreshes != 1 {
+		t.Fatalf("refreshes = %d", installed.refreshes)
 	}
 	m = update(t, m, msg)
 	if m.feedRequestID != before+1 || !m.loading {
 		t.Fatal("refresh completion did not requery feed")
+	}
+}
+
+func TestSuccessfulActionFailsClearlyWithoutInstalledRefreshDependency(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.actionRunning = true
+	_, cmd := m.Update(ActionFinished{Action: action()})
+	msg := cmd()
+	refreshed := msg.(installedRefreshed)
+	if refreshed.Err == nil {
+		t.Fatal("missing installed refresh dependency silently succeeded")
+	}
+	m = update(t, m, refreshed)
+	if m.err == nil || !strings.Contains(m.notification, "installed-state refresh") {
+		t.Fatal("missing refresh dependency was not surfaced in status")
+	}
+}
+
+func TestActionKeyRequestsInstallOrUpgradeAndIsDocumented(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		installed bool
+		want      homebrew.ActionKind
+	}{
+		{"not installed", false, homebrew.Install}, {"installed", true, homebrew.Upgrade},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModel(Dependencies{Actions: &fakeActions{}})
+			e := event("a", "pkg-a")
+			e.Installed = tt.installed
+			m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{{ID: "a", Events: []domain.UpdateEvent{e}}}})
+			next, cmd := m.Update(key("a"))
+			m = next.(Model)
+			if cmd == nil {
+				t.Fatal("action key emitted no command")
+			}
+			msg := cmd().(ActionRequested)
+			if msg.Action.Kind != tt.want || msg.Action.Package != e.PackageID || msg.Action.Type != e.Type {
+				t.Fatalf("action = %#v", msg.Action)
+			}
+			m = update(t, m, msg)
+			if view := m.render(); !strings.Contains(view, "[a]") || !strings.Contains(view, string(tt.want)) {
+				t.Fatalf("action key/modal undocumented: %q", view)
+			}
+		})
 	}
 }
 
@@ -119,7 +165,7 @@ func TestFailedActionRetainsOutputAndStatusErrorUntilDismissed(t *testing.T) {
 		t.Fatal("ordinary key dismissed failure")
 	}
 	m = update(t, m, key("esc"))
-	if m.actionResult != nil || m.actionOutput != "" {
+	if m.actionResult != nil || m.actionOutput != "" || m.err != nil || m.notification != "" {
 		t.Fatal("escape did not dismiss failure output")
 	}
 }

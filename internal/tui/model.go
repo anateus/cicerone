@@ -28,12 +28,17 @@ type ActionRunner interface {
 	RunAction(context.Context, homebrew.Action, io.Writer) error
 }
 
+type InstalledRefresher interface {
+	RefreshInstalled(context.Context) error
+}
+
 type Dependencies struct {
 	Data      DataSource
 	Changelog ChangelogSource
 	Context   context.Context
 	OnReady   tea.Cmd
 	Actions   ActionRunner
+	Installed InstalledRefresher
 	Send      func(tea.Msg)
 }
 
@@ -227,6 +232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case installedRefreshed:
 		if msg.Err != nil {
 			m.err = msg.Err
+			m.notification = "Error: " + msg.Err.Error()
 			return m, nil
 		}
 		m.stale, m.loading = true, true
@@ -254,6 +260,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.actionResult != nil {
 		if key.String() == "esc" {
 			m.actionResult, m.actionOutput = nil, ""
+			m.err, m.notification = nil, ""
 		}
 		return m, nil
 	}
@@ -296,6 +303,16 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		if len(m.groups) > 0 {
 			m.expanded[m.groups[m.selected].ID] = !m.expanded[m.groups[m.selected].ID]
+		}
+	case "a":
+		if len(m.groups) > 0 {
+			e := m.selectedEvent()
+			kind := homebrew.Install
+			if e.Installed {
+				kind = homebrew.Upgrade
+			}
+			action := homebrew.Action{Kind: kind, Package: e.PackageID, Type: e.Type}
+			return m, func() tea.Msg { return ActionRequested{Action: action} }
 		}
 	}
 	return m, nil

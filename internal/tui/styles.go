@@ -144,7 +144,11 @@ func (m Model) statusLine(text string, width int) string {
 func (m Model) feedTitle(width int) string                { return m.titleLine(" Cicerone  Package updates", width) }
 func (m Model) contentLine(text string, width int) string { return fit(text, width) }
 func (m Model) feedControls(width int) string {
-	return fit(fmt.Sprintf(" Search: %s  Roll up: %s", fit(m.filter.Query, 18), onOff(m.filter.RollUp)), width)
+	controls := fmt.Sprintf(" Search: %s  Roll up: %s", fit(m.filter.Query, 18), onOff(m.filter.RollUp))
+	if m.deps.Actions != nil {
+		controls += "  [a] install/upgrade"
+	}
+	return fit(controls, width)
 }
 func (m Model) feedGroupRow(marker string, e domain.UpdateEvent, width int) string {
 	return fit(marker+fit(e.Name, 18)+" "+fit(string(e.Kind), 8)+" "+e.OldVersion+" → "+e.NewVersion, width)

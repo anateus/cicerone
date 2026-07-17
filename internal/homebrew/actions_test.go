@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,6 +98,29 @@ func TestRunActionCancellationInterruptsChild(t *testing.T) {
 	}
 }
 
+func TestRunActionKillsAndReapsChildAfterGracePeriod(t *testing.T) {
+	client := NewClient(nil)
+	client.cancelGrace = 10 * time.Millisecond
+	var cmd *exec.Cmd
+	client.commandContext = func(context.Context, string, ...string) *exec.Cmd {
+		cmd = helperCommand("ignore-interrupt")(context.Background(), "brew")
+		return cmd
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	started := time.Now()
+	err := client.RunAction(ctx, Action{Kind: Upgrade, Package: "ok", Type: domain.PackageCask}, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("kill fallback took %s", elapsed)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("killed child was not reaped")
+	}
+}
+
 func helperCommand(mode string) func(context.Context, string, ...string) *exec.Cmd {
 	return func(context.Context, string, ...string) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=TestActionHelperProcess", "--", mode)
@@ -114,14 +138,25 @@ func TestActionHelperProcess(t *testing.T) {
 	case "success":
 		os.Exit(0)
 	case "large-output":
-		_, _ = io.WriteString(os.Stdout, strings.Repeat("o", 400<<10)+"stdout-tail")
-		_, _ = io.WriteString(os.Stderr, strings.Repeat("e", 400<<10)+"stderr-tail")
+		var writes sync.WaitGroup
+		writes.Add(2)
+		go func() { defer writes.Done(); _, _ = io.WriteString(os.Stdout, strings.Repeat("o", 700<<10)) }()
+		go func() { defer writes.Done(); _, _ = io.WriteString(os.Stderr, strings.Repeat("e", 700<<10)) }()
+		writes.Wait()
+		_, _ = io.WriteString(os.Stdout, "stdout-tail")
+		_, _ = io.WriteString(os.Stderr, "stderr-tail")
 		os.Exit(0)
 	case "interrupt":
 		interrupt := make(chan os.Signal, 1)
 		signal.Notify(interrupt, os.Interrupt)
 		<-interrupt
 		os.Exit(0)
+	case "ignore-interrupt":
+		interrupt := make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt)
+		for {
+			<-interrupt
+		}
 	}
 	os.Exit(2)
 }
