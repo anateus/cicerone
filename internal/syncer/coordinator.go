@@ -118,9 +118,13 @@ func (c *Coordinator) Start(ctx context.Context) {
 		c.mu.Unlock()
 		return
 	}
+	c.startLocked(root)
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) startLocked(root context.Context) {
 	c.started = true
 	c.active++
-	c.mu.Unlock()
 	go func() {
 		defer c.done()
 		if c.deps.Cache != nil {
@@ -137,6 +141,11 @@ func (c *Coordinator) Start(ctx context.Context) {
 			var err error
 			sources, err = c.deps.LoadSources(root)
 			if err != nil {
+				c.mu.Lock()
+				if !c.closed {
+					c.started = false
+				}
+				c.mu.Unlock()
 				c.notify(SyncFailed{Source: "repositories", At: c.deps.Now(), Err: bounded(err)})
 				return
 			}
@@ -258,6 +267,9 @@ func (c *Coordinator) Retry(ctx context.Context, name string) {
 	op := operation{source: name, refresh: true}
 	if !c.sourcesReady {
 		c.pending = append(c.pending, op)
+		if !c.started {
+			c.startLocked(root)
+		}
 		return
 	}
 	c.scheduleOperationLocked(root, op)

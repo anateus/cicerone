@@ -97,6 +97,64 @@ func TestRetryAndEnsureRangeQueueDuringDiscovery(t *testing.T) {
 	}
 }
 
+func TestRetryRestartsFailedDiscoveryAndDrainsPendingOperationsOnce(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	discoveryStarted, failDiscovery := make(chan struct{}), make(chan struct{})
+	requests := make(chan Request, 3)
+	var loads, refreshes atomic.Int32
+	job := fakeJob{
+		name:        "core",
+		destination: destination,
+		refresh: func(context.Context) error {
+			refreshes.Add(1)
+			return nil
+		},
+		index: func(_ context.Context, req Request) (Result, error) {
+			requests <- req
+			return Result{}, nil
+		},
+	}
+	var c *Coordinator
+	c = New(Dependencies{
+		Store: destination,
+		LoadSources: func(context.Context) ([]Source, error) {
+			if loads.Add(1) == 1 {
+				close(discoveryStarted)
+				<-failDiscovery
+				return nil, errors.New("discovery failed once")
+			}
+			return []Source{job}, nil
+		},
+		Notify: func(msg tea.Msg) {
+			if event, ok := msg.(SyncFailed); ok && event.Source == "repositories" {
+				c.Retry(context.Background(), "core")
+			}
+		},
+	})
+	c.Start(context.Background())
+	waitClosed(t, discoveryStarted, "first discovery attempt")
+	since := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	c.EnsureRange(context.Background(), since)
+	close(failDiscovery)
+	c.Wait()
+
+	if got := loads.Load(); got != 2 {
+		t.Fatalf("source loads = %d, want failed attempt and one retry", got)
+	}
+	if got := refreshes.Load(); got != 2 {
+		t.Fatalf("refreshes = %d, want startup and queued retry exactly once", got)
+	}
+	seenRange := 0
+	for range 3 {
+		if req := <-requests; req.Since.Equal(since) {
+			seenRange++
+		}
+	}
+	if seenRange != 1 {
+		t.Fatalf("range operations = %d, want queued request exactly once", seenRange)
+	}
+}
+
 func TestCloseDuringDiscoveryAndCallsAfterCloseDoNoWork(t *testing.T) {
 	discoveryStarted := make(chan struct{})
 	loaderStopped := make(chan struct{})

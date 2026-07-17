@@ -46,6 +46,124 @@ func TestMigrationVersionRejectsMalformedFilename(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "future.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version=5`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(context.Background(), path)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("Open returned a store for schema version 5 with latest migration 4")
+	}
+	if err == nil || !strings.Contains(err.Error(), "version 5") || !strings.Contains(err.Error(), "version 4") ||
+		!strings.Contains(strings.ToLower(err.Error()), "backup") || !strings.Contains(strings.ToLower(err.Error()), "downgrade") {
+		t.Fatalf("Open future schema error = %v, want versions and backup/downgrade recovery guidance", err)
+	}
+}
+
+func TestOpenUpgradesRepresentativeVersionTwoAndThreeDatabases(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fixture.db")
+			db := createMigrationFixture(t, path, version)
+			if _, err := db.Exec(`
+				INSERT INTO repositories(id,path,head_commit) VALUES('core','/repo','abc');
+				INSERT INTO sync_runs(id,repository_id,started_at,completed_at,error) VALUES(41,'core',10,20,'old failure');
+				INSERT INTO packages(id,name,type) VALUES('widget','Widget','formula');
+				INSERT INTO changelog_artifacts(id,url,content_hash,extracted_text) VALUES(7,'https://example.test/changes','hash','old text');
+				INSERT INTO package_changelog_artifacts(package_id,artifact_id) VALUES('widget',7);`); err != nil {
+				t.Fatal(err)
+			}
+			if version == 3 {
+				if _, err := db.Exec(`
+					INSERT INTO history_aliases(repository,alias,package_id,commit_hash) VALUES('core','old-widget','widget','abc');
+					INSERT INTO history_diagnostics(repository,commit_hash,definition_path,message) VALUES('core','abc','Formula/w/widget.rb','old diagnostic');`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			s, err := Open(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			assertPragma(t, s.db, "user_version", "4")
+			assertScalar(t, s.db, `SELECT error FROM sync_runs WHERE id=41`, "old failure")
+			assertScalar(t, s.db, `SELECT count(*) FROM package_changelog_artifacts WHERE package_id='widget' AND artifact_id=7`, "1")
+			if version == 3 {
+				assertScalar(t, s.db, `SELECT package_id FROM history_aliases WHERE repository='core' AND alias='old-widget'`, "widget")
+				assertScalar(t, s.db, `SELECT message FROM history_diagnostics WHERE repository='core' AND commit_hash='abc'`, "old diagnostic")
+			}
+			for _, column := range []string{"cursor", "event_count", "diagnostic_count", "last_success_at"} {
+				assertScalar(t, s.db, `SELECT count(*) FROM pragma_table_info('sync_runs') WHERE name=?`, "1", column)
+			}
+			assertScalar(t, s.db, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='history_aliases'`, "1")
+			assertScalar(t, s.db, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='history_aliases_commit'`, "1")
+			assertScalar(t, s.db, `SELECT count(*) FROM pragma_foreign_key_list('sync_runs') WHERE "table"='repositories' AND "from"='repository_id' AND on_delete='CASCADE'`, "1")
+		})
+	}
+}
+
+func createMigrationFixture(t *testing.T, path string, version int) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	for migration := 1; migration <= version; migration++ {
+		matches, err := migrationFiles.ReadDir("schema")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range matches {
+			got, err := migrationVersion(entry.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != migration {
+				continue
+			}
+			body, err := migrationFiles.ReadFile("schema/" + entry.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(string(body)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.Exec(`PRAGMA user_version=` + strconv.Itoa(migration)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db
+}
+
+func assertScalar(t *testing.T, db *sql.DB, query, want string, args ...any) {
+	t.Helper()
+	var got string
+	if err := db.QueryRow(query, args...).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("scalar query %q = %q, want %q", query, got, want)
+	}
+}
+
 func TestWriteRejectsNilCallback(t *testing.T) {
 	s := openTestStore(t)
 	err := s.Write(context.Background(), nil)

@@ -24,6 +24,19 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&current); err != nil {
 		return err
 	}
+	latest := 0
+	for _, entry := range entries {
+		version, err := migrationVersion(entry.Name())
+		if err != nil {
+			return err
+		}
+		if version > latest {
+			latest = version
+		}
+	}
+	if current > latest {
+		return fmt.Errorf("database schema version %d is newer than this Cicerone build's latest migration version %d; create a backup and open it with a matching or newer Cicerone version instead of attempting an in-place downgrade", current, latest)
+	}
 	for _, entry := range entries {
 		version, err := migrationVersion(entry.Name())
 		if err != nil {
