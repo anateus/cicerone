@@ -91,10 +91,18 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 	}
 	query := `SELECT e.id, e.package_id, p.name, p.type, e.kind,
 		e.old_version, e.new_version, e.old_revision, e.new_revision,
-		e.repository, e.definition_path, e.commit_hash, e.event_time, e.diagnostic,
-		i.package_id IS NOT NULL
+		e.repository, e.definition_path, e.commit_hash, e.event_time, e.diagnostic, e.seen,
+		i.package_id IS NOT NULL,
+		COALESCE(c.version_count, 0), COALESCE(c.first_update, 0), COALESCE(c.last_update, 0)
 		FROM update_events e JOIN packages p ON p.id=e.package_id
 		LEFT JOIN installed_packages i ON i.package_id=e.package_id
+		LEFT JOIN (
+			SELECT package_id, COUNT(*) AS version_count,
+				MIN(event_time) AS first_update, MAX(event_time) AS last_update
+			FROM update_events
+			WHERE kind='version'
+			GROUP BY package_id
+		) c ON c.package_id=e.package_id
 		WHERE ` + strings.Join(where, " AND ") + ` ORDER BY e.event_time DESC, e.id`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -106,14 +114,22 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 	for rows.Next() {
 		var event domain.UpdateEvent
 		var timestamp int64
+		var versionCount int
+		var firstUpdate, lastUpdate int64
 		var isInstalled bool
 		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.Kind,
 			&event.OldVersion, &event.NewVersion, &event.OldRevision, &event.NewRevision,
-			&event.Repository, &event.DefinitionPath, &event.Commit, &timestamp, &event.Diagnostic, &isInstalled); err != nil {
+			&event.Repository, &event.DefinitionPath, &event.Commit, &timestamp, &event.Diagnostic, &event.Seen, &isInstalled,
+			&versionCount, &firstUpdate, &lastUpdate); err != nil {
 			return nil, err
 		}
 		event.Time = time.Unix(0, timestamp).UTC()
 		event.Installed = isInstalled
+		if versionCount > 0 {
+			first, last := time.Unix(0, firstUpdate).UTC(), time.Unix(0, lastUpdate).UTC()
+			event.Cadence = domain.ClassifyUpdateCadence(versionCount, first, last)
+			event.UpdateInterval = domain.AverageUpdateInterval(versionCount, first, last)
+		}
 		events = append(events, event)
 		if isInstalled {
 			installed[event.PackageID] = true
@@ -123,6 +139,26 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		return nil, err
 	}
 	return domain.BuildFeed(events, installed, filter), nil
+}
+
+// MarkEventsSeen records that event rows have appeared in a feed session.
+func (s *Store) MarkEventsSeen(ctx context.Context, ids []domain.EventID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		statement, err := tx.PrepareContext(ctx, `UPDATE update_events SET seen=1 WHERE id=?`)
+		if err != nil {
+			return err
+		}
+		defer statement.Close()
+		for _, id := range ids {
+			if _, err := statement.ExecContext(ctx, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Preferences returns the persisted feed filter preferences.

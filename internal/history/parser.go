@@ -51,7 +51,7 @@ func ParseDefinition(path string, content []byte) (*Definition, []string) {
 	hasExplicitVersion := versionLine.MatchString(text)
 	if d.Version == "" && !hasExplicitVersion && d.Type == domain.PackageFormula {
 		if m := urlVersion.FindStringSubmatch(d.URL); len(m) > 0 {
-			d.Version = m[1]
+			d.Version = domain.CleanVersion(m[1])
 		}
 	}
 	if d.Version == "" && latestToken.MatchString(text) {

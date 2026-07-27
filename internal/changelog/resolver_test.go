@@ -96,6 +96,7 @@ func TestResolverGitHubTokenResolvedOnceAndUsedForRequests(t *testing.T) {
 	}))
 	defer server.Close()
 	r := NewResolver(nil, server.Client(), WithGitHubTokenRunner(runner))
+	r.APIBaseURL = server.URL
 	for range 2 {
 		resp, err := r.request(context.Background(), server.URL)
 		if err != nil {
@@ -161,6 +162,43 @@ func TestResolverUsesRepositoryFilenameOrderAndCachesResult(t *testing.T) {
 	}
 }
 
+func TestResolverUsesCodebergRepositoryChangelog(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Codeberg request leaked authorization header %q", got)
+		}
+		switch r.URL.Path {
+		case "/api/v1/repos/pter/pter/contents":
+			_ = json.NewEncoder(w).Encode([]map[string]string{{
+				"name": "CHANGELOG.md", "download_url": serverURL(r) + "/raw/changelog",
+			}})
+		case "/raw/changelog":
+			_, _ = w.Write([]byte("## 3.23.1\n\nCodeberg changes.\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	r := NewResolver(cache, server.Client())
+	r.CodebergAPIBaseURL = server.URL + "/api/v1"
+	r.githubToken = "github-secret"
+	section, err := r.Resolve(ctx, PackageRef{
+		Name: "pter", FullName: "pter", RepositoryURL: "https://codeberg.org/pter/pter", Type: domain.PackageFormula,
+	}, "3.23.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(section.Body, "Codeberg changes") {
+		t.Fatalf("section body = %q", section.Body)
+	}
+}
+
 func TestResolverBacksOffAfterFailedRefresh(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "")
 	ctx := context.Background()
@@ -222,6 +260,38 @@ func TestResolverUsesLowConfidenceCacheOnlyAsFallback(t *testing.T) {
 	}
 	if section.Confidence != 1 || !strings.Contains(section.Body, "Strong") {
 		t.Fatalf("section=%#v,want strong discovery", section)
+	}
+}
+
+func TestResolverTriesGitHubReleaseWhileLinkedFallbackIsBackedOff(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	now := time.Unix(4000, 0).UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/releases/tags/v3.0.0") {
+			_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v3.0.0", "body": "Release fallback", "html_url": "https://github.com/acme/widget/releases/tag/v3.0.0"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	backoffKey := server.URL + "/repos/acme/widget"
+	if err := cache.RecordChangelogFailure(ctx, backoffKey, now, errors.New("linked discovery failed")); err != nil {
+		t.Fatal(err)
+	}
+	r := NewResolver(cache, server.Client())
+	r.APIBaseURL = server.URL
+	r.Now = func() time.Time { return now.Add(time.Minute) }
+	section, err := r.Resolve(ctx, PackageRef{Name: "widget", RepositoryURL: "https://github.com/acme/widget", Type: domain.PackageFormula}, "3.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(section.Body, "Release fallback") {
+		t.Fatalf("section = %#v", section)
 	}
 }
 
@@ -466,6 +536,13 @@ func TestResolverLimitsDiscoveryToTwoHopsAndFiveCandidates(t *testing.T) {
 			t.Fatalf("requests=%#v total=%d", requests, total)
 		}
 	})
+}
+
+func TestGitHubRepositoryInfersGitHubPagesProject(t *testing.T) {
+	owner, repo, ok := githubRepository("https://acme.github.io/widget/docs/")
+	if !ok || owner != "acme" || repo != "widget" {
+		t.Fatalf("githubRepository = %q, %q, %t", owner, repo, ok)
+	}
 }
 
 func TestChangelogFileRank(t *testing.T) {

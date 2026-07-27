@@ -52,7 +52,7 @@ func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`PRAGMA user_version=5`); err != nil {
+	if _, err := db.Exec(`PRAGMA user_version=10`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -62,12 +62,33 @@ func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
 	store, err := Open(context.Background(), path)
 	if store != nil {
 		_ = store.Close()
-		t.Fatal("Open returned a store for schema version 5 with latest migration 4")
+		t.Fatal("Open returned a store for schema version 10 with latest migration 9")
 	}
-	if err == nil || !strings.Contains(err.Error(), "version 5") || !strings.Contains(err.Error(), "version 4") ||
+	if err == nil || !strings.Contains(err.Error(), "version 10") || !strings.Contains(err.Error(), "version 9") ||
 		!strings.Contains(strings.ToLower(err.Error()), "backup") || !strings.Contains(strings.ToLower(err.Error()), "downgrade") {
 		t.Fatalf("Open future schema error = %v, want versions and backup/downgrade recovery guidance", err)
 	}
+}
+
+func TestSeenMigrationTreatsExistingEventsAsPreviouslySeen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fixture.db")
+	db := createMigrationFixture(t, path, 7)
+	if _, err := db.Exec(`
+		INSERT INTO packages(id,name,type) VALUES('widget','Widget','formula');
+		INSERT INTO update_events(id,package_id,kind,repository,commit_hash,event_time)
+		VALUES('existing','widget','version','core','abc',1);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	assertScalar(t, s.db, `SELECT seen FROM update_events WHERE id='existing'`, "1")
 }
 
 func TestOpenUpgradesRepresentativeVersionTwoAndThreeDatabases(t *testing.T) {
@@ -99,7 +120,8 @@ func TestOpenUpgradesRepresentativeVersionTwoAndThreeDatabases(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = s.Close() })
-			assertPragma(t, s.db, "user_version", "4")
+			assertPragma(t, s.db, "user_version", "9")
+			assertScalar(t, s.db, `SELECT show_formula || ':' || show_cask FROM preferences WHERE id=1`, "1:0")
 			assertScalar(t, s.db, `SELECT error FROM sync_runs WHERE id=41`, "old failure")
 			assertScalar(t, s.db, `SELECT count(*) FROM package_changelog_artifacts WHERE package_id='widget' AND artifact_id=7`, "1")
 			if version == 3 {
@@ -183,11 +205,12 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	assertPragma(t, store.db, "journal_mode", "wal")
 	assertPragma(t, store.db, "foreign_keys", "1")
 	assertPragma(t, store.db, "busy_timeout", "5000")
-	assertPragma(t, store.db, "user_version", "4")
+	assertPragma(t, store.db, "user_version", "9")
 
 	wantTables := []string{
 		"changelog_artifacts", "changelog_artifacts_fts", "changelog_attempts",
-		"changelog_sections", "history_aliases", "history_diagnostics", "installed_packages", "package_aliases", "package_changelog_artifacts", "packages",
+		"changelog_sections", "document_attempts", "document_sections", "history_aliases", "history_diagnostics", "installed_packages", "package_aliases", "package_changelog_artifacts",
+		"package_document_links", "package_documents", "package_documents_fts", "package_info", "package_repositories", "package_repository_tags", "packages",
 		"packages_fts", "preferences", "repositories", "repository_ranges", "sync_runs",
 		"update_events",
 	}
@@ -252,6 +275,7 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	if ftsMatches != 1 {
 		t.Fatalf("changelog FTS matches = %d, want 1", ftsMatches)
 	}
+	assertScalar(t, store.db, `SELECT count(*) FROM pragma_table_info('update_events') WHERE name='seen'`, "1")
 }
 
 func TestSyncRunRetainsCountsCursorSuccessAndBoundedError(t *testing.T) {

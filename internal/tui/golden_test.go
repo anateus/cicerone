@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cicerone/internal/domain"
 	"cicerone/internal/store"
@@ -20,9 +21,19 @@ func TestGoldenViews(t *testing.T) {
 	base.height = 12
 	base.loading = false
 	base.groups = []domain.FeedGroup{rolled, {ID: "git", Events: []domain.UpdateEvent{event("git", "git")}}}
+	base.groups[0].Events[0].UpdateInterval = 120 * 24 * time.Hour
+	base.groups[1].Events[0].UpdateInterval = 28 * time.Hour
 	base.expanded["roll"] = true
 	base.changelog = []store.ChangelogSection{{Version: "2.0", Body: "Faster search\nImproved diagnostics"}}
 	cases["wide_dark_expanded"] = base
+	previouslySeen := base
+	previouslySeen.groups = make([]domain.FeedGroup, len(base.groups))
+	for index, group := range base.groups {
+		previouslySeen.groups[index] = group
+		previouslySeen.groups[index].Events = append([]domain.UpdateEvent(nil), group.Events...)
+	}
+	previouslySeen.groups[1].Events[0].Seen = true
+	cases["previously_seen"] = previouslySeen
 	light := base
 	light.light = true
 	cases["wide_light_expanded"] = light

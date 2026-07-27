@@ -82,6 +82,23 @@ func TestFetcherReturnsBodyValidatorsAndFinalURL(t *testing.T) {
 	}
 }
 
+func TestFetcherUsesValidatorsAndAcceptsNotModified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != `"abc"` || r.Header.Get("If-Modified-Since") != "yesterday" {
+			t.Errorf("conditional headers = %q, %q", r.Header.Get("If-None-Match"), r.Header.Get("If-Modified-Since"))
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+	got, err := publicTestFetcher(server).FetchConditional(context.Background(), "http://public.test/readme", Validators{ETag: `"abc"`, LastModified: "yesterday"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.NotModified || len(got.Body) != 0 {
+		t.Fatalf("fetched = %#v", got)
+	}
+}
+
 func TestFetcherRejectsUnsafeInputsBeforeDial(t *testing.T) {
 	for _, raw := range []string{"ftp://public.test/a", "http://127.0.0.1/a", "http://[::1]/a", "http://private.test/a"} {
 		t.Run(raw, func(t *testing.T) {
@@ -316,6 +333,26 @@ func TestDiscoverLinksDoesNotPartiallyMatchSelectedVersion(t *testing.T) {
 	got := DiscoverLinks(base, []byte(`<a href="/changelog">Changelog</a><a href="/releases/11.2.3">Version 11.2.3 notes</a>`), "1.2.3")
 	if len(got) != 2 || got[0].URL.Path != "/changelog" {
 		t.Fatalf("candidates=%#v", got)
+	}
+}
+
+func TestConventionalChangelogCandidatesStayOnOrigin(t *testing.T) {
+	base, _ := url.Parse("https://docs.example.test/project/")
+	got := ConventionalChangelogCandidates(base)
+	want := []string{
+		"https://docs.example.test/changelog",
+		"https://docs.example.test/changes",
+		"https://docs.example.test/release-notes",
+		"https://docs.example.test/releases",
+		"https://docs.example.test/history",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("candidates = %#v", got)
+	}
+	for index := range want {
+		if got[index].URL.String() != want[index] {
+			t.Errorf("candidate %d = %q, want %q", index, got[index].URL, want[index])
+		}
 	}
 }
 

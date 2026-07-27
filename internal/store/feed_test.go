@@ -90,6 +90,74 @@ func TestQueryFeedSelectsRecentEventsAndInstalledFallback(t *testing.T) {
 	}
 }
 
+func TestQueryFeedClassifiesPackageUpdateCadenceFromVersionHistory(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
+	events := []domain.UpdateEvent{
+		testEvent("rare-old", "rare", domain.EventVersion, now.Add(-150*24*time.Hour)),
+		testEvent("rare-new", "rare", domain.EventVersion, now),
+		testEvent("frequent-one", "frequent", domain.EventVersion, now.Add(-6*24*time.Hour)),
+		testEvent("frequent-two", "frequent", domain.EventVersion, now.Add(-3*24*time.Hour)),
+		testEvent("frequent-three", "frequent", domain.EventVersion, now),
+		testEvent("unknown", "unknown", domain.EventVersion, now),
+	}
+	if err := s.UpsertEvents(context.Background(), events); err != nil {
+		t.Fatal(err)
+	}
+
+	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{Now: now, Horizon: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[domain.PackageID]domain.UpdateCadence)
+	intervals := make(map[domain.PackageID]time.Duration)
+	for _, group := range groups {
+		got[group.Events[0].PackageID] = group.Events[0].Cadence
+		intervals[group.Events[0].PackageID] = group.Events[0].UpdateInterval
+	}
+	want := map[domain.PackageID]domain.UpdateCadence{
+		"rare": domain.UpdateCadenceRare, "frequent": domain.UpdateCadenceFrequent, "unknown": domain.UpdateCadenceUnknown,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("cadence mismatch (-want +got):\n%s", diff)
+	}
+	if intervals["rare"] != 150*24*time.Hour || intervals["frequent"] != 3*24*time.Hour || intervals["unknown"] != 0 {
+		t.Fatalf("average intervals = %#v", intervals)
+	}
+}
+
+func TestFeedEventsCanBePersistedAsSeen(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	event := testEvent("new-event", "widget", domain.EventVersion, time.Now().UTC())
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.QueryFeed(ctx, domain.FeedFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groups[0].Events[0].Seen {
+		t.Fatal("new event started as seen")
+	}
+	recorder, ok := any(s).(interface {
+		MarkEventsSeen(context.Context, []domain.EventID) error
+	})
+	if !ok {
+		t.Fatal("store does not expose seen-event persistence")
+	}
+	if err := recorder.MarkEventsSeen(ctx, []domain.EventID{event.ID}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = s.QueryFeed(ctx, domain.FeedFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !groups[0].Events[0].Seen {
+		t.Fatal("seen event did not remain seen after requery")
+	}
+}
+
 func TestPreferencesRoundTripTypedFilter(t *testing.T) {
 	s := openTestStore(t)
 	want := domain.FeedFilter{Horizon: 14 * 24 * time.Hour, Kinds: map[domain.EventKind]bool{domain.EventRevision: true}, Types: map[domain.PackageType]bool{domain.PackageCask: true}, Query: "foo", RollUp: false}

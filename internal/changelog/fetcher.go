@@ -23,7 +23,10 @@ type Fetched struct {
 	MediaType, ETag, LastModified string
 	Body                          []byte
 	FetchedAt                     time.Time
+	NotModified                   bool
 }
+
+type Validators struct{ ETag, LastModified string }
 
 type IPResolver interface {
 	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
@@ -46,6 +49,10 @@ type hostGate struct {
 }
 
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
+	return f.FetchConditional(ctx, rawURL, Validators{})
+}
+
+func (f *Fetcher) FetchConditional(ctx context.Context, rawURL string, validators Validators) (Fetched, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return Fetched{}, fmt.Errorf("unsafe changelog URL %q", rawURL)
@@ -107,11 +114,24 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
 	if err != nil {
 		return Fetched{}, err
 	}
+	if validators.ETag != "" {
+		req.Header.Set("If-None-Match", validators.ETag)
+	}
+	if validators.LastModified != "" {
+		req.Header.Set("If-Modified-Since", validators.LastModified)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return Fetched{}, err
 	}
 	defer resp.Body.Close()
+	now := time.Now().UTC()
+	if f.Now != nil {
+		now = f.Now()
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		return Fetched{FinalURL: resp.Request.URL, ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified"), FetchedAt: now, NotModified: true}, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return Fetched{}, fmt.Errorf("GET %s: %s", resp.Request.URL, resp.Status)
@@ -133,10 +153,6 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Fetched, error) {
 	}
 	if len(body) > maximumFetchedBody {
 		return Fetched{}, fmt.Errorf("response is too large: limit is %d bytes", maximumFetchedBody)
-	}
-	now := time.Now().UTC()
-	if f.Now != nil {
-		now = f.Now()
 	}
 	return Fetched{FinalURL: resp.Request.URL, MediaType: mediaType, ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified"), Body: body, FetchedAt: now}, nil
 }

@@ -15,13 +15,13 @@ const actionOutputInterval = 50 * time.Millisecond
 
 func (m Model) renderActionModal() string {
 	if m.pendingAction != nil {
-		return fmt.Sprintf("Confirm %s %s? [y/enter] confirm  [n/esc] cancel", m.pendingAction.Kind, m.pendingAction.Package)
+		return fmt.Sprintf("Confirm %s %s?", m.pendingAction.Kind, m.pendingAction.Package)
 	}
 	if m.actionRunning {
 		return "Homebrew action running…\n" + m.actionOutput
 	}
 	if m.actionResult != nil {
-		return fmt.Sprintf("Homebrew %s failed — [esc] dismiss\n%s", m.actionResult.Kind, strings.TrimSpace(m.actionOutput))
+		return fmt.Sprintf("Homebrew %s failed\n%s", m.actionResult.Kind, strings.TrimSpace(m.actionOutput))
 	}
 	return ""
 }

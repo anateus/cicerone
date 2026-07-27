@@ -1,6 +1,6 @@
 # Cache and recovery
 
-Cicerone stores its durable feed, installed snapshot, preferences, and changelog artifacts at:
+Cicerone stores its durable feed, installed snapshot, preferences, package information, README documents, and changelog artifacts at:
 
 ```text
 ~/Library/Application Support/cicerone/cicerone.db
@@ -39,7 +39,7 @@ Review the command's exit status and stderr. A partial dump can still be useful,
 
 ## 4. Rebuild only by explicit choice
 
-Rebuilding discards cached feed history, changelogs, sync cursors, and preferences. Homebrew packages are not removed or changed. Preserve the failed database, then allow Cicerone to create a new one:
+Rebuilding discards cached feed history, package details, README documents, changelogs, sync cursors, and preferences. Homebrew packages are not removed or changed. Preserve the failed database, then allow Cicerone to create a new one:
 
 ```sh
 mv -- "$db" "$db.corrupt"

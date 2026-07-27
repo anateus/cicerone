@@ -43,9 +43,12 @@ func TestMigrationUpgradesVersionOneChangelogData(t *testing.T) {
 	}
 	_, err = db.Exec(`PRAGMA foreign_keys=ON;
 		CREATE TABLE packages(id TEXT PRIMARY KEY,name TEXT NOT NULL,type TEXT NOT NULL);
+		CREATE TABLE update_events(id TEXT PRIMARY KEY,package_id TEXT NOT NULL REFERENCES packages(id),kind TEXT NOT NULL,repository TEXT NOT NULL,commit_hash TEXT NOT NULL,event_time INTEGER NOT NULL);
 		CREATE TABLE changelog_artifacts(id INTEGER PRIMARY KEY,package_id TEXT REFERENCES packages(id),url TEXT NOT NULL UNIQUE,media_type TEXT NOT NULL DEFAULT '',etag TEXT NOT NULL DEFAULT '',last_modified TEXT NOT NULL DEFAULT '',content_hash TEXT NOT NULL DEFAULT '',discovery_parent TEXT NOT NULL DEFAULT '',fetched_at INTEGER NOT NULL DEFAULT 0,raw_content TEXT NOT NULL DEFAULT '',extracted_text TEXT NOT NULL DEFAULT '',extraction_status TEXT NOT NULL DEFAULT '');
 		CREATE TABLE changelog_sections(id INTEGER PRIMARY KEY,artifact_id INTEGER NOT NULL REFERENCES changelog_artifacts(id) ON DELETE CASCADE,version TEXT NOT NULL DEFAULT '',content TEXT NOT NULL DEFAULT '');
 		CREATE TABLE changelog_attempts(id INTEGER PRIMARY KEY,artifact_id INTEGER REFERENCES changelog_artifacts(id) ON DELETE CASCADE,attempted_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT NOT NULL DEFAULT '');
+		CREATE TABLE preferences(id INTEGER PRIMARY KEY,horizon_seconds INTEGER NOT NULL,show_version INTEGER NOT NULL,show_revision INTEGER NOT NULL,show_metadata INTEGER NOT NULL,show_formula INTEGER NOT NULL,show_cask INTEGER NOT NULL,query TEXT NOT NULL,roll_up INTEGER NOT NULL);
+		INSERT INTO preferences VALUES(1,2592000,1,0,0,1,1,'',1);
 		INSERT INTO packages VALUES('widget','Widget','formula');
 		INSERT INTO changelog_artifacts(id,package_id,url,content_hash,raw_content,extracted_text) VALUES(7,'widget','https://example.test/CHANGELOG','oldhash','oldraw','oldtext');
 		INSERT INTO changelog_sections(id,artifact_id,version,content) VALUES(8,7,'1.0.0','old section');
@@ -66,8 +69,8 @@ func TestMigrationUpgradesVersionOneChangelogData(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Fatalf("user_version=%d,want 4", version)
+	if version != 9 {
+		t.Fatalf("user_version=%d,want 9", version)
 	}
 	artifacts, err := s.ChangelogArtifacts(ctx, "widget")
 	if err != nil {

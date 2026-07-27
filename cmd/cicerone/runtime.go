@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"cicerone/internal/app"
 	"cicerone/internal/changelog"
+	"cicerone/internal/download"
 	"cicerone/internal/execx"
 	"cicerone/internal/gitrepo"
 	"cicerone/internal/history"
@@ -18,6 +19,7 @@ import (
 	"cicerone/internal/store"
 	"cicerone/internal/syncer"
 	"cicerone/internal/tui"
+	"cicerone/internal/upstream"
 )
 
 var newExecRunner = execx.NewRunner
@@ -29,6 +31,8 @@ type runtimeServices struct {
 	brew        *homebrew.Client
 	coordinator *syncer.Coordinator
 	changelogs  changelogLoader
+	details     *packageDetailLoader
+	downloads   *download.Queue
 	cancel      context.CancelFunc
 	closeOnce   sync.Once
 	closeErr    error
@@ -92,8 +96,37 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 			notify(msg)
 		},
 	})
+	fetcher := &changelog.Fetcher{}
+	progress := &detailProgressTracker{send: notify}
+	downloads := download.NewQueue(download.Options{Context: ctx, OnProgress: progress.downloads})
 	resolver := changelog.NewResolver(destination, nil, changelog.WithGitHubTokenRunner(newExecRunner()))
-	loader := changelogLoader{cache: destination, resolver: resolver, repository: func(loadCtx context.Context, name string) (gitrepo.Repository, error) {
+	resolver.Fetcher = fetcher
+	resolver.Download = func(downloadCtx context.Context, rawURL string) (changelog.Fetched, error) {
+		result, enqueueErr := downloads.Enqueue(download.Request{
+			URL: rawURL, Profile: "document", Priority: download.Current, Context: downloadCtx,
+			Fetch: func(fetchCtx context.Context) (any, error) { return fetcher.Fetch(fetchCtx, rawURL) },
+		})
+		if enqueueErr != nil {
+			return changelog.Fetched{}, enqueueErr
+		}
+		completed := <-result
+		if completed.Err != nil {
+			return changelog.Fetched{}, completed.Err
+		}
+		fetched, ok := completed.Value.(changelog.Fetched)
+		if !ok {
+			return changelog.Fetched{}, fmt.Errorf("unexpected changelog download result")
+		}
+		return fetched, nil
+	}
+	locator := &upstream.Locator{Store: destination, Fetch: func(fetchCtx context.Context, rawURL string) (upstream.FetchedPage, error) {
+		fetched, fetchErr := resolver.Download(fetchCtx, rawURL)
+		if fetchErr != nil {
+			return upstream.FetchedPage{}, fetchErr
+		}
+		return upstream.FetchedPage{FinalURL: fetched.FinalURL, MediaType: fetched.MediaType, Body: fetched.Body}, nil
+	}}
+	loader := changelogLoader{cache: destination, resolver: resolver, locator: locator, repository: func(loadCtx context.Context, name string) (gitrepo.Repository, error) {
 		repositoriesMu.RLock()
 		repository, ok := repositories[name]
 		repositoriesMu.RUnlock()
@@ -110,12 +143,17 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 		}
 		return repository, nil
 	}}
-	return &runtimeServices{ctx: ctx, store: destination, brew: brew, coordinator: coordinator, changelogs: loader, cancel: cancel}, nil
+	details := &packageDetailLoader{
+		store: destination, brew: brew, changelogs: loader, queue: downloads, fetcher: fetcher,
+		runner: runner, send: notify, progress: progress,
+	}
+	return &runtimeServices{ctx: ctx, store: destination, brew: brew, coordinator: coordinator, changelogs: loader, details: details, downloads: downloads, cancel: cancel}, nil
 }
 
 func (r *runtimeServices) Close() error {
 	r.closeOnce.Do(func() {
 		r.coordinator.Close()
+		r.downloads.Close()
 		r.cancel()
 		r.closeErr = r.store.Close()
 	})

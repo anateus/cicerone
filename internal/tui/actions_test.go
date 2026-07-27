@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"cicerone/internal/domain"
 	"cicerone/internal/homebrew"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type fakeActions struct {
@@ -132,6 +133,10 @@ func TestActionKeyRequestsInstallOrUpgradeAndIsDocumented(t *testing.T) {
 			e := event("a", "pkg-a")
 			e.Installed = tt.installed
 			m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{{ID: "a", Events: []domain.UpdateEvent{e}}}})
+			view := ansi.Strip(m.render())
+			if !strings.Contains(strings.Join(strings.Fields(view), " "), "a "+string(tt.want)) || strings.Contains(ansi.Strip(m.feedControls(72)), "[a]") {
+				t.Fatalf("action key was not moved from the tabs to the footer: %q", view)
+			}
 			next, cmd := m.Update(key("a"))
 			m = next.(Model)
 			if cmd == nil {
@@ -142,10 +147,37 @@ func TestActionKeyRequestsInstallOrUpgradeAndIsDocumented(t *testing.T) {
 				t.Fatalf("action = %#v", msg.Action)
 			}
 			m = update(t, m, msg)
-			if view := m.render(); !strings.Contains(view, "[a]") || !strings.Contains(view, string(tt.want)) {
-				t.Fatalf("action key/modal undocumented: %q", view)
+			if view := ansi.Strip(m.render()); !strings.Contains(strings.Join(strings.Fields(view), " "), "y/enter confirm") || strings.Contains(view, "[y/enter]") {
+				t.Fatalf("confirmation keys were not presented cleanly in the footer: %q", view)
 			}
 		})
+	}
+}
+
+func TestFooterActionHintRemainsClickable(t *testing.T) {
+	m := NewModel(Dependencies{Actions: &fakeActions{}})
+	m.width, m.height = 80, 24
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+
+	hints := m.footerHints(m.width, m.statusText())
+	x := m.width - footerHintsWidth(hints)
+	actionX := -1
+	for i, hint := range hints {
+		if i > 0 {
+			x += 2
+		}
+		if hint.key == "a" {
+			actionX = x
+			break
+		}
+		x += ansi.StringWidth(hint.key) + ansi.StringWidth(hint.label) + 3
+	}
+	if actionX < 0 {
+		t.Fatal("footer omitted the action hint")
+	}
+	_, msg := updateAndRunCommand(t, m, tea.MouseClickMsg{X: actionX, Y: m.height - 1, Button: tea.MouseLeft})
+	if _, ok := msg.(ActionRequested); !ok {
+		t.Fatalf("footer action click emitted %T, want ActionRequested", msg)
 	}
 }
 

@@ -72,3 +72,18 @@ func TestParseDefinitionRequiresMatchingQuoteDelimiters(t *testing.T) {
 		t.Fatalf("definition=%#v diagnostics=%v", got, diagnostics)
 	}
 }
+
+func TestParseDefinitionStripsArchiveSuffixFromInferredVersion(t *testing.T) {
+	for _, tc := range []struct {
+		url, want string
+	}{
+		{"https://example.test/widget-1.2.3.tar.gz", "1.2.3"},
+		{"https://example.test/widget-1.2.3.tgz", "1.2.3"},
+		{"https://example.test/widget-1.2.3.tar", "1.2.3"},
+	} {
+		got, diagnostics := ParseDefinition("Formula/widget.rb", []byte("class Widget < Formula\n  url \""+tc.url+"\"\nend\n"))
+		if got == nil || got.Version != tc.want || len(diagnostics) != 0 {
+			t.Errorf("%s: definition=%#v diagnostics=%v", tc.url, got, diagnostics)
+		}
+	}
+}

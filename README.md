@@ -36,20 +36,27 @@ and idempotent.
 
 | Key | Action |
 | --- | --- |
-| `j`, `↓` | Move down |
-| `k`, `↑` | Move up |
-| `enter` | Focus/open package details |
+| `j`, `↓` | Move down; scroll down while reading package details |
+| `k`, `↑` | Move up; scroll up while reading package details |
+| `1`, `2`, `3` | Show Formulae, Casks, or both |
+| `h`, `←` / `l`, `→` | Switch toward package details; scroll horizontally while reading |
+| `enter` | Enter or leave package-detail reading mode |
+| `esc` | Leave package-detail reading mode; quit from the feed |
 | `tab` | Switch panes in a wide terminal |
+| `[`, `]` | Show the cached README or version changelog in package details |
 | `space` | Expand or collapse a rolled-up event |
 | `a` | Request install or upgrade; a confirmation is always required |
 | `y`, `enter` | Confirm a pending Homebrew action |
 | `n`, `esc` | Cancel or close the current modal/detail |
+| Mouse click / wheel | Select tabs and packages, activate visible controls, or scroll the pane under the pointer |
 
 ## Feed behavior
 
 The default feed contains version events from the last 30 days. An installed package remains visible through its newest matching event even if that event is older than the horizon. Results are sorted newest-first with a stable identity tie-breaker. Roll-up occurs only for adjacent events of the same package after filters are applied, so changing a filter can change grouping.
 
 Cicerone displays cached rows immediately. Background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
+
+On selection, Cicerone loads cached package information, README, and changelog content immediately. After the selection settles for 250 ms, it refreshes them independently. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
 
 ## Local data and repositories
 
@@ -58,7 +65,7 @@ Cicerone displays cached rows immediately. Background commits requery the feed w
 
 Cicerone prefers usable local `homebrew-core` and `homebrew-cask` tap clones. Those user/Homebrew-owned repositories are read-only: Cicerone never fetches, checks out, resets, or rewrites them. If a local clone is unavailable, Cicerone creates and fetches its own bare, filtered mirror under its cache directory.
 
-Cached feed and changelog content remains readable offline. See [Cache and recovery](docs/cache-and-recovery.md) before moving or rebuilding a damaged database; Cicerone never silently deletes it.
+Cached feed, package information, README, and changelog content remains readable offline. The in-memory download queue is reconstructed from navigation demand after restart. See [Cache and recovery](docs/cache-and-recovery.md) before moving or rebuilding a damaged database; Cicerone never silently deletes it.
 
 ## GitHub access
 

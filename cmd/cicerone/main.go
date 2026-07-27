@@ -19,6 +19,7 @@ import (
 	"cicerone/internal/store"
 	"cicerone/internal/syncer"
 	"cicerone/internal/tui"
+	"cicerone/internal/upstream"
 )
 
 type syncStore struct{ *store.Store }
@@ -53,6 +54,7 @@ type changelogLoader struct {
 	cache      changelogCache
 	resolver   changelogResolver
 	repository func(context.Context, string) (gitrepo.Repository, error)
+	locator    *upstream.Locator
 }
 
 func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]store.ChangelogSection, error) {
@@ -77,6 +79,12 @@ func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.Pac
 		return nil, fmt.Errorf("parse changelog metadata for %s", target.Name)
 	}
 	repositoryURL := githubRepositoryURL(definition.Homepage, definition.URL)
+	if l.locator != nil {
+		resolved, resolveErr := l.locator.Resolve(ctx, string(target.PackageID), target.Name, definition.Homepage, definition.URL)
+		if resolveErr == nil {
+			repositoryURL = resolved
+		}
+	}
 	section, err := l.resolver.Resolve(ctx, changelog.PackageRef{Name: target.Name, FullName: string(target.PackageID), Homepage: definition.Homepage, RepositoryURL: repositoryURL, Type: target.Type}, target.Version)
 	if err != nil {
 		return nil, err
@@ -84,15 +92,31 @@ func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.Pac
 	return []store.ChangelogSection{{ArtifactID: section.ArtifactID, Version: section.Version, Body: section.Body, Confidence: section.Confidence, SourceURL: section.SourceURL}}, nil
 }
 
+func (l changelogLoader) LoadCachedChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]store.ChangelogSection, error) {
+	return l.cache.LoadChangelog(ctx, packageID, eventID)
+}
+
 func githubRepositoryURL(values ...string) string {
 	for _, value := range values {
+		if repositoryURL, ok := upstream.CanonicalRepository(value); ok {
+			return repositoryURL
+		}
 		parsed, err := url.Parse(value)
-		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
+		if err != nil {
 			continue
 		}
-		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-			return "https://github.com/" + parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
+		host := strings.ToLower(parsed.Hostname())
+		if strings.HasSuffix(host, ".github.io") {
+			owner := strings.TrimSuffix(host, ".github.io")
+			if owner == "" || strings.Contains(owner, ".") {
+				continue
+			}
+			parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+			repo := owner + ".github.io"
+			if len(parts) > 0 && parts[0] != "" {
+				repo = parts[0]
+			}
+			return "https://github.com/" + owner + "/" + repo
 		}
 	}
 	return ""
@@ -160,6 +184,9 @@ func run() (runErr error) {
 				program.Send(msg)
 			}
 		})
+	dependencies.PackageInfo = runtime.details
+	dependencies.README = runtime.details
+	dependencies.Tags = runtime.details
 	model := tui.New(dependencies)
 	program = tea.NewProgram(model)
 	_, runErr = program.Run()

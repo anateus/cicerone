@@ -26,13 +26,15 @@ type PackageRef struct {
 }
 
 type Resolver struct {
-	Store       *store.Store
-	Client      *http.Client
-	Fetcher     *Fetcher
-	Extractor   ContentExtractor
-	APIBaseURL  string
-	Now         func() time.Time
-	githubToken string
+	Store              *store.Store
+	Client             *http.Client
+	Fetcher            *Fetcher
+	Download           func(context.Context, string) (Fetched, error)
+	Extractor          ContentExtractor
+	APIBaseURL         string
+	CodebergAPIBaseURL string
+	Now                func() time.Time
+	githubToken        string
 }
 
 type ResolverOption func(*Resolver)
@@ -54,7 +56,11 @@ func NewResolver(cache *store.Store, client *http.Client, options ...ResolverOpt
 	if client == nil {
 		client = http.DefaultClient
 	}
-	r := &Resolver{Store: cache, Client: client, APIBaseURL: "https://api.github.com", Now: func() time.Time { return time.Now().UTC() }}
+	r := &Resolver{
+		Store: cache, Client: client, APIBaseURL: "https://api.github.com",
+		CodebergAPIBaseURL: "https://codeberg.org/api/v1",
+		Now:                func() time.Time { return time.Now().UTC() },
+	}
 	for _, option := range options {
 		option(r)
 	}
@@ -104,10 +110,10 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 	if cachedSection.Confidence > fallback.Confidence {
 		fallback = cachedSection
 	}
-	owner, repo, ok := githubRepository(pkg.RepositoryURL)
+	forge, owner, repo, ok := repositoryCoordinates(pkg.RepositoryURL)
 	backoffKey := pkg.Homepage
 	if ok {
-		backoffKey = strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + owner + "/" + repo
+		backoffKey = strings.TrimRight(r.forgeAPIBase(forge), "/") + "/repos/" + owner + "/" + repo
 	}
 	if backoffKey == "" {
 		backoffKey = pkg.RepositoryURL
@@ -116,20 +122,14 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 	if err != nil {
 		return Section{}, err
 	}
-	if r.Now().Before(retryAfter) {
-		if fallback.Confidence > 0 {
-			return fallback, nil
-		}
-		return Section{}, fmt.Errorf("changelog refresh backed off until %s", retryAfter.Format(time.RFC3339))
-	}
 	var section Section
 	var repositoryErr, releaseErr error
 	if ok {
-		section, repositoryErr = r.resolveRepositoryFiles(ctx, id, owner, repo, version)
+		section, repositoryErr = r.resolveRepositoryFiles(ctx, id, r.forgeAPIBase(forge), owner, repo, version)
 		if repositoryErr == nil {
 			return section, nil
 		}
-		section, releaseErr = r.resolveRelease(ctx, id, pkg.Name, owner, repo, version)
+		section, releaseErr = r.resolveRelease(ctx, id, pkg.Name, r.forgeAPIBase(forge), owner, repo, version)
 		if releaseErr == nil {
 			return section, nil
 		}
@@ -137,11 +137,17 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 		repositoryErr = fmt.Errorf("unsupported repository URL %q", pkg.RepositoryURL)
 		releaseErr = errors.New("structured release unavailable")
 	}
+	if r.Now().Before(retryAfter) {
+		if fallback.Confidence > 0 {
+			return fallback, nil
+		}
+		return Section{}, fmt.Errorf("linked changelog discovery backed off until %s; repository changelog: %v; repository release: %v", retryAfter.Format(time.RFC3339), repositoryErr, releaseErr)
+	}
 	section, linkedErr := r.resolveLinked(ctx, id, pkg.Homepage, version)
 	if linkedErr == nil {
 		return section, nil
 	}
-	combined := fmt.Errorf("repository changelog: %v; GitHub release: %v; linked webpage: %w", repositoryErr, releaseErr, linkedErr)
+	combined := fmt.Errorf("repository changelog: %v; repository release: %v; linked webpage: %w", repositoryErr, releaseErr, linkedErr)
 	_ = r.Store.RecordChangelogFailure(ctx, backoffKey, r.Now(), combined)
 	refreshed, refreshedErr := r.Store.ChangelogArtifacts(ctx, id)
 	if refreshedErr != nil {
@@ -203,7 +209,11 @@ func (r *Resolver) resolveLinked(ctx context.Context, packageID, seedURL, versio
 			failures = append(failures, fmt.Sprintf("%s backed off", key))
 			continue
 		}
-		fetched, fetchErr := fetcher.Fetch(ctx, key)
+		download := fetcher.Fetch
+		if r.Download != nil {
+			download = r.Download
+		}
+		fetched, fetchErr := download(ctx, key)
 		if fetchErr != nil {
 			_ = r.Store.RecordChangelogFailure(ctx, key, r.Now(), fetchErr)
 			failures = append(failures, fetchErr.Error())
@@ -245,6 +255,12 @@ func (r *Resolver) resolveLinked(ctx context.Context, packageID, seedURL, versio
 				parent := saved.ID
 				queue = append(queue, queued{candidate: candidate, parent: &parent})
 			}
+			if item.candidate.Depth == 0 && len(discovered) == 0 {
+				for _, candidate := range ConventionalChangelogCandidates(fetched.FinalURL) {
+					parent := saved.ID
+					queue = append(queue, queued{candidate: candidate, parent: &parent})
+				}
+			}
 		}
 	}
 	if best.Confidence > 0 {
@@ -261,10 +277,18 @@ type githubFile struct {
 	DownloadURL string `json:"download_url"`
 }
 
-func (r *Resolver) resolveRepositoryFiles(ctx context.Context, packageID, owner, repo, version string) (Section, error) {
-	endpoint := strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/contents"
+func (r *Resolver) resolveRepositoryFiles(ctx context.Context, packageID, apiBase, owner, repo, version string) (Section, error) {
+	endpoint := strings.TrimRight(apiBase, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/contents"
+	retryAfter, err := r.Store.ChangelogRetryAfter(ctx, endpoint)
+	if err != nil {
+		return Section{}, err
+	}
+	if r.Now().Before(retryAfter) {
+		return Section{}, fmt.Errorf("repository file discovery backed off until %s", retryAfter.Format(time.RFC3339))
+	}
 	var files []githubFile
 	if err := r.getJSON(ctx, endpoint, &files); err != nil {
+		_ = r.Store.RecordChangelogFailure(ctx, endpoint, r.Now(), err)
 		return Section{}, err
 	}
 	sort.SliceStable(files, func(i, j int) bool {
@@ -301,16 +325,26 @@ func (r *Resolver) resolveRepositoryFiles(ctx context.Context, packageID, owner,
 	return Section{}, fmt.Errorf("repository changelog has no section for %s", version)
 }
 
-func (r *Resolver) resolveRelease(ctx context.Context, packageID, packageName, owner, repo, version string) (Section, error) {
-	base := strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/releases/tags/"
+func (r *Resolver) resolveRelease(ctx context.Context, packageID, packageName, apiBase, owner, repo, version string) (Section, error) {
+	base := strings.TrimRight(apiBase, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/releases/tags/"
 	var last error
 	for _, tag := range normalizedTagCandidates(packageName, version) {
+		endpoint := base + url.PathEscape(tag)
+		retryAfter, retryErr := r.Store.ChangelogRetryAfter(ctx, endpoint)
+		if retryErr != nil {
+			return Section{}, retryErr
+		}
+		if r.Now().Before(retryAfter) {
+			last = fmt.Errorf("repository release %s backed off until %s", tag, retryAfter.Format(time.RFC3339))
+			continue
+		}
 		var release struct {
 			TagName string `json:"tag_name"`
 			Body    string `json:"body"`
 			HTMLURL string `json:"html_url"`
 		}
-		if err := r.getJSON(ctx, base+url.PathEscape(tag), &release); err != nil {
+		if err := r.getJSON(ctx, endpoint, &release); err != nil {
+			_ = r.Store.RecordChangelogFailure(ctx, endpoint, r.Now(), err)
 			last = err
 			continue
 		}
@@ -357,10 +391,13 @@ func (r *Resolver) request(ctx context.Context, endpoint string) (*http.Response
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if r.githubToken != "" {
-		req.Header.Set("Authorization", "Bearer "+r.githubToken)
+	githubAPI := strings.TrimRight(r.APIBaseURL, "/")
+	if endpoint == githubAPI || strings.HasPrefix(endpoint, githubAPI+"/") {
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if r.githubToken != "" {
+			req.Header.Set("Authorization", "Bearer "+r.githubToken)
+		}
 	}
 	resp, err := r.Client.Do(req)
 	if err != nil {
@@ -406,7 +443,23 @@ func (r *Resolver) getBytes(ctx context.Context, endpoint string) ([]byte, strin
 
 func githubRepository(raw string) (string, string, bool) {
 	u, err := url.Parse(raw)
-	if err != nil || !strings.EqualFold(u.Host, "github.com") {
+	if err != nil {
+		return "", "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.HasSuffix(host, ".github.io") {
+		owner := strings.TrimSuffix(host, ".github.io")
+		if owner == "" || strings.Contains(owner, ".") {
+			return "", "", false
+		}
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		repo := owner + ".github.io"
+		if len(parts) > 0 && parts[0] != "" {
+			repo = parts[0]
+		}
+		return owner, repo, true
+	}
+	if host != "github.com" {
 		return "", "", false
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -414,6 +467,31 @@ func githubRepository(raw string) (string, string, bool) {
 		return "", "", false
 	}
 	return parts[0], strings.TrimSuffix(parts[1], ".git"), true
+}
+
+func repositoryCoordinates(raw string) (forge, owner, repo string, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", "", false
+	}
+	if strings.EqualFold(u.Hostname(), "codeberg.org") {
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return "codeberg", parts[0], strings.TrimSuffix(parts[1], ".git"), true
+		}
+	}
+	owner, repo, ok = githubRepository(raw)
+	if ok {
+		return "github", owner, repo, true
+	}
+	return "", "", "", false
+}
+
+func (r *Resolver) forgeAPIBase(forge string) string {
+	if forge == "codeberg" {
+		return r.CodebergAPIBaseURL
+	}
+	return r.APIBaseURL
 }
 func normalizedTagCandidates(name, version string) []string {
 	v := normalizeVersion(version)

@@ -29,6 +29,32 @@ type ChangelogLoaded struct {
 	Err         error
 }
 
+type PackageInfoLoaded struct {
+	RequestID, SelectionID uint64
+	PackageID              domain.PackageID
+	Info                   homebrew.PackageInfo
+	Err                    error
+}
+
+type READMELoaded struct {
+	RequestID, SelectionID uint64
+	PackageID              domain.PackageID
+	Document               store.PackageDocument
+	Err                    error
+}
+
+type RepositoryTagsLoaded struct {
+	SelectionID uint64
+	PackageID   domain.PackageID
+	Record      store.PackageRepositoryTags
+	Err         error
+}
+
+type DetailProgress struct {
+	Active, Pending int
+	Sequence        uint64
+}
+
 type Notify struct {
 	RequestID   uint64
 	SelectionID uint64
@@ -41,6 +67,7 @@ type PreferencesLoaded struct {
 	Err    error
 }
 type preferencesSaved struct{ Err error }
+type eventsSeen struct{ Err error }
 type ChangelogDebounced struct{ SelectionID uint64 }
 type ToggleFilter struct{ Kind domain.EventKind }
 type ToggleTypeFilter struct{ Type domain.PackageType }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +134,46 @@ func TestInstalledRefresherPersistsClientSnapshot(t *testing.T) {
 	}
 	if len(destination.packages) != 1 || destination.packages[0] != want[0] {
 		t.Fatalf("persisted packages = %#v, want %#v", destination.packages, want)
+	}
+}
+
+func TestGitHubRepositoryURLInfersProjectAndUserPagesRepositories(t *testing.T) {
+	tests := map[string]string{
+		"https://acme.github.io/widget/docs/": "https://github.com/acme/widget",
+		"https://acme.github.io/":             "https://github.com/acme/acme.github.io",
+		"https://codeberg.org/pter/pter":      "https://codeberg.org/pter/pter",
+	}
+	for homepage, want := range tests {
+		if got := githubRepositoryURL(homepage); got != want {
+			t.Errorf("githubRepositoryURL(%q) = %q, want %q", homepage, got, want)
+		}
+	}
+}
+
+func TestREADMECandidateURLsCoverConventionalNames(t *testing.T) {
+	got := readmeCandidateURLs("https://github.com/acme/widget")
+	for _, want := range []string{
+		"https://raw.githubusercontent.com/acme/widget/HEAD/README.md",
+		"https://raw.githubusercontent.com/acme/widget/HEAD/README.markdown",
+		"https://raw.githubusercontent.com/acme/widget/HEAD/README.rst",
+		"https://raw.githubusercontent.com/acme/widget/HEAD/README.txt",
+		"https://raw.githubusercontent.com/acme/widget/HEAD/README",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("README candidates %v missing %q", got, want)
+		}
+	}
+}
+
+func TestREADMECandidateURLsSupportCodeberg(t *testing.T) {
+	got := readmeCandidateURLs("https://codeberg.org/pter/pter")
+	for _, want := range []string{
+		"https://codeberg.org/pter/pter/raw/branch/HEAD/README.md",
+		"https://codeberg.org/pter/pter/raw/branch/HEAD/README.rst",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("README candidates %v missing %q", got, want)
+		}
 	}
 }
 

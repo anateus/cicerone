@@ -77,6 +77,20 @@ func DiscoverLinks(base *url.URL, content []byte, selectedVersion ...string) []C
 	return out
 }
 
+func ConventionalChangelogCandidates(base *url.URL) []Candidate {
+	if base == nil || base.Hostname() == "" || (base.Scheme != "http" && base.Scheme != "https") {
+		return nil
+	}
+	origin := &url.URL{Scheme: base.Scheme, Host: base.Host}
+	paths := []string{"/changelog", "/changes", "/release-notes", "/releases", "/history"}
+	result := make([]Candidate, 0, len(paths))
+	for index, path := range paths {
+		candidate := origin.ResolveReference(&url.URL{Path: path})
+		result = append(result, Candidate{URL: candidate, Label: strings.TrimPrefix(path, "/"), Score: .45 - float64(index)*.01, Depth: 1})
+	}
+	return result
+}
+
 func nodeText(n *html.Node) []string {
 	var out []string
 	var walk func(*html.Node)

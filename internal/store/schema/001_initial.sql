@@ -89,7 +89,7 @@ CREATE TABLE preferences (
   query TEXT NOT NULL,
   roll_up INTEGER NOT NULL CHECK(roll_up IN (0, 1))
 );
-INSERT INTO preferences VALUES (1, 2592000, 1, 0, 0, 1, 1, '', 1);
+INSERT INTO preferences VALUES (1, 2592000, 1, 0, 0, 1, 0, '', 1);
 
 CREATE VIRTUAL TABLE packages_fts USING fts5(name, content='packages', content_rowid='rowid');
 CREATE TRIGGER packages_ai AFTER INSERT ON packages BEGIN
