@@ -29,6 +29,15 @@ type ChangelogLoaded struct {
 	Err         error
 }
 
+type ChangelogPageLoaded struct {
+	SelectionID uint64
+	EventID     domain.EventID
+	PackageID   domain.PackageID
+	Page        int
+	Result      store.ChangelogPage
+	Err         error
+}
+
 type PackageInfoLoaded struct {
 	RequestID, SelectionID uint64
 	PackageID              domain.PackageID

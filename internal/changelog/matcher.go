@@ -22,6 +22,11 @@ type Section struct {
 	SourceURL                 string
 }
 
+type ReleasePage struct {
+	Sections []Section
+	NextPage int
+}
+
 var (
 	atxHeading    = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$`)
 	setextHeading = regexp.MustCompile(`^\s*(?:=+|-+)\s*$`)

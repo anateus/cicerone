@@ -126,6 +126,14 @@ func (m Model) renderInspector(width int) string {
 			}
 			documentLines = append(documentLines, strings.Split(renderMarkdown(section.Body, max(1, width-2), m.light), "\n")...)
 		}
+		if m.changelogMoreLoading {
+			documentLines = append(documentLines, "Loading 10 more releases…")
+		} else if m.changelogNextPage > 0 {
+			if m.changelogMoreErr != nil {
+				documentLines = append(documentLines, "Older releases unavailable: "+m.changelogMoreErr.Error())
+			}
+			documentLines = append(documentLines, "m load 10 more releases")
+		}
 	}
 
 	availableRows := max(4, m.height-statusHeight-strings.Count(b.String(), "\n")-2)

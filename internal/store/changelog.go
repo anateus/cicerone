@@ -23,6 +23,11 @@ type ChangelogSection struct {
 	SourceURL                 string
 }
 
+type ChangelogPage struct {
+	Sections []ChangelogSection
+	NextPage int
+}
+
 type ChangelogTarget struct {
 	PackageID                                 domain.PackageID
 	EventID                                   domain.EventID
@@ -133,7 +138,14 @@ func (s *Store) SaveChangelogSection(ctx context.Context, section ChangelogSecti
 		return err
 	}
 	return s.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO changelog_sections(artifact_id,version,content,confidence,source_url) VALUES(?,?,?,?,?)`, id, section.Version, section.Body, section.Confidence, section.SourceURL)
+		_, err := tx.ExecContext(ctx, `INSERT INTO changelog_sections(artifact_id,version,content,confidence,source_url)
+			SELECT ?,?,?,?,?
+			WHERE NOT EXISTS (
+				SELECT 1 FROM changelog_sections
+				WHERE artifact_id=? AND version=? AND content=? AND confidence=? AND source_url=?
+			)`,
+			id, section.Version, section.Body, section.Confidence, section.SourceURL,
+			id, section.Version, section.Body, section.Confidence, section.SourceURL)
 		return err
 	})
 }

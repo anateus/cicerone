@@ -47,6 +47,7 @@ and idempotent.
 | `esc` | Leave package-detail reading mode; quit from the feed |
 | `tab` | Switch panes in a wide terminal |
 | `[`, `]` | Show the cached README or version changelog in package details |
+| `m` | Load 10 more GitHub releases when offered at the end of a release-backed changelog |
 | `space` | Expand or collapse a rolled-up event |
 | `a` | Request install or upgrade; a confirmation is always required |
 | `y`, `enter` | Confirm a pending Homebrew action |
@@ -62,6 +63,8 @@ Search starts with package names. `tab` cycles through cumulative scopes: names;
 Cicerone displays cached rows immediately. Background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
 When selection settles for 250 ms, Cicerone loads and refreshes package information, README, and changelog content independently. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
+
+When GitHub Releases supplies a changelog, the selected release renders first and the next 10 releases are appended in the background. If more releases are available, the end of the changelog offers another 10-release page.
 
 ## Local data and repositories
 

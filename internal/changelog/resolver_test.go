@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -321,6 +322,73 @@ func TestResolverTriesGitHubReleaseWhileLinkedFallbackIsBackedOff(t *testing.T) 
 	}
 	if !strings.Contains(section.Body, "Release fallback") {
 		t.Fatalf("section = %#v", section)
+	}
+}
+
+func TestResolverLoadsAndCachesGitHubReleasePagesTenAtATime(t *testing.T) {
+	ctx := context.Background()
+	cache, err := store.Open(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/repos/acme/widget/releases" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("per_page"); got != "10" {
+			t.Errorf("per_page = %q, want 10", got)
+		}
+		page := r.URL.Query().Get("page")
+		count := 10
+		if page == "2" {
+			count = 3
+		} else {
+			w.Header().Set("Link", `<https://api.github.test/repos/acme/widget/releases?per_page=10&page=2>; rel="next"`)
+		}
+		offset := 0
+		if page == "2" {
+			offset = 10
+		}
+		releases := make([]map[string]any, count)
+		for index := range releases {
+			number := index + 1 + offset
+			releases[index] = map[string]any{
+				"tag_name": "v" + strconv.Itoa(number),
+				"body":     "Notes " + strconv.Itoa(number),
+				"html_url": "https://github.com/acme/widget/releases/tag/v" + strconv.Itoa(number),
+			}
+		}
+		_ = json.NewEncoder(w).Encode(releases)
+	}))
+	defer server.Close()
+	resolver := NewResolver(cache, server.Client())
+	resolver.APIBaseURL = server.URL
+	pkg := PackageRef{Name: "widget", FullName: "widget", RepositoryURL: "https://github.com/acme/widget", Type: domain.PackageFormula}
+
+	first, err := resolver.ReleasePage(ctx, pkg, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Sections) != 10 || first.NextPage != 2 || first.Sections[0].Version != "v1" {
+		t.Fatalf("first page = %#v", first)
+	}
+	second, err := resolver.ReleasePage(ctx, pkg, first.NextPage, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Sections) != 3 || second.NextPage != 0 || second.Sections[2].Version != "v13" {
+		t.Fatalf("second page = %#v", second)
+	}
+	if _, err := resolver.ReleasePage(ctx, pkg, 2, 10); err != nil {
+		t.Fatal(err)
+	}
+	sections, err := cache.ChangelogSections(ctx, second.Sections[0].ArtifactID)
+	if err != nil || len(sections) != 1 || sections[0].Body != "Notes 11" {
+		t.Fatalf("cached release sections = %#v, %v", sections, err)
 	}
 }
 

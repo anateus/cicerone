@@ -372,6 +372,92 @@ func (r *Resolver) resolveRelease(ctx context.Context, packageID, packageName, a
 	return Section{}, last
 }
 
+func (r *Resolver) ReleasePage(ctx context.Context, pkg PackageRef, page, limit int) (ReleasePage, error) {
+	if r.Store == nil {
+		return ReleasePage{}, errors.New("changelog resolver store is nil")
+	}
+	packageID := pkg.FullName
+	if packageID == "" {
+		packageID = pkg.Name
+	}
+	if packageID == "" {
+		return ReleasePage{}, errors.New("package name is empty")
+	}
+	forge, owner, repo, ok := repositoryCoordinates(pkg.RepositoryURL)
+	if !ok || forge != "github" {
+		return ReleasePage{}, fmt.Errorf("GitHub releases unavailable for %q", pkg.RepositoryURL)
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if err := r.Store.UpsertChangelogPackage(ctx, packageID, pkg.Name, string(pkg.Type)); err != nil {
+		return ReleasePage{}, err
+	}
+	query := url.Values{
+		"page":     {fmt.Sprintf("%d", page)},
+		"per_page": {fmt.Sprintf("%d", limit)},
+	}
+	endpoint := strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + url.PathEscape(owner) + "/" +
+		url.PathEscape(repo) + "/releases?" + query.Encode()
+	retryAfter, err := r.Store.ChangelogRetryAfter(ctx, endpoint)
+	if err != nil {
+		return ReleasePage{}, err
+	}
+	if r.Now().Before(retryAfter) {
+		return ReleasePage{}, fmt.Errorf("repository releases page %d backed off until %s", page, retryAfter.Format(time.RFC3339))
+	}
+	var releases []struct {
+		TagName string `json:"tag_name"`
+		Name    string `json:"name"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+	}
+	headers, err := r.getJSONHeaders(ctx, endpoint, &releases)
+	if err != nil {
+		_ = r.Store.RecordChangelogFailure(ctx, endpoint, r.Now(), err)
+		return ReleasePage{}, err
+	}
+	result := ReleasePage{}
+	if linkHasNext(headers.Get("Link")) {
+		result.NextPage = page + 1
+	}
+	for _, release := range releases {
+		version := strings.TrimSpace(release.TagName)
+		if version == "" {
+			version = strings.TrimSpace(release.Name)
+		}
+		if version == "" {
+			continue
+		}
+		body := strings.TrimSpace(release.Body)
+		if body == "" {
+			body = "_No release notes provided._"
+		}
+		source := release.HTMLURL
+		if source == "" {
+			source = strings.TrimRight(pkg.RepositoryURL, "/") + "/releases/tag/" + url.PathEscape(version)
+		}
+		artifact, err := r.persistArtifact(ctx, packageID, source, "text/markdown", "", "", []byte(body))
+		if err != nil {
+			return ReleasePage{}, err
+		}
+		section := Section{
+			ArtifactID: artifact.ID, Version: version, Body: body, Confidence: 1, SourceURL: source,
+		}
+		if err := r.persistSection(ctx, section); err != nil {
+			return ReleasePage{}, err
+		}
+		result.Sections = append(result.Sections, section)
+	}
+	return result, nil
+}
+
 func (r *Resolver) persistArtifact(ctx context.Context, packageID, source, media, etag, lastModified string, body []byte) (Artifact, error) {
 	sum := sha256.Sum256(body)
 	a := store.ChangelogArtifact{URL: source, MediaType: media, ETag: etag, LastModified: lastModified, Hash: hex.EncodeToString(sum[:]), Raw: append([]byte(nil), body...), Extracted: []byte(sanitizeText(string(body))), FetchedAt: r.Now()}
@@ -412,20 +498,37 @@ func (r *Resolver) request(ctx context.Context, endpoint string) (*http.Response
 }
 
 func (r *Resolver) getJSON(ctx context.Context, endpoint string, dst any) error {
+	_, err := r.getJSONHeaders(ctx, endpoint, dst)
+	return err
+}
+
+func (r *Resolver) getJSONHeaders(ctx context.Context, endpoint string, dst any) (http.Header, error) {
 	resp, err := r.request(ctx, endpoint)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	const maximum = 4 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(body) > maximum {
-		return fmt.Errorf("response from %s is too large: limit is %d bytes", endpoint, maximum)
+		return nil, fmt.Errorf("response from %s is too large: limit is %d bytes", endpoint, maximum)
 	}
-	return json.Unmarshal(body, dst)
+	if err := json.Unmarshal(body, dst); err != nil {
+		return nil, err
+	}
+	return resp.Header.Clone(), nil
+}
+
+func linkHasNext(header string) bool {
+	for _, link := range strings.Split(header, ",") {
+		if strings.Contains(link, `rel="next"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Resolver) RepositoryMetadataTags(ctx context.Context, repositoryURL string) ([]string, error) {

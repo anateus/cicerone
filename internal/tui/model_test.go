@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,20 @@ type fakeCachedInfo struct {
 type blockingDetailSource struct {
 	started  chan string
 	canceled chan string
+}
+
+type fakePagedChangelog struct {
+	pages map[int]store.ChangelogPage
+	calls []int
+}
+
+func (f *fakePagedChangelog) LoadChangelog(context.Context, domain.PackageID, domain.EventID) ([]store.ChangelogSection, error) {
+	return nil, nil
+}
+
+func (f *fakePagedChangelog) LoadReleasePage(_ context.Context, _ domain.PackageID, _ domain.EventID, page, _ int) (store.ChangelogPage, error) {
+	f.calls = append(f.calls, page)
+	return f.pages[page], nil
 }
 
 func (s *blockingDetailSource) wait(ctx context.Context, kind string) error {
@@ -347,7 +362,8 @@ func TestMouseSelectsFeedTabsRowsAndDocumentTabs(t *testing.T) {
 	left, _ := m.paneWidths()
 	lines := strings.Split(ansi.Strip(m.renderInspector(m.width-left-1)), "\n")
 	for row, line := range lines {
-		if column := strings.Index(line, "README"); column >= 0 {
+		if index := strings.Index(line, "README"); index >= 0 {
+			column := ansi.StringWidth(line[:index])
 			m.document = store.DocumentChangelog
 			m = update(t, m, tea.MouseClickMsg{X: left + 1 + column, Y: row, Button: tea.MouseLeft})
 			if m.document != store.DocumentREADME {
@@ -370,7 +386,8 @@ func TestDocumentTabClicksSurviveLateDocumentResults(t *testing.T) {
 		left, right := m.paneWidths()
 		lines := strings.Split(ansi.Strip(m.renderInspector(right)), "\n")
 		for row, line := range lines {
-			if column := strings.Index(line, label); column >= 0 {
+			if index := strings.Index(line, label); index >= 0 {
+				column := ansi.StringWidth(line[:index])
 				m = update(t, m, tea.MouseClickMsg{
 					X: left + 1 + column, Y: row, Button: tea.MouseLeft,
 				})
@@ -396,6 +413,89 @@ func TestDocumentTabClicksSurviveLateDocumentResults(t *testing.T) {
 	clickDocumentTab("CHANGELOG")
 	if m.document != store.DocumentChangelog {
 		t.Fatalf("repeated tab clicks ended on %q", m.document)
+	}
+}
+
+func TestGitHubReleaseChangelogLoadsFirstPageAfterInitialRelease(t *testing.T) {
+	older := make([]store.ChangelogSection, 10)
+	for index := range older {
+		older[index] = store.ChangelogSection{
+			Version: "v1." + strconv.Itoa(11-index), Body: "Older notes",
+			SourceURL: "https://github.com/acme/widget/releases/tag/v1." + strconv.Itoa(11-index),
+		}
+	}
+	older[0] = store.ChangelogSection{Version: "v2.1", Body: "Newer notes", SourceURL: "https://github.com/acme/widget/releases/tag/v2.1"}
+	older[1] = store.ChangelogSection{Version: "v2.0", Body: "Current notes", SourceURL: "https://github.com/acme/widget/releases/tag/v2.0"}
+	source := &fakePagedChangelog{pages: map[int]store.ChangelogPage{
+		1: {Sections: older, NextPage: 2},
+	}}
+	m := NewModel(Dependencies{Changelog: source})
+	m.width, m.height, m.loading = 120, 20, false
+	m.groups = groups("a")
+	m.changelogRequestID = 4
+
+	next, cmd := m.Update(ChangelogLoaded{
+		RequestID: 4, SelectionID: m.selectionID, EventID: "a", PackageID: "pkg-a",
+		Sections: []store.ChangelogSection{{
+			Version: "v2.0", Body: "Current notes",
+			SourceURL: "https://github.com/acme/widget/releases/tag/v2.0",
+		}},
+	})
+	m = next.(Model)
+	if cmd == nil || len(m.changelog) != 1 || !m.changelogMoreLoading {
+		t.Fatalf("initial release state: sections=%d loading=%v cmd=%v", len(m.changelog), m.changelogMoreLoading, cmd != nil)
+	}
+	m = update(t, m, cmd())
+	if len(m.changelog) != 9 || m.changelogNextPage != 2 || m.changelogMoreLoading {
+		t.Fatalf("release archive state: sections=%d next=%d loading=%v", len(m.changelog), m.changelogNextPage, m.changelogMoreLoading)
+	}
+	for _, section := range m.changelog {
+		if section.Version == "v2.1" {
+			t.Fatal("release archive included a release newer than the selected release")
+		}
+	}
+	if diff := cmp.Diff([]int{1}, source.calls); diff != "" {
+		t.Fatalf("release page calls (-want +got):\n%s", diff)
+	}
+}
+
+func TestReleaseArchiveOffersAndLoadsTenMoreAtDocumentTail(t *testing.T) {
+	source := &fakePagedChangelog{pages: map[int]store.ChangelogPage{
+		2: {
+			Sections: []store.ChangelogSection{{
+				Version: "v1.0", Body: "Oldest notes",
+				SourceURL: "https://github.com/acme/widget/releases/tag/v1.0",
+			}},
+		},
+	}}
+	m := NewModel(Dependencies{Changelog: source})
+	m.width, m.height, m.loading = 120, 12, false
+	m.groups = groups("a")
+	m.focus = inspectorPane
+	m.document = store.DocumentChangelog
+	m.changelog = []store.ChangelogSection{{
+		Version: "v2.0", Body: strings.Repeat("Current notes\n", 20),
+		SourceURL: "https://github.com/acme/widget/releases/tag/v2.0",
+	}}
+	m.changelogArchiveStarted = true
+	m.changelogNextPage = 2
+	m.syncViewports()
+	rendered := ansi.Strip(m.renderInspector(m.inspectorViewport.Width()))
+	if !strings.Contains(rendered, "m load 10 more releases") {
+		t.Fatalf("release archive offer missing from document tail:\n%s", rendered)
+	}
+
+	next, cmd := m.Update(key("m"))
+	m = next.(Model)
+	if cmd == nil || !m.changelogMoreLoading {
+		t.Fatalf("load-more key: loading=%v cmd=%v", m.changelogMoreLoading, cmd != nil)
+	}
+	m = update(t, m, cmd())
+	if len(m.changelog) != 2 || m.changelogNextPage != 0 || strings.Contains(ansi.Strip(m.renderInspector(60)), "load 10 more") {
+		t.Fatalf("completed archive state: sections=%d next=%d", len(m.changelog), m.changelogNextPage)
+	}
+	if diff := cmp.Diff([]int{2}, source.calls); diff != "" {
+		t.Fatalf("release page calls (-want +got):\n%s", diff)
 	}
 }
 
@@ -506,6 +606,32 @@ func TestSelectionUsesMutedHighlightWithoutDecorativePaneStripes(t *testing.T) {
 	}
 	if strings.Contains(ansi.Strip(rendered), "╲▒▓") || strings.Contains(ansi.Strip(rendered), "░▒▓") {
 		t.Fatal("pane boundary still contains decorative shadow stripes")
+	}
+}
+
+func TestExpandedInspectorDeemphasizesFeedAndStatusOnly(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 120, 10, false
+	m.groups = groups("a")
+	m.focus = inspectorPane
+	m.syncViewports()
+
+	rendered := m.render()
+	firstLine := strings.Split(rendered, "\n")[0]
+	if !strings.HasPrefix(firstLine, "\x1b[2m") {
+		t.Fatalf("expanded inspector did not deemphasize feed: %q", firstLine)
+	}
+	inspectorTitle := strings.Index(firstLine, " Inspector")
+	if inspectorTitle < 0 {
+		t.Fatalf("expanded inspector title was not rendered: %q", firstLine)
+	}
+	prefix := firstLine[:inspectorTitle]
+	if strings.LastIndex(prefix, "\x1b[2m") > strings.LastIndex(prefix, "\x1b[m") {
+		t.Fatalf("expanded inspector also deemphasized inspector: %q", firstLine)
+	}
+	status := strings.Split(rendered, "\n")[m.height-1]
+	if !strings.HasPrefix(status, "\x1b[2m") {
+		t.Fatalf("expanded inspector did not deemphasize core status: %q", status)
 	}
 }
 
@@ -937,13 +1063,18 @@ func TestSeenSeparatorParticipatesInSelectionAndMouseGeometry(t *testing.T) {
 	}
 }
 
-func TestNarrowFeedRowsKeepFrequencyAndVersionVisible(t *testing.T) {
+func TestNarrowFeedRowsTruncateFrequencyBeforeVersionAndName(t *testing.T) {
 	m := NewModel(Dependencies{})
-	e := event("event", "package")
+	e := event("event", "important-package")
+	e.OldVersion = "1.2.3"
+	e.NewVersion = "2.3.4"
 	e.UpdateInterval = 120 * 24 * time.Hour
 	row := ansi.Strip(m.feedGroupRow("› ", e, 40))
-	if !strings.Contains(row, "🐢 3×year") || !strings.Contains(row, "2 1") {
-		t.Fatalf("narrow feed row lost frequency or version: %q", row)
+	if !strings.Contains(row, "important-package") || !strings.Contains(row, "2.3.4 1.2.3") {
+		t.Fatalf("narrow feed row lost package name or version before frequency: %q", row)
+	}
+	if strings.Contains(row, "🐢 3×year") {
+		t.Fatalf("narrow feed row kept full frequency despite constrained width: %q", row)
 	}
 }
 

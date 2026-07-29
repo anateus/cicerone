@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -46,6 +47,10 @@ type changelogResolver interface {
 	RepositoryMetadataTags(context.Context, string) ([]string, error)
 }
 
+type releasePageResolver interface {
+	ReleasePage(context.Context, changelog.PackageRef, int, int) (changelog.ReleasePage, error)
+}
+
 type changelogCache interface {
 	LoadChangelog(context.Context, domain.PackageID, domain.EventID) ([]store.ChangelogSection, error)
 	ChangelogTarget(context.Context, domain.PackageID, domain.EventID) (store.ChangelogTarget, error)
@@ -63,21 +68,56 @@ func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.Pac
 	if err != nil || len(cached) > 0 {
 		return cached, err
 	}
-	target, err := l.cache.ChangelogTarget(ctx, packageID, eventID)
+	ref, version, err := l.packageRef(ctx, packageID, eventID)
 	if err != nil {
 		return nil, err
+	}
+	section, err := l.resolver.Resolve(ctx, ref, version)
+	if err != nil {
+		return nil, err
+	}
+	return []store.ChangelogSection{{ArtifactID: section.ArtifactID, Version: section.Version, Body: section.Body, Confidence: section.Confidence, SourceURL: section.SourceURL}}, nil
+}
+
+func (l changelogLoader) LoadReleasePage(ctx context.Context, packageID domain.PackageID, eventID domain.EventID, page, limit int) (store.ChangelogPage, error) {
+	resolver, ok := l.resolver.(releasePageResolver)
+	if !ok {
+		return store.ChangelogPage{}, errors.New("release archive is unavailable")
+	}
+	ref, _, err := l.packageRef(ctx, packageID, eventID)
+	if err != nil {
+		return store.ChangelogPage{}, err
+	}
+	releases, err := resolver.ReleasePage(ctx, ref, page, limit)
+	if err != nil {
+		return store.ChangelogPage{}, err
+	}
+	result := store.ChangelogPage{Sections: make([]store.ChangelogSection, 0, len(releases.Sections)), NextPage: releases.NextPage}
+	for _, section := range releases.Sections {
+		result.Sections = append(result.Sections, store.ChangelogSection{
+			ArtifactID: section.ArtifactID, Version: section.Version, Body: section.Body,
+			Confidence: section.Confidence, SourceURL: section.SourceURL,
+		})
+	}
+	return result, nil
+}
+
+func (l changelogLoader) packageRef(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) (changelog.PackageRef, string, error) {
+	target, err := l.cache.ChangelogTarget(ctx, packageID, eventID)
+	if err != nil {
+		return changelog.PackageRef{}, "", err
 	}
 	repository, err := l.repository(ctx, target.Repository)
 	if err != nil {
-		return nil, err
+		return changelog.PackageRef{}, "", err
 	}
 	body, err := repository.Blob(ctx, target.Commit, target.DefinitionPath)
 	if err != nil {
-		return nil, err
+		return changelog.PackageRef{}, "", err
 	}
 	definition, _ := history.ParseDefinition(target.DefinitionPath, body)
 	if definition == nil {
-		return nil, fmt.Errorf("parse changelog metadata for %s", target.Name)
+		return changelog.PackageRef{}, "", fmt.Errorf("parse changelog metadata for %s", target.Name)
 	}
 	repositoryURL := githubRepositoryURL(definition.Homepage, definition.URL)
 	if l.locator != nil {
@@ -86,11 +126,10 @@ func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.Pac
 			repositoryURL = resolved
 		}
 	}
-	section, err := l.resolver.Resolve(ctx, changelog.PackageRef{Name: target.Name, FullName: string(target.PackageID), Homepage: definition.Homepage, RepositoryURL: repositoryURL, Type: target.Type}, target.Version)
-	if err != nil {
-		return nil, err
-	}
-	return []store.ChangelogSection{{ArtifactID: section.ArtifactID, Version: section.Version, Body: section.Body, Confidence: section.Confidence, SourceURL: section.SourceURL}}, nil
+	return changelog.PackageRef{
+		Name: target.Name, FullName: string(target.PackageID), Homepage: definition.Homepage,
+		RepositoryURL: repositoryURL, Type: target.Type,
+	}, target.Version, nil
 }
 
 func (l changelogLoader) LoadCachedChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]store.ChangelogSection, error) {

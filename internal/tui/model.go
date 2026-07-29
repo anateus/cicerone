@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -34,6 +35,10 @@ type ChangelogSource interface {
 
 type CachedChangelogSource interface {
 	LoadCachedChangelog(context.Context, domain.PackageID, domain.EventID) ([]store.ChangelogSection, error)
+}
+
+type PagedChangelogSource interface {
+	LoadReleasePage(context.Context, domain.PackageID, domain.EventID, int, int) (store.ChangelogPage, error)
 }
 
 type PackageInfoSource interface {
@@ -113,6 +118,11 @@ type Model struct {
 	repositoryTagsErr                                               error
 	changelogErr                                                    error
 	changelogLoading                                                bool
+	changelogArchiveStarted                                         bool
+	changelogNextPage                                               int
+	changelogMoreLoading                                            bool
+	changelogMoreErr                                                error
+	changelogPageCancel                                             context.CancelFunc
 	detailProgress                                                  DetailProgress
 	document                                                        store.DocumentKind
 	documentExplicit                                                bool
@@ -292,10 +302,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(msg.RequestID != 0 && (msg.RequestID != m.changelogRequestID || msg.SelectionID != m.selectionID)) {
 			return m, nil
 		}
-		m.changelogLoading, m.changelogErr, m.changelog = false, msg.Err, msg.Sections
+		m.changelogLoading, m.changelogErr = false, msg.Err
+		if m.changelogArchiveStarted {
+			m.changelog = mergeChangelogSections(msg.Sections, m.changelog)
+		} else {
+			m.changelog = msg.Sections
+		}
 		if len(msg.Sections) == 0 && m.readme.ID != "" && !m.documentExplicit {
 			m.document = store.DocumentREADME
 		}
+		if msg.Err == nil && !m.changelogArchiveStarted && githubReleaseSections(msg.Sections) {
+			if _, ok := m.deps.Changelog.(PagedChangelogSource); ok {
+				m.changelogArchiveStarted = true
+				m.changelogNextPage = 1
+				m.syncViewports()
+				return m.beginReleasePage(1)
+			}
+		}
+		m.syncViewports()
+	case ChangelogPageLoaded:
+		e := m.selectedEvent()
+		if e.ID != msg.EventID || e.PackageID != msg.PackageID || msg.SelectionID != m.selectionID {
+			return m, nil
+		}
+		if m.changelogPageCancel != nil {
+			m.changelogPageCancel()
+			m.changelogPageCancel = nil
+		}
+		m.changelogMoreLoading = false
+		if msg.Err != nil {
+			m.changelogMoreErr = msg.Err
+			m.changelogNextPage = msg.Page
+			m.syncViewports()
+			return m, nil
+		}
+		m.changelogMoreErr = nil
+		sections := msg.Result.Sections
+		if msg.Page == 1 {
+			sections = releasesAfterCurrent(m.changelog, sections)
+		}
+		m.changelog = mergeChangelogSections(m.changelog, sections)
+		m.changelogNextPage = msg.Result.NextPage
+		m.syncViewports()
 	case PackageInfoLoaded:
 		if msg.Err == nil && msg.Info.Description != "" {
 			m.packageDescriptions[msg.PackageID] = msg.Info.Description
@@ -468,6 +516,8 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "l", "right":
 			m.inspectorViewport.ScrollRight(4)
 			return m, nil
+		case "m":
+			return m.requestMoreReleases()
 		case "enter":
 			if m.width >= narrowBreakpoint {
 				m.focus = feedPane
@@ -706,6 +756,14 @@ func (m *Model) resetDetails() {
 	m.changelog = nil
 	m.changelogErr = nil
 	m.changelogLoading = false
+	m.changelogArchiveStarted = false
+	m.changelogNextPage = 0
+	m.changelogMoreLoading = false
+	m.changelogMoreErr = nil
+	if m.changelogPageCancel != nil {
+		m.changelogPageCancel()
+		m.changelogPageCancel = nil
+	}
 	m.packageInfoErr = nil
 	m.readmeErr = nil
 	m.repositoryTagsErr = nil
@@ -817,6 +875,84 @@ func (m Model) loadChangelog(ctx context.Context, request, selection uint64, e d
 		}
 		return ChangelogLoaded{RequestID: request, SelectionID: selection, EventID: e.ID, PackageID: e.PackageID, Sections: s, Err: err}
 	}
+}
+
+func (m Model) loadReleasePage(ctx context.Context, selection uint64, e domain.UpdateEvent, page int) tea.Cmd {
+	return func() tea.Msg {
+		source, ok := m.deps.Changelog.(PagedChangelogSource)
+		if !ok {
+			return ChangelogPageLoaded{
+				SelectionID: selection, EventID: e.ID, PackageID: e.PackageID, Page: page,
+				Err: fmt.Errorf("release archive is unavailable"),
+			}
+		}
+		result, err := source.LoadReleasePage(ctx, e.PackageID, e.ID, page, 10)
+		return ChangelogPageLoaded{
+			SelectionID: selection, EventID: e.ID, PackageID: e.PackageID, Page: page, Result: result, Err: err,
+		}
+	}
+}
+
+func (m Model) requestMoreReleases() (tea.Model, tea.Cmd) {
+	if m.document != store.DocumentChangelog || m.changelogNextPage == 0 || m.changelogMoreLoading || len(m.groups) == 0 {
+		return m, nil
+	}
+	return m.beginReleasePage(m.changelogNextPage)
+}
+
+func (m Model) beginReleasePage(page int) (tea.Model, tea.Cmd) {
+	if m.changelogPageCancel != nil {
+		m.changelogPageCancel()
+	}
+	ctx, cancel := context.WithCancel(m.deps.Context)
+	m.changelogPageCancel = cancel
+	m.changelogMoreLoading = true
+	m.changelogMoreErr = nil
+	return m, m.loadReleasePage(ctx, m.selectionID, m.selectedEvent(), page)
+}
+
+func githubReleaseSections(sections []store.ChangelogSection) bool {
+	for _, section := range sections {
+		source := strings.ToLower(section.SourceURL)
+		if strings.Contains(source, "github.com/") && strings.Contains(source, "/releases/") {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeChangelogSections(groups ...[]store.ChangelogSection) []store.ChangelogSection {
+	seen := make(map[string]bool)
+	var result []store.ChangelogSection
+	for _, sections := range groups {
+		for _, section := range sections {
+			key := section.SourceURL
+			if key == "" {
+				key = section.ArtifactID + "\x00" + section.Version + "\x00" + section.Body
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result = append(result, section)
+		}
+	}
+	return result
+}
+
+func releasesAfterCurrent(current, page []store.ChangelogSection) []store.ChangelogSection {
+	currentURLs := make(map[string]bool)
+	for _, section := range current {
+		if section.SourceURL != "" {
+			currentURLs[section.SourceURL] = true
+		}
+	}
+	for index, section := range page {
+		if currentURLs[section.SourceURL] {
+			return page[index+1:]
+		}
+	}
+	return page
 }
 
 func (m Model) loadPackageInfo(ctx context.Context, request, selection uint64, e domain.UpdateEvent) tea.Cmd {

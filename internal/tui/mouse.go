@@ -46,17 +46,20 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		if contentY >= 0 && contentY < len(lines) {
 			line := lines[contentY]
 			upperLine := strings.ToUpper(line)
-			if start := strings.Index(upperLine, "README"); start >= 0 && localX >= start && localX < start+len("README") {
+			if textHit(upperLine, "README", localX) {
 				m.document = store.DocumentREADME
 				m.documentExplicit = true
 				m.inspectorViewport.SetYOffset(0)
 				m.syncViewports()
 			}
-			if start := strings.Index(upperLine, "CHANGELOG"); start >= 0 && localX >= start && localX < start+len("CHANGELOG") {
+			if textHit(upperLine, "CHANGELOG", localX) {
 				m.document = store.DocumentChangelog
 				m.documentExplicit = true
 				m.inspectorViewport.SetYOffset(0)
 				m.syncViewports()
+			}
+			if strings.Contains(line, "m load 10 more releases") {
+				return m.requestMoreReleases()
 			}
 		}
 		return m, nil
@@ -99,6 +102,15 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	m.feedViewport, _ = m.feedViewport.Update(msg)
 	m.viewportOffset = m.feedViewport.YOffset()
 	return m, tea.Batch(m.loadVisiblePackageDescriptions()...)
+}
+
+func textHit(line, label string, column int) bool {
+	index := strings.Index(line, label)
+	if index < 0 {
+		return false
+	}
+	start := ansi.StringWidth(line[:index])
+	return column >= start && column < start+ansi.StringWidth(label)
 }
 
 func (m Model) feedGroupAtLine(line int) int {

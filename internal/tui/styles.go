@@ -28,6 +28,7 @@ func (m Model) render() string {
 	status := m.statusText()
 	var body string
 	p := m.palette()
+	deemphasizeCore := w >= narrowBreakpoint && m.focus == inspectorPane
 	if w < narrowBreakpoint {
 		if m.detailOpen {
 			body = paintBackground(viewportContent(m.inspectorViewport, m.renderInspector(w), w, h-statusHeight, m.inspectorViewport.YOffset()), w, p.inspectorBG)
@@ -37,6 +38,9 @@ func (m Model) render() string {
 	} else {
 		left, right := m.paneWidths()
 		feed := m.renderPinnedFeed(left, h-statusHeight)
+		if deemphasizeCore {
+			feed = deemphasizeANSI(feed)
+		}
 		inspector := viewportContent(m.inspectorViewport, m.renderInspector(right), right, h-statusHeight, m.inspectorViewport.YOffset())
 		inspector = paintBackground(inspector, right, p.inspectorBG)
 		body = joinColumns(feed, inspector, left, right, lipgloss.NewStyle().Background(p.inspectorBG).Render(" "))
@@ -52,7 +56,11 @@ func (m Model) render() string {
 	for len(lines) < maxBody {
 		lines = append(lines, m.surfaceLine("", w, p.canvasBG))
 	}
-	return strings.Join(lines, "\n") + "\n" + m.statusLine(status, w)
+	statusLine := m.statusLine(status, w)
+	if deemphasizeCore {
+		statusLine = deemphasizeANSI(statusLine)
+	}
+	return strings.Join(lines, "\n") + "\n" + statusLine
 }
 
 func (m Model) statusText() string {
@@ -316,6 +324,11 @@ func paintBackground(content string, width int, background color.Color) string {
 	return strings.Join(lines, "\n")
 }
 
+func deemphasizeANSI(content string) string {
+	const faint = "\x1b[2m"
+	return faint + strings.ReplaceAll(content, "\x1b[m", "\x1b[m"+faint) + "\x1b[m"
+}
+
 func (m Model) surfaceRule(prefix, label string, width int, background color.Color) string {
 	text := prefix
 	if label != "" {
@@ -400,9 +413,40 @@ func (m Model) tabStrip(labels []string, active, width int, background color.Col
 func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []string {
 	cadence := m.updateCadenceLabel(e)
 	transition := eventKindBadge(e.Kind) + m.versionTransition(e)
-	right := cadence + " " + transition
-	nameWidth := max(1, width-ansi.StringWidth(marker)-ansi.StringWidth(right)-2)
-	versionLine := fit(marker+fit(e.Name, nameWidth)+" "+right, width)
+	nameWidth := ansi.StringWidth(e.Name)
+	cadenceWidth := ansi.StringWidth(cadence)
+	versionWidth := ansi.StringWidth(transition)
+	overflow := ansi.StringWidth(marker) + nameWidth + 1 + cadenceWidth + 1 + versionWidth - width
+	var versionLine string
+	if overflow <= 0 {
+		right := cadence + " " + transition
+		paddedNameWidth := max(1, width-ansi.StringWidth(marker)-ansi.StringWidth(right)-2)
+		versionLine = fit(marker+fit(e.Name, paddedNameWidth)+" "+right, width)
+	} else {
+		shrinkOptional := func(segmentWidth *int) {
+			if overflow <= 0 || *segmentWidth <= 0 {
+				return
+			}
+			reduction := min(overflow, *segmentWidth)
+			*segmentWidth -= reduction
+			overflow -= reduction
+			if *segmentWidth == 0 {
+				overflow = max(0, overflow-1)
+			}
+		}
+		shrinkOptional(&cadenceWidth)
+		shrinkOptional(&versionWidth)
+		nameWidth = max(0, nameWidth-overflow)
+
+		versionLine = marker + ansi.Truncate(e.Name, nameWidth, "")
+		if cadenceWidth > 0 {
+			versionLine += " " + ansi.Truncate(cadence, cadenceWidth, "")
+		}
+		if versionWidth > 0 {
+			versionLine += " " + ansi.Truncate(transition, versionWidth, "")
+		}
+		versionLine = fit(versionLine, width)
+	}
 	if width >= 52 {
 		description := m.packageDescriptions[e.PackageID]
 		if description != "" {

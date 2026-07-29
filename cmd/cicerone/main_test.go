@@ -78,8 +78,9 @@ type fakeInstalledStore struct {
 }
 
 type fakeChangelogResolver struct {
-	ref     changelog.PackageRef
-	version string
+	ref         changelog.PackageRef
+	version     string
+	page, limit int
 }
 
 func (f *fakeChangelogResolver) Resolve(_ context.Context, ref changelog.PackageRef, version string) (changelog.Section, error) {
@@ -89,6 +90,14 @@ func (f *fakeChangelogResolver) Resolve(_ context.Context, ref changelog.Package
 
 func (*fakeChangelogResolver) RepositoryMetadataTags(context.Context, string) ([]string, error) {
 	return []string{}, nil
+}
+
+func (f *fakeChangelogResolver) ReleasePage(_ context.Context, ref changelog.PackageRef, page, limit int) (changelog.ReleasePage, error) {
+	f.ref, f.page, f.limit = ref, page, limit
+	return changelog.ReleasePage{
+		Sections: []changelog.Section{{Version: "v1.9", Body: "Older release", SourceURL: "https://github.com/acme/fixture/releases/tag/v1.9"}},
+		NextPage: 3,
+	}, nil
 }
 
 func TestChangelogLoaderResolvesCacheMissFromDefinition(t *testing.T) {
@@ -121,6 +130,43 @@ end`, "fixture 2.0", time.Now())
 	}
 	if resolver.ref.RepositoryURL != "https://github.com/acme/fixture" || resolver.ref.Homepage != "https://github.com/acme/fixture" || resolver.version != "2.0" {
 		t.Fatalf("resolver input = %#v, %q", resolver.ref, resolver.version)
+	}
+}
+
+func TestChangelogLoaderLoadsRequestedGitHubReleasePage(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	repo := testutil.NewGitRepo(t)
+	commit := repo.Commit("Formula/f/fixture.rb", `class Fixture < Formula
+  homepage "https://github.com/acme/fixture"
+  url "https://github.com/acme/fixture/archive/v2.0.tar.gz"
+  version "2.0"
+end`, "fixture 2.0", time.Now())
+	event := domain.UpdateEvent{
+		ID: "event", PackageID: "fixture", Name: "fixture", Type: domain.PackageFormula, Kind: domain.EventVersion,
+		NewVersion: "2.0", Repository: "homebrew-core", DefinitionPath: "Formula/f/fixture.rb", Commit: commit, Time: time.Now(),
+	}
+	if err := destination.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeChangelogResolver{}
+	loader := changelogLoader{cache: destination, resolver: resolver, repository: func(context.Context, string) (gitrepo.Repository, error) {
+		return gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: repo.Path}, execx.NewRunner()), nil
+	}}
+
+	page, err := loader.LoadReleasePage(ctx, event.PackageID, event.ID, 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Sections) != 1 || page.Sections[0].Version != "v1.9" || page.NextPage != 3 {
+		t.Fatalf("release page = %#v", page)
+	}
+	if resolver.ref.RepositoryURL != "https://github.com/acme/fixture" || resolver.page != 2 || resolver.limit != 10 {
+		t.Fatalf("resolver request = %#v page=%d limit=%d", resolver.ref, resolver.page, resolver.limit)
 	}
 }
 
