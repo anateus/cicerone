@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,7 @@ func TestOwnedMirrorLifecycleAndLocalFetchGuard(t *testing.T) {
 	}
 	want := [][]string{
 		{"clone", "--mirror", "--filter=blob:none", "--", "https://example.test/core.git", path},
-		{"-C", path, "fetch", "--prune"},
+		{"-C", path, "fetch", "--no-tags", "--prune", "origin", "+refs/heads/master:refs/heads/master"},
 	}
 	if len(runner.RunCalls) != len(want) {
 		t.Fatalf("calls = %#v", runner.RunCalls)
@@ -135,6 +136,51 @@ func TestEnsureAcceptsUsableMirror(t *testing.T) {
 	repository := gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: cache, RemoteURL: source.Path, Owned: true}, execx.NewRunner())
 	if err := repository.Ensure(context.Background()); err != nil {
 		t.Fatalf("Ensure error = %v", err)
+	}
+}
+
+func TestCachedReportsExistingOwnedMirrorWithoutNetworkWork(t *testing.T) {
+	source := testutil.NewGitRepo(t)
+	source.Commit("Formula/a.rb", "contents", "initial", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	cache := filepath.Join(t.TempDir(), "core.git")
+	source.Run("clone", "--mirror", "--", source.Path, cache)
+	runner := &recordingRunner{Runner: execx.NewRunner()}
+	repository := gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: cache, RemoteURL: source.Path, Owned: true}, runner)
+
+	available, err := repository.Cached(context.Background())
+	if err != nil || !available {
+		t.Fatalf("Cached = %v, %v; want true, nil", available, err)
+	}
+	for _, call := range runner.calls {
+		if slices.Contains(call, "clone") || slices.Contains(call, "fetch") {
+			t.Fatalf("Cached performed network work: %#v", runner.calls)
+		}
+	}
+
+	missing := gitrepo.New(gitrepo.Source{Name: "missing", Path: filepath.Join(t.TempDir(), "missing.git"), Owned: true}, runner)
+	available, err = missing.Cached(context.Background())
+	if err != nil || available {
+		t.Fatalf("missing Cached = %v, %v; want false, nil", available, err)
+	}
+}
+
+func TestTargetedFetchAdvancesOwnedMirrorDefaultBranch(t *testing.T) {
+	source := testutil.NewGitRepo(t)
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	source.Commit("Formula/a.rb", "one", "initial", at)
+	cache := filepath.Join(t.TempDir(), "core.git")
+	source.Run("clone", "--mirror", "--", source.Path, cache)
+	repository := gitrepo.New(gitrepo.Source{
+		Name: "homebrew-core", Path: cache, RemoteURL: source.Path, Branch: "main", Owned: true,
+	}, execx.NewRunner())
+	want := source.Commit("Formula/a.rb", "two", "update", at.Add(time.Hour))
+
+	if err := repository.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repository.Head(context.Background())
+	if err != nil || got != want {
+		t.Fatalf("Head = %q, %v; want %q after targeted fetch", got, err, want)
 	}
 }
 

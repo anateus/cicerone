@@ -55,7 +55,15 @@ func (m Model) renderInspector(width int) string {
 	}
 	if len(m.repositoryTags) > 0 {
 		tags := ansi.Wordwrap("Tags       "+strings.Join(m.repositoryTags, ", "), max(1, width-2), "")
-		for _, line := range strings.Split(tags, "\n") {
+		lines := strings.Split(tags, "\n")
+		if len(lines) > 3 {
+			if m.repositoryTagsExpanded {
+				lines = append(lines, "           t collapse")
+			} else {
+				lines = append(lines[:2], "           … more · t expand")
+			}
+		}
+		for _, line := range lines {
 			b.WriteString(m.inspectorLine(line, width, p.raisedBG))
 			b.WriteByte('\n')
 		}

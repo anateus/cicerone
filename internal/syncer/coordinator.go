@@ -41,6 +41,9 @@ type Source interface {
 	Refresh(context.Context) error
 	Index(context.Context, Request) (Result, error)
 }
+type CachedSource interface {
+	IndexCached(context.Context, Request) (Result, bool, error)
+}
 type Dependencies struct {
 	Cache        CacheReader
 	Installed    InstalledReader
@@ -237,18 +240,44 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 	c.notify(SyncStarted{Source: source.Name(), At: started})
 	var result Result
 	var err error
+	c.mu.Lock()
+	req.Installed = append([]domain.PackageID(nil), c.installed...)
+	c.mu.Unlock()
+	var completed Progress
+	var current Progress
+	req.Progress = func(progress Progress) {
+		current = progress
+		progress.Commits += completed.Commits
+		progress.Events += completed.Events
+		progress.Diagnostics += completed.Diagnostics
+		progress.Batches += completed.Batches
+		c.notify(SyncProgress{Source: source.Name(), At: c.deps.Now(), Progress: progress})
+		c.notify(tui.DatasetChanged{})
+	}
 	if refresh {
-		err = source.Refresh(ctx)
+		if cached, ok := source.(CachedSource); ok {
+			var used bool
+			result, used, err = cached.IndexCached(ctx, req)
+			if used {
+				completed = current
+			}
+		}
+		if err == nil {
+			err = source.Refresh(ctx)
+		}
 	}
 	if err == nil {
-		c.mu.Lock()
-		req.Installed = append([]domain.PackageID(nil), c.installed...)
-		c.mu.Unlock()
-		req.Progress = func(progress Progress) {
-			c.notify(SyncProgress{Source: source.Name(), At: c.deps.Now(), Progress: progress})
-			c.notify(tui.DatasetChanged{})
+		current = Progress{}
+		fresh, indexErr := source.Index(ctx, req)
+		if refresh {
+			result.Events += fresh.Events
+			result.Diagnostics += fresh.Diagnostics
+			result.Cursor = fresh.Cursor
+			result.Since = fresh.Since
+		} else {
+			result = fresh
 		}
-		result, err = source.Index(ctx, req)
+		err = indexErr
 	}
 	ended := c.deps.Now()
 	err = bounded(err)

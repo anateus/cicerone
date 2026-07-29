@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"cicerone/internal/domain"
 )
@@ -85,9 +86,40 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 			args = append(args, value)
 		}
 	}
-	if query := strings.ToLower(strings.TrimSpace(filter.Query)); query != "" {
-		where = append(where, `(lower(p.name) LIKE ? OR lower(p.id) LIKE ?)`)
-		args = append(args, "%"+query+"%", "%"+query+"%")
+	if match, ok := feedFTSQuery(filter.Query); ok {
+		scope := filter.Search
+		if scope == "" {
+			scope = domain.SearchNames
+		}
+		matches := []string{`p.rowid IN (
+			SELECT rowid FROM packages_fts WHERE packages_fts MATCH ?
+		)`}
+		args = append(args, match)
+		if searchIncludes(scope, domain.SearchDescriptions) {
+			matches = append(matches, `p.id IN (
+				SELECT pi.package_id FROM package_info pi
+				JOIN package_info_fts ON package_info_fts.rowid=pi.rowid
+				WHERE package_info_fts MATCH ?
+			)`)
+			args = append(args, match)
+		}
+		if searchIncludes(scope, domain.SearchChangelogs) {
+			matches = append(matches, `p.id IN (
+				SELECT l.package_id FROM package_document_links l
+				JOIN package_documents_fts ON package_documents_fts.rowid=l.document_id
+				WHERE l.kind='changelog' AND package_documents_fts MATCH ?
+			)`)
+			args = append(args, match)
+		}
+		if searchIncludes(scope, domain.SearchREADMEs) {
+			matches = append(matches, `p.id IN (
+				SELECT l.package_id FROM package_document_links l
+				JOIN package_documents_fts ON package_documents_fts.rowid=l.document_id
+				WHERE l.kind='readme' AND package_documents_fts MATCH ?
+			)`)
+			args = append(args, match)
+		}
+		where = append(where, `(`+strings.Join(matches, ` OR `)+`)`)
 	}
 	query := `SELECT e.id, e.package_id, p.name, p.type, e.kind,
 		e.old_version, e.new_version, e.old_revision, e.new_revision,
@@ -138,6 +170,7 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	filter.Query = ""
 	return domain.BuildFeed(events, installed, filter), nil
 }
 
@@ -166,8 +199,9 @@ func (s *Store) Preferences(ctx context.Context) (domain.FeedFilter, error) {
 	var horizon int64
 	var version, revision, metadata, formula, cask bool
 	var filter domain.FeedFilter
-	err := s.db.QueryRowContext(ctx, `SELECT horizon_seconds, show_version, show_revision, show_metadata, show_formula, show_cask, query, roll_up FROM preferences WHERE id=1`).
-		Scan(&horizon, &version, &revision, &metadata, &formula, &cask, &filter.Query, &filter.RollUp)
+	err := s.db.QueryRowContext(ctx, `SELECT horizon_seconds, show_version, show_revision, show_metadata,
+			show_formula, show_cask, query, search_scope, roll_up FROM preferences WHERE id=1`).
+		Scan(&horizon, &version, &revision, &metadata, &formula, &cask, &filter.Query, &filter.Search, &filter.RollUp)
 	if err != nil {
 		return domain.FeedFilter{}, err
 	}
@@ -195,11 +229,52 @@ func (s *Store) Preferences(ctx context.Context) (domain.FeedFilter, error) {
 // SetPreferences persists feed filter preferences in typed columns.
 func (s *Store) SetPreferences(ctx context.Context, filter domain.FeedFilter) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE preferences SET horizon_seconds=?, show_version=?, show_revision=?, show_metadata=?, show_formula=?, show_cask=?, query=?, roll_up=? WHERE id=1`,
+		scope := filter.Search
+		if scope == "" {
+			scope = domain.SearchNames
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE preferences SET horizon_seconds=?, show_version=?, show_revision=?,
+				show_metadata=?, show_formula=?, show_cask=?, query=?, search_scope=?, roll_up=? WHERE id=1`,
 			int64(filter.Horizon/time.Second), filter.Kinds[domain.EventVersion], filter.Kinds[domain.EventRevision], filter.Kinds[domain.EventMetadata],
-			filter.Types[domain.PackageFormula], filter.Types[domain.PackageCask], filter.Query, filter.RollUp)
+			filter.Types[domain.PackageFormula], filter.Types[domain.PackageCask], filter.Query, scope, filter.RollUp)
 		return err
 	})
+}
+
+func feedFTSQuery(input string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", false
+	}
+	if len(input) >= 2 && input[0] == '"' && input[len(input)-1] == '"' {
+		phrase := strings.TrimSpace(input[1 : len(input)-1])
+		if phrase == "" {
+			return "", false
+		}
+		return quoteFTS(phrase), true
+	}
+	tokens := strings.FieldsFunc(input, func(r rune) bool {
+		return r != '_' && !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	terms := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if token != "" {
+			terms = append(terms, quoteFTS(token)+"*")
+		}
+	}
+	return strings.Join(terms, " AND "), len(terms) > 0
+}
+
+func quoteFTS(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func searchIncludes(scope, category domain.SearchScope) bool {
+	order := map[domain.SearchScope]int{
+		domain.SearchNames: 0, domain.SearchDescriptions: 1,
+		domain.SearchChangelogs: 2, domain.SearchREADMEs: 3,
+	}
+	return order[scope] >= order[category]
 }
 
 func placeholders(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }

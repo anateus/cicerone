@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -29,18 +30,29 @@ type DocumentSection struct {
 }
 
 type PackageInfoRecord struct {
-	PackageID  string
-	FetchedAt  time.Time
-	Raw        []byte
-	Normalized []byte
+	PackageID   string
+	FetchedAt   time.Time
+	Raw         []byte
+	Normalized  []byte
+	Description string
 }
 
 func (s *Store) SavePackageInfo(ctx context.Context, record PackageInfoRecord) error {
+	if record.Description == "" && len(record.Normalized) > 0 {
+		var normalized struct {
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(record.Normalized, &normalized); err != nil {
+			return fmt.Errorf("decode normalized package info: %w", err)
+		}
+		record.Description = normalized.Description
+	}
 	return s.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO package_info(package_id,fetched_at,raw_json,normalized_json)
-			VALUES(?,?,?,?) ON CONFLICT(package_id) DO UPDATE SET
-			fetched_at=excluded.fetched_at,raw_json=excluded.raw_json,normalized_json=excluded.normalized_json`,
-			record.PackageID, record.FetchedAt.UnixNano(), record.Raw, record.Normalized)
+		_, err := tx.ExecContext(ctx, `INSERT INTO package_info(package_id,fetched_at,raw_json,normalized_json,description)
+				VALUES(?,?,?,?,?) ON CONFLICT(package_id) DO UPDATE SET
+				fetched_at=excluded.fetched_at,raw_json=excluded.raw_json,
+				normalized_json=excluded.normalized_json,description=excluded.description`,
+			record.PackageID, record.FetchedAt.UnixNano(), record.Raw, record.Normalized, record.Description)
 		return err
 	})
 }
@@ -48,8 +60,9 @@ func (s *Store) SavePackageInfo(ctx context.Context, record PackageInfoRecord) e
 func (s *Store) PackageInfo(ctx context.Context, packageID string) (PackageInfoRecord, bool, error) {
 	var record PackageInfoRecord
 	var fetched int64
-	err := s.db.QueryRowContext(ctx, `SELECT package_id,fetched_at,raw_json,normalized_json
-		FROM package_info WHERE package_id=?`, packageID).Scan(&record.PackageID, &fetched, &record.Raw, &record.Normalized)
+	err := s.db.QueryRowContext(ctx, `SELECT package_id,fetched_at,raw_json,normalized_json,description
+			FROM package_info WHERE package_id=?`, packageID).
+		Scan(&record.PackageID, &fetched, &record.Raw, &record.Normalized, &record.Description)
 	if err == sql.ErrNoRows {
 		return PackageInfoRecord{}, false, nil
 	}

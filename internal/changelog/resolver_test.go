@@ -29,6 +29,35 @@ type recordingRunner struct {
 	calls  []runnerCall
 }
 
+func TestRepositoryMetadataTagsCombinesTopicsAndLanguages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widget":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"topics":   []string{"terminal", "go"},
+				"language": "Go",
+			})
+		case "/repos/acme/widget/languages":
+			_ = json.NewEncoder(w).Encode(map[string]int64{
+				"Go": 900, "Shell": 100,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	resolver := NewResolver(nil, server.Client())
+	resolver.APIBaseURL = server.URL
+	got, err := resolver.RepositoryMetadataTags(context.Background(), "https://github.com/acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]string{"go", "terminal", "Shell"}, got); diff != "" {
+		t.Fatalf("repository metadata tags (-want +got):\n%s", diff)
+	}
+}
+
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (execx.Result, error) {
 	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
 	return r.result, r.err

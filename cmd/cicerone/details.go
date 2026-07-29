@@ -16,12 +16,10 @@ import (
 	"cicerone/internal/changelog"
 	"cicerone/internal/domain"
 	"cicerone/internal/download"
-	"cicerone/internal/execx"
 	"cicerone/internal/history"
 	"cicerone/internal/homebrew"
 	"cicerone/internal/store"
 	"cicerone/internal/tui"
-	"cicerone/internal/upstream"
 )
 
 type packageDetailLoader struct {
@@ -30,7 +28,6 @@ type packageDetailLoader struct {
 	changelogs changelogLoader
 	queue      *download.Queue
 	fetcher    *changelog.Fetcher
-	runner     execx.Runner
 	send       func(tea.Msg)
 	infoMu     sync.Mutex
 	infoCalls  map[domain.PackageID]*packageInfoCall
@@ -278,13 +275,13 @@ func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packa
 }
 
 func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, packageID domain.PackageID, repositoryURL string) {
-	if l.queue == nil || l.runner == nil || repositoryURL == "" {
+	if l.queue == nil || l.changelogs.resolver == nil || repositoryURL == "" {
 		return
 	}
 	result, err := l.queue.Enqueue(download.Request{
 		URL: repositoryURL, Profile: "repository-tags", Priority: download.Speculative, Context: ctx,
 		Fetch: func(fetchCtx context.Context) (any, error) {
-			return upstream.RepositoryTags(fetchCtx, repositoryURL, l.runner)
+			return l.changelogs.resolver.RepositoryMetadataTags(fetchCtx, repositoryURL)
 		},
 	})
 	if err != nil {

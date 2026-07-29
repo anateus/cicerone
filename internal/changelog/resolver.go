@@ -427,6 +427,57 @@ func (r *Resolver) getJSON(ctx context.Context, endpoint string, dst any) error 
 	}
 	return json.Unmarshal(body, dst)
 }
+
+func (r *Resolver) RepositoryMetadataTags(ctx context.Context, repositoryURL string) ([]string, error) {
+	forge, owner, repo, ok := repositoryCoordinates(repositoryURL)
+	if !ok || forge != "github" {
+		return []string{}, nil
+	}
+	base := strings.TrimRight(r.APIBaseURL, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+	var metadata struct {
+		Topics   []string `json:"topics"`
+		Language string   `json:"language"`
+	}
+	if err := r.getJSON(ctx, base, &metadata); err != nil {
+		return nil, err
+	}
+	languageBytes := make(map[string]int64)
+	if err := r.getJSON(ctx, base+"/languages", &languageBytes); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(metadata.Topics, func(i, j int) bool {
+		return strings.ToLower(metadata.Topics[i]) < strings.ToLower(metadata.Topics[j])
+	})
+	languages := make([]string, 0, len(languageBytes)+1)
+	for language := range languageBytes {
+		languages = append(languages, language)
+	}
+	if len(languages) == 0 && strings.TrimSpace(metadata.Language) != "" {
+		languages = append(languages, metadata.Language)
+	}
+	sort.Slice(languages, func(i, j int) bool {
+		if languageBytes[languages[i]] != languageBytes[languages[j]] {
+			return languageBytes[languages[i]] > languageBytes[languages[j]]
+		}
+		return strings.ToLower(languages[i]) < strings.ToLower(languages[j])
+	})
+
+	tags := make([]string, 0, len(metadata.Topics)+len(languages))
+	seen := make(map[string]bool)
+	for _, values := range [][]string{metadata.Topics, languages} {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			key := strings.ToLower(value)
+			if value != "" && !seen[key] {
+				seen[key] = true
+				tags = append(tags, value)
+			}
+		}
+	}
+	return tags, nil
+}
+
 func (r *Resolver) getBytes(ctx context.Context, endpoint string) ([]byte, string, string, string, error) {
 	resp, err := r.request(ctx, endpoint)
 	if err != nil {

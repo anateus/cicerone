@@ -9,12 +9,12 @@ import (
 )
 
 type sourceDefinition struct {
-	kind, name, tap, remote string
+	kind, name, tap, remote, branch string
 }
 
 var sourceDefinitions = []sourceDefinition{
-	{kind: "formula", name: "homebrew-core", tap: "homebrew/core", remote: "https://github.com/Homebrew/homebrew-core.git"},
-	{kind: "cask", name: "homebrew-cask", tap: "homebrew/cask", remote: "https://github.com/Homebrew/homebrew-cask.git"},
+	{kind: "formula", name: "homebrew-core", tap: "homebrew/core", remote: "https://github.com/Homebrew/homebrew-core.git", branch: "main"},
+	{kind: "cask", name: "homebrew-cask", tap: "homebrew/cask", remote: "https://github.com/Homebrew/homebrew-cask.git", branch: "main"},
 }
 
 func Discover(ctx context.Context, brewPrefix, cacheDir string, runner execx.Runner) ([]Source, error) {
@@ -28,7 +28,10 @@ func Discover(ctx context.Context, brewPrefix, cacheDir string, runner execx.Run
 		if owned {
 			path = filepath.Join(cacheDir, definition.name+".git")
 		}
-		sources = append(sources, Source{Kind: definition.kind, Name: definition.name, Path: path, RemoteURL: definition.remote, Owned: owned})
+		sources = append(sources, Source{
+			Kind: definition.kind, Name: definition.name, Path: path,
+			RemoteURL: definition.remote, Branch: definition.branch, Owned: owned,
+		})
 	}
 	return sources, nil
 }

@@ -158,6 +158,56 @@ func TestGlobalQuitKeys(t *testing.T) {
 	}
 }
 
+func TestSlashSearchModeCapturesTextInsteadOfGlobalKeys(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 72, 10, false
+	m.groups = groups("a", "b")
+	m.syncViewports()
+
+	m = update(t, m, key("/"))
+	for _, character := range []string{"a", "l", "p"} {
+		m = update(t, m, key(character))
+	}
+	next, cmd := m.Update(key("q"))
+	m = next.(Model)
+	if m.filter.Query != "alpq" {
+		t.Fatalf("search query = %q, want alpq", m.filter.Query)
+	}
+	if cmd == nil {
+		t.Fatal("search input did not schedule a debounced query")
+	}
+	if _, ok := cmd().(tea.QuitMsg); ok {
+		t.Fatal("q quit while search input was active")
+	}
+	if !strings.Contains(ansi.Strip(m.View().Content), "SEARCH NAMES") {
+		t.Fatal("active search mode and scope are not visible")
+	}
+}
+
+func TestSearchTabCyclesBroaderCachedContentScopes(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.groups = groups("a", "b")
+	m = update(t, m, key("/"))
+	for _, want := range []domain.SearchScope{
+		domain.SearchDescriptions,
+		domain.SearchChangelogs,
+		domain.SearchREADMEs,
+		domain.SearchNames,
+	} {
+		m = update(t, m, key("tab"))
+		if m.filter.Search != want {
+			t.Fatalf("search scope after tab = %q, want %q", m.filter.Search, want)
+		}
+	}
+
+	m = update(t, m, key("enter"))
+	selected := m.selected
+	m = update(t, m, key("j"))
+	if m.selected == selected {
+		t.Fatal("enter did not leave search input mode")
+	}
+}
+
 func TestEscapeLeavesInspectorBeforeQuitting(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -408,6 +458,40 @@ func TestViewDefinesTerminalBackground(t *testing.T) {
 	}
 }
 
+func TestViewUsesAlternateScreenForFullHeightRendering(t *testing.T) {
+	m := NewModel(Dependencies{})
+	if !m.View().AltScreen {
+		t.Fatal("full-height TUI is rendered inline, allowing repeated updates to scroll over pinned controls")
+	}
+}
+
+func TestNavigationDefersSelectedPackageCacheReadsUntilItSettles(t *testing.T) {
+	source := &fakeCachedInfo{values: map[domain.PackageID]homebrew.PackageInfo{
+		"pkg-a": {Name: "pkg-a"},
+		"pkg-b": {Name: "pkg-b"},
+	}}
+	m := NewModel(Dependencies{PackageInfo: source})
+	m.width, m.height, m.loading = 72, 8, false
+	m.groups = groups("a", "b")
+	m.seenBoundaryIndex = len(m.groups)
+	m.syncViewports()
+	for _, group := range m.groups {
+		m.descriptionRequests[group.Events[0].PackageID] = true
+	}
+
+	_, cmd := m.Update(key("j"))
+	if cmd == nil {
+		t.Fatal("navigation returned no settle command")
+	}
+	message := cmd()
+	if _, ok := message.(ChangelogDebounced); !ok {
+		t.Fatalf("navigation command result = %T, want ChangelogDebounced", message)
+	}
+	if len(source.cachedLoads) != 0 {
+		t.Fatalf("navigation synchronously queued selected-package cache reads: %v", source.cachedLoads)
+	}
+}
+
 func TestSelectionUsesMutedHighlightWithoutDecorativePaneStripes(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m.width, m.height, m.loading = 120, 10, false
@@ -607,17 +691,60 @@ func TestInspectorRendersRepositoryTagsForCurrentPackage(t *testing.T) {
 	})
 	m = update(t, m, RepositoryTagsLoaded{
 		PackageID: "pkg-a",
-		Record:    store.PackageRepositoryTags{Tags: []string{"v1.0.0", "v2.0.0"}},
+		Record:    store.PackageRepositoryTags{Tags: []string{"terminal", "Go"}},
 	})
 
 	view := ansi.Strip(m.renderInspector(72))
-	if !strings.Contains(view, "Tags       v1.0.0, v2.0.0") || strings.Contains(view, "wrong") {
+	if !strings.Contains(view, "Tags       terminal, Go") || strings.Contains(view, "wrong") {
 		t.Fatalf("inspector repository tags:\n%s", view)
 	}
 
 	m = update(t, m, key("j"))
 	if len(m.repositoryTags) != 0 {
 		t.Fatalf("repository tags survived package navigation: %v", m.repositoryTags)
+	}
+}
+
+func TestInspectorRepositoryTagsCollapseToThreeLinesAndToggle(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading, m.focus = 120, 30, false, inspectorPane
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+	m = update(t, m, RepositoryTagsLoaded{
+		PackageID: "pkg-a",
+		Record: store.PackageRepositoryTags{Tags: []string{
+			"first-topic", "second-topic", "third-topic", "fourth-topic",
+			"fifth-topic", "sixth-topic", "seventh-topic", "Rust",
+		}},
+	})
+
+	collapsed := ansi.Strip(m.renderInspector(32))
+	if strings.Contains(collapsed, "Rust") || !strings.Contains(collapsed, "t expand") {
+		t.Fatalf("collapsed repository tags:\n%s", collapsed)
+	}
+	tagLines := 0
+	inTags := false
+	for _, line := range strings.Split(collapsed, "\n") {
+		if strings.Contains(line, "Tags       ") {
+			inTags = true
+		}
+		if strings.Contains(line, "DOCUMENTS") {
+			break
+		}
+		if inTags {
+			tagLines++
+		}
+	}
+	if tagLines != 3 {
+		t.Fatalf("collapsed repository tags use %d lines, want 3:\n%s", tagLines, collapsed)
+	}
+	m = update(t, m, key("t"))
+	expanded := ansi.Strip(m.renderInspector(32))
+	if !strings.Contains(expanded, "Rust") || !strings.Contains(expanded, "t collapse") {
+		t.Fatalf("expanded repository tags:\n%s", expanded)
+	}
+	m = update(t, m, key("t"))
+	if view := ansi.Strip(m.renderInspector(32)); strings.Contains(view, "Rust") {
+		t.Fatalf("repository tags did not collapse again:\n%s", view)
 	}
 }
 
@@ -831,25 +958,24 @@ func TestFeedRowIncludesCachedPackageDescription(t *testing.T) {
 	}
 }
 
-func TestNavigationLoadsCachedDescriptionBeforeDebounce(t *testing.T) {
+func TestVisibleRowsPrefetchCachedDescriptions(t *testing.T) {
 	source := &fakeCachedInfo{values: map[domain.PackageID]homebrew.PackageInfo{
 		"pkg-b": {Name: "b", Description: "cached description"},
 	}}
 	m := NewModel(Dependencies{PackageInfo: source})
-	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a", "b")})
-	next, command := m.Update(key("j"))
-	m = next.(Model)
-	if command == nil {
-		t.Fatal("navigation returned no commands")
-	}
-	batch, ok := command().(tea.BatchMsg)
-	if !ok || len(batch) < 1 {
-		t.Fatalf("navigation command = %T", command())
-	}
-	message := batch[0]()
-	m = update(t, m, message)
-	if m.packageInfo.Description != "cached description" {
-		t.Fatalf("cached description = %q", m.packageInfo.Description)
+	m.width, m.height, m.loading = 72, 10, false
+	m.groups = groups("a", "b")
+	m.syncViewports()
+
+	commands := m.loadVisiblePackageDescriptions()
+	for _, command := range commands {
+		if command == nil {
+			continue
+		}
+		message := command()
+		if message != nil {
+			m = update(t, m, message)
+		}
 	}
 	if m.packageDescriptions["pkg-b"] != "cached description" {
 		t.Fatalf("feed description cache = %q", m.packageDescriptions["pkg-b"])

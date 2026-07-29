@@ -43,6 +43,7 @@ type installedRefresher struct {
 
 type changelogResolver interface {
 	Resolve(context.Context, changelog.PackageRef, string) (changelog.Section, error)
+	RepositoryMetadataTags(context.Context, string) ([]string, error)
 }
 
 type changelogCache interface {
@@ -149,6 +150,14 @@ func (s repositorySource) Refresh(ctx context.Context) error {
 		return s.repository.Fetch(ctx)
 	}
 	return nil
+}
+func (s repositorySource) IndexCached(ctx context.Context, req syncer.Request) (syncer.Result, bool, error) {
+	available, err := s.repository.Cached(ctx)
+	if err != nil || !available {
+		return syncer.Result{}, false, err
+	}
+	result, err := s.Index(ctx, req)
+	return result, true, err
 }
 func (s repositorySource) Index(ctx context.Context, req syncer.Request) (syncer.Result, error) {
 	result, err := s.indexer.Index(ctx, s.source, history.Request{Since: req.Since, Installed: req.Installed, Kinds: req.Kinds, Progress: func(progress history.Progress) {
@@ -338,7 +347,7 @@ const helpText = `Cicerone — a cached Homebrew update feed
 
 Usage: cicerone [--help] [--plain]
 
-Keys: h/j/k/l or arrows navigate · enter opens details · space expands · a installs/upgrades · q/esc quit
+Keys: h/j/k/l or arrows navigate · / searches · enter opens details · space expands · a installs/upgrades · q/esc quit
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
 Cached data is displayed before background Homebrew/Git refreshes begin.

@@ -2,34 +2,31 @@ package main
 
 import (
 	"context"
-	"io"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"cicerone/internal/changelog"
 	"cicerone/internal/domain"
 	"cicerone/internal/download"
-	"cicerone/internal/execx"
 	"cicerone/internal/store"
 	"cicerone/internal/tui"
 )
 
-type repositoryTagRunner struct {
-	result execx.Result
-	name   string
-	args   []string
+type repositoryMetadataResolver struct {
+	tags []string
+	url  string
 }
 
-func (r *repositoryTagRunner) Run(_ context.Context, name string, args ...string) (execx.Result, error) {
-	r.name = name
-	r.args = append([]string(nil), args...)
-	return r.result, nil
+func (*repositoryMetadataResolver) Resolve(context.Context, changelog.PackageRef, string) (changelog.Section, error) {
+	return changelog.Section{}, nil
 }
 
-func (*repositoryTagRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
-	panic("unused")
+func (r *repositoryMetadataResolver) RepositoryMetadataTags(_ context.Context, repositoryURL string) ([]string, error) {
+	r.url = repositoryURL
+	return append([]string(nil), r.tags...), nil
 }
 
 func TestPackageDetailLoaderFetchesCachesAndPublishesRepositoryTags(t *testing.T) {
@@ -44,33 +41,30 @@ func TestPackageDetailLoaderFetchesCachesAndPublishesRepositoryTags(t *testing.T
 	}
 	queue := download.NewQueue(download.Options{Context: ctx, Workers: 1, HostInterval: -1})
 	t.Cleanup(queue.Close)
-	runner := &repositoryTagRunner{result: execx.Result{Stdout: []byte(
-		"aaa\trefs/tags/v2.0.0\nbbb\trefs/tags/v1.0.0\n",
-	)}}
+	resolver := &repositoryMetadataResolver{tags: []string{"terminal", "Go", "Shell"}}
 	messages := make(chan tea.Msg, 1)
 	loader := &packageDetailLoader{
-		store: cache, queue: queue, runner: runner, send: func(message tea.Msg) { messages <- message },
+		store: cache, queue: queue, changelogs: changelogLoader{resolver: resolver},
+		send: func(message tea.Msg) { messages <- message },
 	}
 
-	loader.enqueueRepositoryTags(ctx, "widget", "https://bitbucket.org/acme/widget")
+	loader.enqueueRepositoryTags(ctx, "widget", "https://github.com/acme/widget")
 
 	select {
 	case raw := <-messages:
 		message, ok := raw.(tui.RepositoryTagsLoaded)
 		if !ok || message.PackageID != domain.PackageID("widget") ||
-			!reflect.DeepEqual(message.Record.Tags, []string{"v1.0.0", "v2.0.0"}) {
+			!reflect.DeepEqual(message.Record.Tags, []string{"terminal", "Go", "Shell"}) {
 			t.Fatalf("repository tags message = %#v", raw)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for repository tags")
 	}
 	record, found, err := loader.LoadCachedRepositoryTags(ctx, "widget")
-	if err != nil || !found || !reflect.DeepEqual(record.Tags, []string{"v1.0.0", "v2.0.0"}) {
+	if err != nil || !found || !reflect.DeepEqual(record.Tags, []string{"terminal", "Go", "Shell"}) {
 		t.Fatalf("cached repository tags = %#v, %v, %v", record, found, err)
 	}
-	if runner.name != "git" || !reflect.DeepEqual(runner.args, []string{
-		"ls-remote", "--tags", "--refs", "https://bitbucket.org/acme/widget",
-	}) {
-		t.Fatalf("runner call = %q %v", runner.name, runner.args)
+	if resolver.url != "https://github.com/acme/widget" {
+		t.Fatalf("repository metadata URL = %q", resolver.url)
 	}
 }

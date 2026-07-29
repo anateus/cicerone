@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -160,7 +161,7 @@ func TestFeedEventsCanBePersistedAsSeen(t *testing.T) {
 
 func TestPreferencesRoundTripTypedFilter(t *testing.T) {
 	s := openTestStore(t)
-	want := domain.FeedFilter{Horizon: 14 * 24 * time.Hour, Kinds: map[domain.EventKind]bool{domain.EventRevision: true}, Types: map[domain.PackageType]bool{domain.PackageCask: true}, Query: "foo", RollUp: false}
+	want := domain.FeedFilter{Horizon: 14 * 24 * time.Hour, Kinds: map[domain.EventKind]bool{domain.EventRevision: true}, Types: map[domain.PackageType]bool{domain.PackageCask: true}, Query: "foo", Search: domain.SearchChangelogs, RollUp: false}
 	if err := s.SetPreferences(context.Background(), want); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +171,75 @@ func TestPreferencesRoundTripTypedFilter(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("preferences mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestQueryFeedUsesPrefixFTSAndQuotedExactPhrases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, packageID := range []domain.PackageID{"alpha-tool", "alphabet", "alpha-beta-tool"} {
+		if err := s.UpsertEvents(ctx, []domain.UpdateEvent{testEvent("event-"+string(packageID), packageID, domain.EventVersion, now)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertSearchPackages(t, s, domain.FeedFilter{Query: "alph", Search: domain.SearchNames},
+		[]domain.PackageID{"alpha-beta-tool", "alpha-tool", "alphabet"})
+	assertSearchPackages(t, s, domain.FeedFilter{Query: "alp bet", Search: domain.SearchNames},
+		[]domain.PackageID{"alpha-beta-tool"})
+	assertSearchPackages(t, s, domain.FeedFilter{Query: `"alpha"`, Search: domain.SearchNames},
+		[]domain.PackageID{"alpha-beta-tool", "alpha-tool"})
+}
+
+func TestQueryFeedCyclesThroughCachedDescriptionAndDocumentScopes(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, packageID := range []domain.PackageID{"name-hit", "description-hit", "changelog-hit", "readme-hit"} {
+		if err := s.UpsertEvents(ctx, []domain.UpdateEvent{testEvent("event-"+string(packageID), packageID, domain.EventVersion, now)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	normalized, err := json.Marshal(map[string]string{"description": "quasar database"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SavePackageInfo(ctx, PackageInfoRecord{
+		PackageID: "description-hit", FetchedAt: now, Raw: []byte("{}"), Normalized: normalized,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for packageID, document := range map[string]PackageDocument{
+		"changelog-hit": {Kind: DocumentChangelog, URL: "https://example.test/changelog", Hash: "changelog", Raw: []byte{}, Extracted: []byte("quasar changes")},
+		"readme-hit":    {Kind: DocumentREADME, URL: "https://example.test/readme", Hash: "readme", Raw: []byte{}, Extracted: []byte("quasar guide")},
+	} {
+		if _, err := s.SavePackageDocument(ctx, packageID, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertSearchPackages(t, s, domain.FeedFilter{Query: "quas", Search: domain.SearchNames}, []domain.PackageID{})
+	assertSearchPackages(t, s, domain.FeedFilter{Query: "quas", Search: domain.SearchDescriptions},
+		[]domain.PackageID{"description-hit"})
+	assertSearchPackages(t, s, domain.FeedFilter{Query: "quas", Search: domain.SearchChangelogs},
+		[]domain.PackageID{"changelog-hit", "description-hit"})
+	assertSearchPackages(t, s, domain.FeedFilter{Query: "quas", Search: domain.SearchREADMEs},
+		[]domain.PackageID{"changelog-hit", "description-hit", "readme-hit"})
+}
+
+func assertSearchPackages(t *testing.T, s *Store, filter domain.FeedFilter, want []domain.PackageID) {
+	t.Helper()
+	groups, err := s.QueryFeed(context.Background(), filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]domain.PackageID, 0, len(groups))
+	for _, group := range groups {
+		got = append(got, group.Events[0].PackageID)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("search mismatch (-want +got):\n%s", diff)
 	}
 }
 

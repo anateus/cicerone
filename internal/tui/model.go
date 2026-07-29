@@ -15,6 +15,7 @@ import (
 
 const (
 	changelogDebounce = 250 * time.Millisecond
+	searchDebounce    = 120 * time.Millisecond
 )
 
 type DataSource interface {
@@ -107,6 +108,7 @@ type Model struct {
 	seenBoundaryIndex                                               int
 	readme                                                          store.PackageDocument
 	repositoryTags                                                  []string
+	repositoryTagsExpanded                                          bool
 	packageInfoErr, readmeErr                                       error
 	repositoryTagsErr                                               error
 	changelogErr                                                    error
@@ -125,6 +127,7 @@ type Model struct {
 	actionAnchor                                                    domain.Anchor
 	syncProgress                                                    map[string]SyncProgress
 	activeSync                                                      map[string]bool
+	searching                                                       bool
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -134,7 +137,10 @@ func NewModel(deps Dependencies) Model {
 		deps.Context = context.Background()
 	}
 	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true, feedRequestID: 1, document: store.DocumentChangelog,
-		filter:       domain.FeedFilter{Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true}},
+		filter: domain.FeedFilter{
+			Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true},
+			Search: domain.SearchNames,
+		},
 		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor),
 		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool),
 		packageDescriptions: make(map[domain.PackageID]string), descriptionRequests: make(map[domain.PackageID]bool),
@@ -228,6 +234,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(msg.Filter.Types) == 0 {
 				msg.Filter.Types[domain.PackageFormula] = true
 			}
+			if !validSearchScope(msg.Filter.Search) {
+				msg.Filter.Search = domain.SearchNames
+			}
 			m.filter = msg.Filter
 			m.feedRequestID++
 			return m, m.queryFeed(m.feedRequestID)
@@ -246,6 +255,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SearchChanged:
 		m.filter.Query = msg.Text
 		return m.filterChanged()
+	case SearchDebounced:
+		if msg.RequestID != m.feedRequestID {
+			return m, nil
+		}
+		return m, tea.Batch(m.queryFeed(msg.RequestID), m.savePreferences())
 	case ToggleRollUp:
 		m.filter.RollUp = !m.filter.RollUp
 		return m.filterChanged()
@@ -392,12 +406,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() tea.View {
 	view := tea.NewView(m.render())
+	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
+	view.KeyboardEnhancements.ReportEventTypes = true
 	view.BackgroundColor = m.palette().canvasBG
 	return view
 }
 
 func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.searching {
+		return m.handleSearchKey(key)
+	}
 	if key.String() == "q" {
 		return m, tea.Quit
 	}
@@ -433,6 +452,10 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if readingInspector {
 		m.syncViewports()
 		switch key.String() {
+		case "t":
+			m.repositoryTagsExpanded = !m.repositoryTagsExpanded
+			m.syncViewports()
+			return m, nil
 		case "j", "down":
 			m.inspectorViewport.ScrollDown(1)
 			return m, nil
@@ -456,15 +479,22 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch key.String() {
+	case "t":
+		m.repositoryTagsExpanded = !m.repositoryTagsExpanded
+		m.syncViewports()
+	case "/":
+		m.searching = true
+		if !validSearchScope(m.filter.Search) {
+			m.filter.Search = domain.SearchNames
+		}
+		return m, nil
 	case "j", "down":
 		if m.selected+1 < len(m.groups) {
 			m.selected++
 			m.selectionID++
 			m.resetDetails()
 			m.keepSelectionVisible()
-			commands := []tea.Cmd{m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
-				m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
-				m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.debounceChangelog()}
+			commands := []tea.Cmd{m.debounceChangelog()}
 			commands = append(commands, m.loadVisiblePackageDescriptions()...)
 			return m, tea.Batch(commands...)
 		}
@@ -474,9 +504,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.selectionID++
 			m.resetDetails()
 			m.keepSelectionVisible()
-			commands := []tea.Cmd{m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
-				m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
-				m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.debounceChangelog()}
+			commands := []tea.Cmd{m.debounceChangelog()}
 			commands = append(commands, m.loadVisiblePackageDescriptions()...)
 			return m, tea.Batch(commands...)
 		}
@@ -534,6 +562,69 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.syncViewports()
 	}
 	return m, nil
+}
+
+func (m Model) handleSearchKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "esc":
+		m.searching = false
+		return m, nil
+	case "enter":
+		m.searching = false
+		return m.filterChanged()
+	case "tab":
+		m.filter.Search = nextSearchScope(m.filter.Search)
+		return m.searchChanged()
+	case "backspace":
+		runes := []rune(m.filter.Query)
+		if len(runes) > 0 {
+			m.filter.Query = string(runes[:len(runes)-1])
+			return m.searchChanged()
+		}
+		return m, nil
+	case "ctrl+u":
+		if m.filter.Query != "" {
+			m.filter.Query = ""
+			return m.searchChanged()
+		}
+		return m, nil
+	}
+	text := key.Key().Text
+	if text == "" {
+		return m, nil
+	}
+	m.filter.Query += text
+	return m.searchChanged()
+}
+
+func (m Model) searchChanged() (tea.Model, tea.Cmd) {
+	m.feedRequestID++
+	id := m.feedRequestID
+	return m, tea.Tick(searchDebounce, func(time.Time) tea.Msg {
+		return SearchDebounced{RequestID: id}
+	})
+}
+
+func nextSearchScope(scope domain.SearchScope) domain.SearchScope {
+	switch scope {
+	case domain.SearchNames:
+		return domain.SearchDescriptions
+	case domain.SearchDescriptions:
+		return domain.SearchChangelogs
+	case domain.SearchChangelogs:
+		return domain.SearchREADMEs
+	default:
+		return domain.SearchNames
+	}
+}
+
+func validSearchScope(scope domain.SearchScope) bool {
+	switch scope {
+	case domain.SearchNames, domain.SearchDescriptions, domain.SearchChangelogs, domain.SearchREADMEs:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m Model) requestSelectedAction() (tea.Model, tea.Cmd) {
@@ -611,6 +702,7 @@ func (m *Model) resetDetails() {
 	m.packageInfo = homebrew.PackageInfo{}
 	m.readme = store.PackageDocument{}
 	m.repositoryTags = nil
+	m.repositoryTagsExpanded = false
 	m.changelog = nil
 	m.changelogErr = nil
 	m.changelogLoading = false

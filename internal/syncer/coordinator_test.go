@@ -239,6 +239,15 @@ func (f fakeJob) Index(ctx context.Context, req Request) (Result, error) {
 	return Result{Events: 1, Cursor: "head"}, nil
 }
 
+type fakeCachedJob struct {
+	fakeJob
+	indexCached func(context.Context, Request) (Result, bool, error)
+}
+
+func (f fakeCachedJob) IndexCached(ctx context.Context, req Request) (Result, bool, error) {
+	return f.indexCached(ctx, req)
+}
+
 func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
@@ -272,6 +281,61 @@ func TestStartLoadsCacheBeforeExternalRefreshAndInstalledBeforeIndex(t *testing.
 	close(releaseInstalled)
 	waitClosed(t, indexed, "history index")
 	c.Close()
+}
+
+func TestRefreshIndexesUsableRepositoryCacheBeforeNetwork(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	var sequence []string
+	job := fakeCachedJob{
+		fakeJob: fakeJob{
+			name:        "core",
+			destination: destination,
+			refresh: func(context.Context) error {
+				sequence = append(sequence, "refresh")
+				return nil
+			},
+			index: func(_ context.Context, req Request) (Result, error) {
+				sequence = append(sequence, "fresh")
+				req.Progress(Progress{Commits: 50, Events: 2, Batches: 1})
+				return Result{Events: 2, Cursor: "fresh-head"}, nil
+			},
+		},
+		indexCached: func(_ context.Context, req Request) (Result, bool, error) {
+			sequence = append(sequence, "cached")
+			req.Progress(Progress{Commits: 100, Events: 4, Batches: 1})
+			return Result{Events: 4, Cursor: "cached-head"}, true, nil
+		},
+	}
+	var progress []Progress
+	var committed Result
+	c := New(Dependencies{
+		Store: destination, Sources: []Source{job},
+		Notify: func(msg tea.Msg) {
+			if event, ok := msg.(SyncProgress); ok {
+				progress = append(progress, event.Progress)
+			}
+			if event, ok := msg.(SyncCommitted); ok {
+				committed = event.Result
+			}
+		},
+	})
+
+	c.Start(context.Background())
+	c.Wait()
+
+	if want := []string{"cached", "refresh", "fresh"}; !slices.Equal(sequence, want) {
+		t.Fatalf("work sequence = %v, want %v", sequence, want)
+	}
+	wantProgress := []Progress{
+		{Commits: 100, Events: 4, Batches: 1},
+		{Commits: 150, Events: 6, Batches: 2},
+	}
+	if !slices.Equal(progress, wantProgress) {
+		t.Fatalf("cached progress = %#v", progress)
+	}
+	if committed.Events != 6 || committed.Cursor != "fresh-head" {
+		t.Fatalf("committed result = %#v, want 6 events at fresh-head", committed)
+	}
 }
 
 func TestSourceDiscoveryStartsAfterCachedFeed(t *testing.T) {

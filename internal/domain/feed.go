@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// SearchScope is the broadest cached content category included in a feed search.
+type SearchScope string
+
+const (
+	SearchNames        SearchScope = "names"
+	SearchDescriptions SearchScope = "descriptions"
+	SearchChangelogs   SearchScope = "changelogs"
+	SearchREADMEs      SearchScope = "readmes"
+)
+
 // FeedFilter controls which update events appear and how they are grouped.
 type FeedFilter struct {
 	Now     time.Time
@@ -13,6 +23,7 @@ type FeedFilter struct {
 	Kinds   map[EventKind]bool
 	Types   map[PackageType]bool
 	Query   string
+	Search  SearchScope
 	RollUp  bool
 }
 

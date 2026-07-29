@@ -16,6 +16,7 @@ type Source struct {
 	Name      string
 	Path      string
 	RemoteURL string
+	Branch    string
 	Owned     bool
 }
 
@@ -26,6 +27,25 @@ type Repository struct {
 
 func New(source Source, runner execx.Runner) Repository {
 	return Repository{source: source, runner: runner}
+}
+
+// Cached reports whether an owned repository cache is ready to read without
+// cloning or fetching it. User-owned repositories are already validated during
+// discovery and are not considered Cicerone cache entries.
+func (r Repository) Cached(ctx context.Context) (bool, error) {
+	if !r.source.Owned {
+		return false, nil
+	}
+	if _, err := os.Stat(r.source.Path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect repository %s: %w", r.source.Path, err)
+	}
+	if err := r.validateOwned(ctx); err != nil {
+		return false, fmt.Errorf("owned cache %s is incomplete or unexpected: %w; move it aside or remove it after inspection, then retry", r.source.Path, err)
+	}
+	return true, nil
 }
 
 func (r Repository) Ensure(ctx context.Context) error {
@@ -89,7 +109,12 @@ func (r Repository) Fetch(ctx context.Context) error {
 	if !r.source.Owned {
 		return fmt.Errorf("refuse to fetch user-owned repository %s", r.source.Path)
 	}
-	_, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "fetch", "--prune")
+	branch := r.source.Branch
+	if branch == "" {
+		branch = "master"
+	}
+	refspec := "+refs/heads/" + branch + ":refs/heads/" + branch
+	_, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "fetch", "--no-tags", "--prune", "origin", refspec)
 	if err != nil {
 		return fmt.Errorf("fetch %s: %w", r.source.Name, err)
 	}

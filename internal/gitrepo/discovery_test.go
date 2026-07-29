@@ -63,8 +63,8 @@ func TestDiscoverUsesBrewRepositoryThenOwnedFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []gitrepo.Source{
-		{Kind: "formula", Name: "homebrew-core", Path: valid, RemoteURL: "https://github.com/Homebrew/homebrew-core.git"},
-		{Kind: "cask", Name: "homebrew-cask", Path: filepath.Join(cache, "homebrew-cask.git"), RemoteURL: "https://github.com/Homebrew/homebrew-cask.git", Owned: true},
+		{Kind: "formula", Name: "homebrew-core", Path: valid, RemoteURL: "https://github.com/Homebrew/homebrew-core.git", Branch: "main"},
+		{Kind: "cask", Name: "homebrew-cask", Path: filepath.Join(cache, "homebrew-cask.git"), RemoteURL: "https://github.com/Homebrew/homebrew-cask.git", Branch: "main", Owned: true},
 	}
 	if !reflect.DeepEqual(sources, want) {
 		t.Fatalf("sources = %#v, want %#v", sources, want)

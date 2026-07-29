@@ -145,7 +145,7 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 	}}
 	details := &packageDetailLoader{
 		store: destination, brew: brew, changelogs: loader, queue: downloads, fetcher: fetcher,
-		runner: runner, send: notify, progress: progress,
+		send: notify, progress: progress,
 	}
 	return &runtimeServices{ctx: ctx, store: destination, brew: brew, coordinator: coordinator, changelogs: loader, details: details, downloads: downloads, cancel: cancel}, nil
 }

@@ -87,6 +87,10 @@ func (f *fakeChangelogResolver) Resolve(_ context.Context, ref changelog.Package
 	return changelog.Section{Version: version, Body: "resolved", SourceURL: "https://github.com/acme/fixture/releases/v2.0", Confidence: 1}, nil
 }
 
+func (*fakeChangelogResolver) RepositoryMetadataTags(context.Context, string) ([]string, error) {
+	return []string{}, nil
+}
+
 func TestChangelogLoaderResolvesCacheMissFromDefinition(t *testing.T) {
 	ctx := context.Background()
 	destination, err := store.Open(ctx, ":memory:")

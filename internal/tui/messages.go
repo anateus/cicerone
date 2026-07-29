@@ -69,6 +69,7 @@ type PreferencesLoaded struct {
 type preferencesSaved struct{ Err error }
 type eventsSeen struct{ Err error }
 type ChangelogDebounced struct{ SelectionID uint64 }
+type SearchDebounced struct{ RequestID uint64 }
 type ToggleFilter struct{ Kind domain.EventKind }
 type ToggleTypeFilter struct{ Type domain.PackageType }
 type ToggleRollUp struct{}

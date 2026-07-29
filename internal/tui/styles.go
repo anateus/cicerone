@@ -253,6 +253,8 @@ type footerHint struct {
 func (m Model) footerHints(width int, status string) []footerHint {
 	var hints []footerHint
 	switch {
+	case m.searching:
+		hints = []footerHint{{"enter", "apply", 0}, {"tab", "broaden", 0}, {"esc", "done", 0}}
 	case m.pendingAction != nil:
 		hints = []footerHint{{"y/enter", "confirm", 0}, {"n", "cancel", 0}, {"q", "quit", 1}}
 	case m.actionRunning || m.actionResult != nil:
@@ -263,7 +265,7 @@ func (m Model) footerHints(width int, status string) []footerHint {
 			{"[", "readme", 2}, {"]", "changelog", 2}, {"q", "quit", 1},
 		}
 	default:
-		hints = []footerHint{{"↑↓", "move", 0}, {"enter", "details", 1}, {"space", "expand", 3}}
+		hints = []footerHint{{"/", "search", 0}, {"↑↓", "move", 0}, {"enter", "details", 1}, {"space", "expand", 3}}
 		if m.deps.Actions != nil && len(m.groups) > 0 {
 			label := "install"
 			if m.selectedEvent().Installed {
@@ -349,8 +351,14 @@ func (m Model) feedControls(width int) string {
 		active = 2
 	}
 	controls := fmt.Sprintf("   roll-up %s", onOff(m.filter.RollUp))
-	if strings.TrimSpace(m.filter.Query) != "" {
-		controls += "   search: " + fit(m.filter.Query, 18)
+	scope := m.filter.Search
+	if !validSearchScope(scope) {
+		scope = domain.SearchNames
+	}
+	if m.searching {
+		controls += "   SEARCH " + strings.ToUpper(string(scope)) + ": " + fit(m.filter.Query, 18) + "█"
+	} else if strings.TrimSpace(m.filter.Query) != "" {
+		controls += "   search " + string(scope) + ": " + fit(m.filter.Query, 18)
 	}
 	rows := m.tabStrip([]string{"FORMULAE", "CASKS", "ALL"}, active, width, m.palette().feedBG, controls)
 	return strings.Join(rows[:], "\n")

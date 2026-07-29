@@ -39,6 +39,9 @@ and idempotent.
 | `j`, `↓` | Move down; scroll down while reading package details |
 | `k`, `↑` | Move up; scroll up while reading package details |
 | `1`, `2`, `3` | Show Formulae, Casks, or both |
+| `/` | Enter package search; typing filters after a short debounce |
+| `tab` while searching | Broaden search through names, descriptions, changelogs, and READMEs |
+| `enter`, `esc` while searching | Apply and leave search, or leave search input |
 | `h`, `←` / `l`, `→` | Switch toward package details; scroll horizontally while reading |
 | `enter` | Enter or leave package-detail reading mode |
 | `esc` | Leave package-detail reading mode; quit from the feed |
@@ -54,9 +57,11 @@ and idempotent.
 
 The default feed contains version events from the last 30 days. An installed package remains visible through its newest matching event even if that event is older than the horizon. Results are sorted newest-first with a stable identity tie-breaker. Roll-up occurs only for adjacent events of the same package after filters are applied, so changing a filter can change grouping.
 
+Search starts with package names. `tab` cycles through cumulative scopes: names; names and cached descriptions; those plus cached changelogs; then those plus cached READMEs. Unquoted terms are prefix searches, so `rip gre` matches tokens beginning with `rip` and `gre`. Surround the whole query with quotes for a non-prefix phrase search, such as `"rip grep"`. Document and description results are limited to content already present in Cicerone's durable cache.
+
 Cicerone displays cached rows immediately. Background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
-On selection, Cicerone loads cached package information, README, and changelog content immediately. After the selection settles for 250 ms, it refreshes them independently. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
+When selection settles for 250 ms, Cicerone loads and refreshes package information, README, and changelog content independently. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
 
 ## Local data and repositories
 
@@ -64,6 +69,7 @@ On selection, Cicerone loads cached package information, README, and changelog c
 - Cicerone-owned Git mirrors and other cache data: `~/Library/Caches/cicerone/`
 
 Cicerone prefers usable local `homebrew-core` and `homebrew-cask` tap clones. Those user/Homebrew-owned repositories are read-only: Cicerone never fetches, checks out, resets, or rewrites them. If a local clone is unavailable, Cicerone creates and fetches its own bare, filtered mirror under its cache directory.
+On later runs, an existing Cicerone mirror is indexed before its network refresh, so locally cached history can populate the feed while newer commits are fetched.
 
 Cached feed, package information, README, and changelog content remains readable offline. The in-memory download queue is reconstructed from navigation demand after restart. See [Cache and recovery](docs/cache-and-recovery.md) before moving or rebuilding a damaged database; Cicerone never silently deletes it.
 
