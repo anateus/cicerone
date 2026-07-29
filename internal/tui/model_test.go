@@ -33,6 +33,26 @@ func (f *fakeSeenData) MarkEventsSeen(_ context.Context, ids []domain.EventID) e
 	return nil
 }
 
+type blockingFeedData struct {
+	started  chan string
+	canceled chan string
+}
+
+func (f *blockingFeedData) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
+	f.started <- filter.Query
+	<-ctx.Done()
+	f.canceled <- filter.Query
+	return nil, ctx.Err()
+}
+
+func (f *blockingFeedData) Preferences(context.Context) (domain.FeedFilter, error) {
+	return domain.FeedFilter{}, nil
+}
+
+func (f *blockingFeedData) SetPreferences(context.Context, domain.FeedFilter) error {
+	return nil
+}
+
 type fakeCachedInfo struct {
 	values      map[domain.PackageID]homebrew.PackageInfo
 	loads       []domain.PackageID
@@ -196,16 +216,17 @@ func TestSlashSearchModeCapturesTextInsteadOfGlobalKeys(t *testing.T) {
 	}
 	header := m.renderFeedHeader(m.width)
 	lines := strings.Split(ansi.Strip(header), "\n")
-	if len(lines) != 6 || !strings.Contains(lines[3], "search names") || !strings.Contains(lines[4], "─") ||
+	if len(lines) != 6 || !strings.Contains(lines[3], "─") || !strings.Contains(lines[4], "search names") ||
 		!strings.Contains(lines[5], "PACKAGE") {
-		t.Fatalf("active search input is not inside the tab shelf above the package list: %#v", lines)
+		t.Fatalf("active search input is not below the tab separator and above the package list: %#v", lines)
 	}
 	if strings.Contains(ansi.Strip(header), "SEARCH NAMES") {
 		t.Fatal("active search focus is still indicated by capitalization")
 	}
-	if !strings.Contains(strings.Split(header, "\n")[3], "48;2;118;92;145") ||
-		!strings.Contains(strings.Split(header, "\n")[3], "\x1b[1;") {
-		t.Fatal("active search input does not have focused shading and emphasis")
+	searchLine := strings.Split(header, "\n")[4]
+	if !strings.Contains(searchLine, "48;2;58;49;68") || strings.Contains(searchLine, "48;2;118;92;145") ||
+		!strings.Contains(searchLine, "\x1b[1;") {
+		t.Fatal("active search input does not have distinct, restrained focus shading and emphasis")
 	}
 	if m.feedViewport.Height() != m.height-statusHeight-6 {
 		t.Fatalf("search viewport height = %d, want %d", m.feedViewport.Height(), m.height-statusHeight-6)
@@ -285,6 +306,41 @@ func TestOpeningSearchReturnsFocusToVisibleFeed(t *testing.T) {
 				t.Fatal("focused search input is not visible")
 			}
 		})
+	}
+}
+
+func TestTypingCancelsAnInFlightSearchQuery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	source := &blockingFeedData{started: make(chan string, 1), canceled: make(chan string, 1)}
+	m := NewModel(Dependencies{Context: ctx, Data: source})
+	m.searching = true
+	m.filter.Query = "alpha"
+	m.feedRequestID = 7
+
+	next, command := m.Update(SearchDebounced{RequestID: 7})
+	m = next.(Model)
+	batch := command().(tea.BatchMsg)
+	for _, cmd := range batch {
+		go func(cmd tea.Cmd) { _ = cmd() }(cmd)
+	}
+	select {
+	case query := <-source.started:
+		if query != "alpha" {
+			t.Fatalf("started search query = %q, want alpha", query)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("search query did not start")
+	}
+
+	m = update(t, m, key("b"))
+	select {
+	case query := <-source.canceled:
+		if query != "alpha" {
+			t.Fatalf("canceled search query = %q, want alpha", query)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("typing did not cancel the stale in-flight search query")
 	}
 }
 

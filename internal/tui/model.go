@@ -138,6 +138,7 @@ type Model struct {
 	syncProgress                                                    map[string]SyncProgress
 	activeSync                                                      map[string]bool
 	searching                                                       bool
+	searchQueryCancel                                               context.CancelFunc
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -185,6 +186,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.RequestID != m.feedRequestID {
 			return m, nil
 		}
+		m.cancelSearchQuery()
 		previousPackage := m.selectedEvent().PackageID
 		anchor, captured := m.refreshAnchors[msg.RequestID]
 		if !captured {
@@ -269,7 +271,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.RequestID != m.feedRequestID {
 			return m, nil
 		}
-		return m, tea.Batch(m.queryFeed(msg.RequestID), m.savePreferences())
+		m.cancelSearchQuery()
+		searchContext, cancel := context.WithCancel(m.deps.Context)
+		m.searchQueryCancel = cancel
+		return m, tea.Batch(m.queryFeedContext(searchContext, msg.RequestID), m.savePreferences())
 	case ToggleRollUp:
 		m.filter.RollUp = !m.filter.RollUp
 		return m.filterChanged()
@@ -653,6 +658,7 @@ func (m Model) handleSearchKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) searchChanged() (tea.Model, tea.Cmd) {
+	m.cancelSearchQuery()
 	m.feedRequestID++
 	id := m.feedRequestID
 	return m, tea.Tick(searchDebounce, func(time.Time) tea.Msg {
@@ -718,6 +724,7 @@ func (m *Model) setPackageScope(formulae, casks bool) {
 }
 
 func (m Model) filterChanged() (tea.Model, tea.Cmd) {
+	m.cancelSearchQuery()
 	m.feedRequestID++
 	return m, tea.Batch(m.queryFeed(m.feedRequestID), m.savePreferences())
 }
@@ -778,12 +785,23 @@ func (m *Model) resetDetails() {
 }
 
 func (m Model) queryFeed(id uint64) tea.Cmd {
+	return m.queryFeedContext(m.deps.Context, id)
+}
+
+func (m Model) queryFeedContext(ctx context.Context, id uint64) tea.Cmd {
 	return func() tea.Msg {
 		if m.deps.Data == nil {
 			return FeedLoaded{RequestID: id}
 		}
-		g, e := m.deps.Data.QueryFeed(m.deps.Context, m.filter)
+		g, e := m.deps.Data.QueryFeed(ctx, m.filter)
 		return FeedLoaded{RequestID: id, Groups: g, Err: e}
+	}
+}
+
+func (m *Model) cancelSearchQuery() {
+	if m.searchQueryCancel != nil {
+		m.searchQueryCancel()
+		m.searchQueryCancel = nil
 	}
 }
 func (m Model) loadPreferences() tea.Cmd {

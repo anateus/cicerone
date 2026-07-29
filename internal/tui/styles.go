@@ -405,22 +405,22 @@ func (m Model) feedControls(width int) string {
 	}
 	rows := m.tabStrip([]string{"FORMULAE", "CASKS", "ALL"}, active, width, m.palette().feedBG, controls)
 	if m.searching {
-		return strings.Join([]string{rows[0], rows[1], m.searchInputLine(scope, width), rows[2]}, "\n")
+		return strings.Join([]string{rows[0], rows[1], rows[2], m.searchInputLine(scope, width)}, "\n")
 	}
 	return strings.Join(rows[:], "\n")
 }
 
 func (m Model) searchInputLine(scope domain.SearchScope, width int) string {
 	p := m.palette()
-	border := lipgloss.NewStyle().Foreground(p.primary).Background(p.feedBG)
-	field := lipgloss.NewStyle().Bold(true).Foreground(p.selectedFG).Background(p.selectedBG)
-	if width <= 1 {
-		return border.Render(fit("│", width))
+	surface := lipgloss.NewStyle().Background(p.feedBG)
+	field := lipgloss.NewStyle().Bold(true).Foreground(p.primary).Background(p.raisedBG)
+	if width <= 4 {
+		return preserveOuterStyle(field.Render(fit("█", width)))
 	}
 	text := " search " + string(scope) + ": " + m.filter.Query + "█"
-	return preserveOuterStyle(border.Render("│")) +
-		preserveOuterStyle(field.Render(fit(text, width-2))) +
-		preserveOuterStyle(border.Render("│"))
+	return preserveOuterStyle(surface.Render("  ")) +
+		preserveOuterStyle(field.Render(fit(text, width-4))) +
+		preserveOuterStyle(surface.Render("  "))
 }
 
 // tabStrip follows tui-studio's Tabs geometry: adjacent boxes on the first
