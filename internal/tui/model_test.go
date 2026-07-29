@@ -194,8 +194,21 @@ func TestSlashSearchModeCapturesTextInsteadOfGlobalKeys(t *testing.T) {
 	if _, ok := cmd().(tea.QuitMsg); ok {
 		t.Fatal("q quit while search input was active")
 	}
-	if !strings.Contains(ansi.Strip(m.View().Content), "SEARCH NAMES") {
-		t.Fatal("active search mode and scope are not visible")
+	header := m.renderFeedHeader(m.width)
+	lines := strings.Split(ansi.Strip(header), "\n")
+	if len(lines) != 6 || !strings.Contains(lines[3], "search names") || !strings.Contains(lines[4], "─") ||
+		!strings.Contains(lines[5], "PACKAGE") {
+		t.Fatalf("active search input is not inside the tab shelf above the package list: %#v", lines)
+	}
+	if strings.Contains(ansi.Strip(header), "SEARCH NAMES") {
+		t.Fatal("active search focus is still indicated by capitalization")
+	}
+	if !strings.Contains(strings.Split(header, "\n")[3], "48;2;118;92;145") ||
+		!strings.Contains(strings.Split(header, "\n")[3], "\x1b[1;") {
+		t.Fatal("active search input does not have focused shading and emphasis")
+	}
+	if m.feedViewport.Height() != m.height-statusHeight-6 {
+		t.Fatalf("search viewport height = %d, want %d", m.feedViewport.Height(), m.height-statusHeight-6)
 	}
 }
 
@@ -242,6 +255,34 @@ func TestEscapeLeavesInspectorBeforeQuitting(t *testing.T) {
 			}
 			if next.focus != feedPane || next.detailOpen {
 				t.Fatalf("focus/detailOpen = %v/%t, want feed/false", next.focus, next.detailOpen)
+			}
+		})
+	}
+}
+
+func TestOpeningSearchReturnsFocusToVisibleFeed(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		width      int
+		focus      pane
+		detailOpen bool
+	}{
+		{name: "wide inspector", width: 120, focus: inspectorPane},
+		{name: "narrow detail", width: 72, detailOpen: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := NewModel(Dependencies{})
+			m.width, m.height, m.loading = test.width, 12, false
+			m.focus, m.detailOpen = test.focus, test.detailOpen
+			m.groups = groups("a")
+			m.syncViewports()
+
+			m = update(t, m, key("/"))
+			if !m.searching || m.focus != feedPane || m.detailOpen {
+				t.Fatalf("search focus/open state = %t/%v/%t, want true/feed/false", m.searching, m.focus, m.detailOpen)
+			}
+			if !strings.Contains(ansi.Strip(m.View().Content), "search names:") {
+				t.Fatal("focused search input is not visible")
 			}
 		})
 	}

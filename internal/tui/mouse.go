@@ -78,10 +78,11 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			return m.filterChanged()
 		}
 	}
-	if mouse.Y < feedHeaderHeight {
+	headerRows := m.feedHeaderRows()
+	if mouse.Y < headerRows {
 		return m, nil
 	}
-	contentY := mouse.Y - feedHeaderHeight + m.viewportOffset
+	contentY := mouse.Y - headerRows + m.viewportOffset
 	if index := m.feedGroupAtLine(contentY); index >= 0 {
 		return m.selectFeedIndex(index)
 	}

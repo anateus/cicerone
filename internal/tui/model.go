@@ -534,9 +534,12 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.syncViewports()
 	case "/":
 		m.searching = true
+		m.focus = feedPane
+		m.detailOpen = false
 		if !validSearchScope(m.filter.Search) {
 			m.filter.Search = domain.SearchNames
 		}
+		m.syncViewports()
 		return m, nil
 	case "j", "down":
 		if m.selected+1 < len(m.groups) {
@@ -618,9 +621,11 @@ func (m Model) handleSearchKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "esc":
 		m.searching = false
+		m.syncViewports()
 		return m, nil
 	case "enter":
 		m.searching = false
+		m.syncViewports()
 		return m.filterChanged()
 	case "tab":
 		m.filter.Search = nextSearchScope(m.filter.Search)

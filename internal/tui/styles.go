@@ -89,7 +89,7 @@ func (m Model) statusText() string {
 
 func (m Model) renderPinnedFeed(width, height int) string {
 	header := paintBackground(m.renderFeedHeader(width), width, m.palette().feedBG)
-	listHeight := max(1, height-feedHeaderHeight)
+	listHeight := max(1, height-m.feedHeaderRows())
 	total := m.feedLineCount(width)
 	offset := min(m.viewportOffset, max(0, total-listHeight))
 	rows, total := m.renderVisibleFeedRows(width, offset, listHeight)
@@ -145,7 +145,7 @@ func (m *Model) syncViewports() {
 		feedWidth, inspectorWidth = m.paneWidths()
 	}
 	m.feedViewport.SetWidth(feedWidth)
-	m.feedViewport.SetHeight(max(1, h-statusHeight-feedHeaderHeight))
+	m.feedViewport.SetHeight(max(1, h-statusHeight-m.feedHeaderRows()))
 	m.feedViewport.SetContent(strings.Repeat("\n", max(0, m.feedLineCount(feedWidth)-1)))
 	m.feedViewport.SetYOffset(m.viewportOffset)
 	m.viewportOffset = m.feedViewport.YOffset()
@@ -199,6 +199,13 @@ func feedRowHeight(width int) int {
 		return 2
 	}
 	return 1
+}
+
+func (m Model) feedHeaderRows() int {
+	if m.searching {
+		return feedHeaderHeight + 1
+	}
+	return feedHeaderHeight
 }
 
 type palette struct {
@@ -393,13 +400,27 @@ func (m Model) feedControls(width int) string {
 	if !validSearchScope(scope) {
 		scope = domain.SearchNames
 	}
-	if m.searching {
-		controls += "   SEARCH " + strings.ToUpper(string(scope)) + ": " + fit(m.filter.Query, 18) + "█"
-	} else if strings.TrimSpace(m.filter.Query) != "" {
+	if !m.searching && strings.TrimSpace(m.filter.Query) != "" {
 		controls += "   search " + string(scope) + ": " + fit(m.filter.Query, 18)
 	}
 	rows := m.tabStrip([]string{"FORMULAE", "CASKS", "ALL"}, active, width, m.palette().feedBG, controls)
+	if m.searching {
+		return strings.Join([]string{rows[0], rows[1], m.searchInputLine(scope, width), rows[2]}, "\n")
+	}
 	return strings.Join(rows[:], "\n")
+}
+
+func (m Model) searchInputLine(scope domain.SearchScope, width int) string {
+	p := m.palette()
+	border := lipgloss.NewStyle().Foreground(p.primary).Background(p.feedBG)
+	field := lipgloss.NewStyle().Bold(true).Foreground(p.selectedFG).Background(p.selectedBG)
+	if width <= 1 {
+		return border.Render(fit("│", width))
+	}
+	text := " search " + string(scope) + ": " + m.filter.Query + "█"
+	return preserveOuterStyle(border.Render("│")) +
+		preserveOuterStyle(field.Render(fit(text, width-2))) +
+		preserveOuterStyle(border.Render("│"))
 }
 
 // tabStrip follows tui-studio's Tabs geometry: adjacent boxes on the first
