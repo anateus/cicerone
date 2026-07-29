@@ -617,21 +617,31 @@ func TestExpandedInspectorDeemphasizesFeedAndStatusOnly(t *testing.T) {
 	m.syncViewports()
 
 	rendered := m.render()
-	firstLine := strings.Split(rendered, "\n")[0]
-	if !strings.HasPrefix(firstLine, "\x1b[2m") {
-		t.Fatalf("expanded inspector did not deemphasize feed: %q", firstLine)
+	lines := strings.Split(rendered, "\n")
+	firstLine := lines[0]
+	if !strings.HasPrefix(firstLine, "\x1b[38;2;137;131;143m") {
+		t.Fatalf("expanded inspector did not apply a muted core foreground: %q", firstLine)
 	}
 	inspectorTitle := strings.Index(firstLine, " Inspector")
 	if inspectorTitle < 0 {
 		t.Fatalf("expanded inspector title was not rendered: %q", firstLine)
 	}
 	prefix := firstLine[:inspectorTitle]
-	if strings.LastIndex(prefix, "\x1b[2m") > strings.LastIndex(prefix, "\x1b[m") {
+	if strings.LastIndex(prefix, "\x1b[38;2;137;131;143m") > strings.LastIndex(prefix, "\x1b[m") {
 		t.Fatalf("expanded inspector also deemphasized inspector: %q", firstLine)
 	}
-	status := strings.Split(rendered, "\n")[m.height-1]
-	if !strings.HasPrefix(status, "\x1b[2m") {
-		t.Fatalf("expanded inspector did not deemphasize core status: %q", status)
+	left, _ := m.paneWidths()
+	core := deemphasizeANSI(m.renderPinnedFeed(left, m.height-statusHeight), m.light) +
+		deemphasizeANSI(m.statusLine(m.statusText(), m.width), m.light)
+	if strings.Contains(core, "38;2;246;239;251") {
+		t.Fatal("expanded inspector left bright white tab or package text in the core UI")
+	}
+	if strings.Contains(core, "48;2;118;92;145") || !strings.Contains(core, "48;2;52;52;70") {
+		t.Fatal("expanded inspector did not mute the selected package background")
+	}
+	status := lines[m.height-1]
+	if !strings.HasPrefix(status, "\x1b[38;2;137;131;143m") {
+		t.Fatalf("expanded inspector did not recolor core status: %q", status)
 	}
 }
 

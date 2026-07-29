@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +41,7 @@ func (m Model) render() string {
 		left, right := m.paneWidths()
 		feed := m.renderPinnedFeed(left, h-statusHeight)
 		if deemphasizeCore {
-			feed = deemphasizeANSI(feed)
+			feed = deemphasizeANSI(feed, m.light)
 		}
 		inspector := viewportContent(m.inspectorViewport, m.renderInspector(right), right, h-statusHeight, m.inspectorViewport.YOffset())
 		inspector = paintBackground(inspector, right, p.inspectorBG)
@@ -58,7 +60,7 @@ func (m Model) render() string {
 	}
 	statusLine := m.statusLine(status, w)
 	if deemphasizeCore {
-		statusLine = deemphasizeANSI(statusLine)
+		statusLine = deemphasizeANSI(statusLine, m.light)
 	}
 	return strings.Join(lines, "\n") + "\n" + statusLine
 }
@@ -324,9 +326,32 @@ func paintBackground(content string, width int, background color.Color) string {
 	return strings.Join(lines, "\n")
 }
 
-func deemphasizeANSI(content string) string {
-	const faint = "\x1b[2m"
-	return faint + strings.ReplaceAll(content, "\x1b[m", "\x1b[m"+faint) + "\x1b[m"
+var sgrSequence = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var trueColorSpec = regexp.MustCompile(`(38|48);2;([0-9]{1,3});([0-9]{1,3});([0-9]{1,3})`)
+
+func deemphasizeANSI(content string, light bool) string {
+	foreground := [3]int{137, 131, 143}
+	background := [3]int{36, 42, 52}
+	if light {
+		foreground = [3]int{119, 113, 127}
+		background = [3]int{232, 227, 239}
+	}
+	content = sgrSequence.ReplaceAllStringFunc(content, func(sequence string) string {
+		return trueColorSpec.ReplaceAllStringFunc(sequence, func(colorSpec string) string {
+			parts := trueColorSpec.FindStringSubmatch(colorSpec)
+			if parts[1] == "38" {
+				return fmt.Sprintf("38;2;%d;%d;%d", foreground[0], foreground[1], foreground[2])
+			}
+			var muted [3]int
+			for index := range muted {
+				channel, _ := strconv.Atoi(parts[index+2])
+				muted[index] = (channel + 4*background[index]) / 5
+			}
+			return fmt.Sprintf("48;2;%d;%d;%d", muted[0], muted[1], muted[2])
+		})
+	})
+	mutedForeground := fmt.Sprintf("\x1b[38;2;%d;%d;%dm", foreground[0], foreground[1], foreground[2])
+	return mutedForeground + strings.ReplaceAll(content, "\x1b[m", "\x1b[m"+mutedForeground) + "\x1b[m"
 }
 
 func (m Model) surfaceRule(prefix, label string, width int, background color.Color) string {
