@@ -20,7 +20,10 @@ type Request struct {
 }
 type Progress struct{ Commits, Events, Diagnostics, Batches int }
 
-const historyBatchCommits = 100
+const (
+	historyInitialBatchCommits = 10
+	historyBatchCommits        = 100
+)
 
 type Result struct {
 	Events, Diagnostics int
@@ -105,6 +108,7 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	var persistedDiagnostics []store.HistoryDiagnostic
 	progress := Progress{}
 	batchCommits := 0
+	batchLimit := historyInitialBatchCommits
 	flush := func() error {
 		if batchCommits == 0 {
 			return nil
@@ -120,6 +124,7 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 		aliases = nil
 		persistedDiagnostics = nil
 		batchCommits = 0
+		batchLimit = historyBatchCommits
 		return nil
 	}
 	for rangeIndex, r := range ranges {
@@ -196,7 +201,7 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				progress.Events++
 				delete(missing, key)
 			}
-			if batchCommits == historyBatchCommits {
+			if batchCommits == batchLimit {
 				return flush()
 			}
 			return nil

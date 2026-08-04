@@ -115,11 +115,11 @@ func TestIndexerPublishesBatchesBeforeCompletion(t *testing.T) {
 		done <- indexErr
 	}()
 	progress := <-firstBatch
-	if progress.Commits != 100 || progress.Events != 100 {
+	if progress.Commits != 10 || progress.Events != 10 {
 		t.Fatalf("first progress=%#v", progress)
 	}
 	groups, err := s.QueryFeed(ctx, domain.FeedFilter{})
-	if err != nil || countEvents(groups) != 100 {
+	if err != nil || countEvents(groups) != 10 {
 		t.Fatalf("visible events=%d err=%v", countEvents(groups), err)
 	}
 	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || ok {
@@ -169,7 +169,7 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 		t.Fatalf("cancelled state=%#v ok=%v err=%v", state, ok, err)
 	}
 	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{})
-	if err != nil || countEvents(groups) != 100 {
+	if err != nil || countEvents(groups) != 10 {
 		t.Fatalf("partial events=%d err=%v", countEvents(groups), err)
 	}
 	if _, err := indexer.Index(context.Background(), source, Request{Since: now.Add(-24 * time.Hour)}); err != nil {

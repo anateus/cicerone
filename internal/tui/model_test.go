@@ -1613,8 +1613,8 @@ func TestInitialRefreshStartsBeforeFirstFeedQuery(t *testing.T) {
 	}
 	next, command = m.Update(DatasetChanged{})
 	m = next.(Model)
-	if command != nil || !m.awaitingInitialRefresh {
-		t.Fatal("intermediate dataset change exposed the feed before initial refresh completed")
+	if command == nil || m.awaitingInitialRefresh {
+		t.Fatal("first durable dataset batch did not schedule the initial feed query")
 	}
 	next, command = m.Update(InitialRefreshDone{})
 	m = next.(Model)

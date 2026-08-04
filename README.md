@@ -1,6 +1,6 @@
 # Cicerone
 
-Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. On interactive startup it refreshes installed state and Git history before showing the feed, falling back to the durable SQLite cache if synchronization fails.
+Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. On interactive startup it refreshes installed state and begins fetching and indexing Git history before showing the feed, falling back to the durable SQLite cache if synchronization fails.
 
 ## Build and run
 
@@ -60,7 +60,7 @@ The default feed contains version events from the last 30 days. An installed pac
 
 Search starts with package names. `tab` cycles through cumulative scopes: names; names and cached descriptions; those plus cached changelogs; then those plus cached READMEs. Unquoted terms are prefix searches, so `rip gre` matches tokens beginning with `rip` and `gre`. Surround the whole query with quotes for a non-prefix phrase search, such as `"rip grep"`. Document and description results are limited to content already present in Cicerone's durable cache.
 
-Cicerone keeps the loading view up until the initial refresh publishes data, so stale cached rows do not flash before current results. Sync failures still fall back to the durable feed. Later background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
+Cicerone keeps the loading view up until the initial refresh publishes its first durable history batch, so current rows appear quickly while the remaining history continues indexing in the background. Sync failures still fall back to the durable feed. Later background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
 When selection settles for 250 ms, Cicerone loads and refreshes package information, README, and changelog content independently. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
 

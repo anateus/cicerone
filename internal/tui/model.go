@@ -234,9 +234,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadVisiblePackageDescriptions()...)
 		return m, tea.Batch(cmds...)
 	case DatasetChanged:
-		if m.awaitingInitialRefresh {
-			return m, nil
-		}
+		m.awaitingInitialRefresh = false
 		m.stale, m.loading = true, true
 		m.feedRequestID++
 		m.freshnessRequestID++

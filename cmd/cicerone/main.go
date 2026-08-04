@@ -414,7 +414,7 @@ Usage: cicerone [--help] [--plain]
 Keys: h/j/k/l or arrows navigate · / searches · enter opens details · space expands · a installs/upgrades · q/esc quit
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
-Installed state and Git history refresh before the interactive feed is displayed; cached data remains available if refresh fails.
+The interactive feed appears after the first refreshed history batch; cached data remains available if refresh fails.
 Database: ~/Library/Application Support/cicerone/cicerone.db
 Owned Git cache: ~/Library/Caches/cicerone
 `
