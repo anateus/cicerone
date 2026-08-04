@@ -22,6 +22,31 @@ type SyncRunStatus struct {
 	Error                           string
 }
 
+// FreshnessStatus compares the newest successful repository synchronization
+// with the newest package update currently indexed.
+type FreshnessStatus struct {
+	LastSync          time.Time
+	LastPackageUpdate time.Time
+}
+
+func (s *Store) LatestFreshness(ctx context.Context) (FreshnessStatus, error) {
+	var lastSync, lastUpdate int64
+	err := s.db.QueryRowContext(ctx, `SELECT
+		COALESCE((SELECT MAX(last_success_at) FROM sync_runs), 0),
+		COALESCE((SELECT MAX(event_time) FROM update_events), 0)`).Scan(&lastSync, &lastUpdate)
+	if err != nil {
+		return FreshnessStatus{}, err
+	}
+	var status FreshnessStatus
+	if lastSync != 0 {
+		status.LastSync = time.Unix(0, lastSync).UTC()
+	}
+	if lastUpdate != 0 {
+		status.LastPackageUpdate = time.Unix(0, lastUpdate).UTC()
+	}
+	return status, nil
+}
+
 func (s *Store) SyncStarted(ctx context.Context, source string, at time.Time) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO repositories(id) VALUES(?) ON CONFLICT(id) DO NOTHING`, source); err != nil {

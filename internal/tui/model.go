@@ -29,6 +29,10 @@ type SeenRecorder interface {
 	MarkEventsSeen(context.Context, []domain.EventID) error
 }
 
+type FreshnessSource interface {
+	LatestFreshness(context.Context) (store.FreshnessStatus, error)
+}
+
 type ChangelogSource interface {
 	LoadChangelog(context.Context, domain.PackageID, domain.EventID) ([]store.ChangelogSection, error)
 }
@@ -80,6 +84,7 @@ type Dependencies struct {
 	Actions     ActionRunner
 	Installed   InstalledRefresher
 	Send        func(tea.Msg)
+	Now         func() time.Time
 }
 
 type pane uint8
@@ -104,6 +109,7 @@ type Model struct {
 	notification                                                    string
 	light                                                           bool
 	feedRequestID, changelogRequestID, detailRequestID, selectionID uint64
+	freshnessRequestID                                              uint64
 	notifyRequestID                                                 uint64
 	changelog                                                       []store.ChangelogSection
 	packageInfo                                                     homebrew.PackageInfo
@@ -129,7 +135,7 @@ type Model struct {
 	feedViewport, inspectorViewport                                 viewport.Model
 	refreshAnchors                                                  map[uint64]domain.Anchor
 	detailCancel                                                    context.CancelFunc
-	ready                                                           bool
+	awaitingInitialRefresh                                          bool
 	pendingAction                                                   *homebrew.Action
 	actionResult                                                    *homebrew.Action
 	actionRunning                                                   bool
@@ -139,6 +145,8 @@ type Model struct {
 	activeSync                                                      map[string]bool
 	searching                                                       bool
 	searchQueryCancel                                               context.CancelFunc
+	freshness                                                       store.FreshnessStatus
+	freshnessErr                                                    error
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -147,9 +155,12 @@ func NewModel(deps Dependencies) Model {
 	if deps.Context == nil {
 		deps.Context = context.Background()
 	}
-	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true, feedRequestID: 1, document: store.DocumentChangelog,
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true, awaitingInitialRefresh: deps.OnReady != nil, feedRequestID: 1, freshnessRequestID: 1, document: store.DocumentChangelog,
 		filter: domain.FeedFilter{
-			Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true},
+			Now: deps.Now(), Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true},
 			Search: domain.SearchNames,
 		},
 		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor),
@@ -159,7 +170,12 @@ func NewModel(deps Dependencies) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.queryFeed(m.feedRequestID)}
+	cmds := []tea.Cmd{m.loadFreshness(m.freshnessRequestID)}
+	if m.awaitingInitialRefresh {
+		cmds = append(cmds, m.deps.OnReady)
+	} else {
+		cmds = append(cmds, m.queryFeed(m.feedRequestID))
+	}
 	if m.deps.Data != nil {
 		cmds = append(cmds, m.loadPreferences())
 	}
@@ -216,18 +232,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
 			m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.markFeedSeen(msg.Groups)}
 		cmds = append(cmds, m.loadVisiblePackageDescriptions()...)
-		if !m.ready {
-			m.ready = true
-			if m.deps.OnReady != nil {
-				cmds = append(cmds, m.deps.OnReady)
-			}
-		}
 		return m, tea.Batch(cmds...)
 	case DatasetChanged:
+		if m.awaitingInitialRefresh {
+			return m, nil
+		}
 		m.stale, m.loading = true, true
 		m.feedRequestID++
+		m.freshnessRequestID++
 		m.refreshAnchors[m.feedRequestID] = m.anchor()
-		return m, m.queryFeed(m.feedRequestID)
+		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
+	case InitialRefreshDone:
+		m.awaitingInitialRefresh = false
+		m.stale, m.loading = true, true
+		m.feedRequestID++
+		m.freshnessRequestID++
+		m.refreshAnchors[m.feedRequestID] = m.anchor()
+		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
+	case FreshnessLoaded:
+		if msg.RequestID != m.freshnessRequestID {
+			return m, nil
+		}
+		m.freshnessErr = msg.Err
+		if msg.Err == nil {
+			m.freshness = msg.Status
+		}
 	case SyncProgress:
 		m.syncProgress[msg.Source] = msg
 		m.activeSync[msg.Source] = true
@@ -250,6 +279,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.Filter.Search = domain.SearchNames
 			}
 			m.filter = msg.Filter
+			if m.awaitingInitialRefresh {
+				return m, nil
+			}
 			m.feedRequestID++
 			return m, m.queryFeed(m.feedRequestID)
 		}
@@ -541,10 +573,15 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searching = true
 		m.focus = feedPane
 		m.detailOpen = false
+		rollUpChanged := !m.filter.RollUp
+		m.filter.RollUp = true
 		if !validSearchScope(m.filter.Search) {
 			m.filter.Search = domain.SearchNames
 		}
 		m.syncViewports()
+		if rollUpChanged {
+			return m.searchChanged()
+		}
 		return m, nil
 	case "j", "down":
 		if m.selected+1 < len(m.groups) {
@@ -788,12 +825,25 @@ func (m Model) queryFeed(id uint64) tea.Cmd {
 	return m.queryFeedContext(m.deps.Context, id)
 }
 
+func (m Model) loadFreshness(id uint64) tea.Cmd {
+	return func() tea.Msg {
+		source, ok := m.deps.Data.(FreshnessSource)
+		if !ok {
+			return FreshnessLoaded{RequestID: id}
+		}
+		status, err := source.LatestFreshness(m.deps.Context)
+		return FreshnessLoaded{RequestID: id, Status: status, Err: err}
+	}
+}
+
 func (m Model) queryFeedContext(ctx context.Context, id uint64) tea.Cmd {
 	return func() tea.Msg {
 		if m.deps.Data == nil {
 			return FeedLoaded{RequestID: id}
 		}
-		g, e := m.deps.Data.QueryFeed(ctx, m.filter)
+		filter := m.filter
+		filter.Now = m.deps.Now()
+		g, e := m.deps.Data.QueryFeed(ctx, filter)
 		return FeedLoaded{RequestID: id, Groups: g, Err: e}
 	}
 }

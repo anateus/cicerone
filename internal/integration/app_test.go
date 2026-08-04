@@ -200,28 +200,37 @@ func TestCachedRestartNeedsNoHTTPOrGitAndReturnsSameFeed(t *testing.T) {
 		return nil, nil
 	}})
 	defer coordinator.Close()
-	model := tui.NewModel(tui.Dependencies{Context: ctx, OnReady: func() tea.Msg {
+	model := tui.NewModel(tui.Dependencies{Data: restarted, Context: ctx, OnReady: func() tea.Msg {
 		coordinator.Start(ctx)
-		return nil
+		coordinator.Wait()
+		return tui.InitialRefreshDone{}
 	}})
-	updated, readyCmd := model.Update(tui.FeedLoaded{RequestID: 1, Groups: gotFeed})
-	if !strings.Contains(updated.View().Content, "fixture") {
-		t.Fatalf("cached feed was not rendered before background start:\n%s", updated.View().Content)
-	}
-	if calls := offlineGit.calls.Load(); calls != 0 {
-		t.Fatalf("cached restart made %d Git discovery calls before rendering", calls)
-	}
-	if batch, ok := readyCmd().(tea.BatchMsg); ok {
+	var refreshed tui.InitialRefreshDone
+	if batch, ok := model.Init()().(tea.BatchMsg); ok {
 		for _, cmd := range batch {
-			go cmd()
+			if msg := cmd(); msg != nil {
+				if event, ok := msg.(tui.InitialRefreshDone); ok {
+					refreshed = event
+				}
+			}
 		}
 	}
-	deadline := time.Now().Add(time.Second)
-	for offlineGit.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
 	if offlineGit.calls.Load() == 0 {
-		t.Fatal("background coordinator did not start after cached feed render")
+		t.Fatal("initial refresh did not attempt Git discovery before rendering the feed")
+	}
+	updated, queryCmd := model.Update(refreshed)
+	model = updated.(tui.Model)
+	var loaded tui.FeedLoaded
+	if batch, ok := queryCmd().(tea.BatchMsg); ok {
+		for _, cmd := range batch {
+			if msg, ok := cmd().(tui.FeedLoaded); ok {
+				loaded = msg
+			}
+		}
+	}
+	updated, _ = model.Update(loaded)
+	if !strings.Contains(updated.View().Content, "fixture") {
+		t.Fatalf("cached feed was not rendered after the failed refresh:\n%s", updated.View().Content)
 	}
 	offlineResolver := changelog.NewResolver(restarted, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("offline restart made an HTTP request")

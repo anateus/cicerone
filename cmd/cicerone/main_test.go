@@ -29,6 +29,16 @@ type fakeInstalledClient struct {
 	err      error
 }
 
+type fakeDescriptionSearcher struct {
+	matches []domain.PackageID
+	query   string
+}
+
+func (f *fakeDescriptionSearcher) SearchDescriptions(_ context.Context, query string) ([]domain.PackageID, error) {
+	f.query = query
+	return f.matches, nil
+}
+
 type fakeRuntimeRunner struct{}
 
 func (fakeRuntimeRunner) Run(context.Context, string, ...string) (execx.Result, error) {
@@ -535,5 +545,32 @@ func TestProductionTUIDependenciesWireActionsInstalledAndSend(t *testing.T) {
 	deps.Send("live output")
 	if sent != "live output" {
 		t.Fatalf("Send delivered %#v", sent)
+	}
+}
+
+func TestSearchableFeedDataAddsHomebrewDescriptionMatches(t *testing.T) {
+	destination, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	now := time.Now().UTC()
+	for _, packageID := range []domain.PackageID{"cbc", "unrelated"} {
+		event := domain.UpdateEvent{
+			ID: domain.EventID("event-" + packageID), PackageID: packageID, Name: string(packageID),
+			Type: domain.PackageFormula, Kind: domain.EventVersion, Time: now,
+		}
+		if err := destination.UpsertEvents(context.Background(), []domain.UpdateEvent{event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	searcher := &fakeDescriptionSearcher{matches: []domain.PackageID{"cbc"}}
+	data := searchableFeedData{Store: destination, descriptions: searcher}
+	groups, err := data.QueryFeed(context.Background(), domain.FeedFilter{Query: "solver", Search: domain.SearchDescriptions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searcher.query != "solver" || len(groups) != 1 || groups[0].Events[0].PackageID != "cbc" {
+		t.Fatalf("query=%q groups=%#v", searcher.query, groups)
 	}
 }

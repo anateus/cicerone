@@ -18,6 +18,7 @@ import (
 const narrowBreakpoint = 100
 const statusHeight = 1
 const feedHeaderHeight = 5
+const freshnessWarningAfter = 24 * time.Hour
 
 func (m Model) render() string {
 	w, h := m.width, m.height
@@ -395,7 +396,8 @@ func (m Model) feedControls(width int) string {
 	} else if allActive {
 		active = 2
 	}
-	controls := fmt.Sprintf("   roll-up %s", onOff(m.filter.RollUp))
+	controls := "   " + m.freshnessText()
+	controls += fmt.Sprintf("   roll-up %s", onOff(m.filter.RollUp))
 	scope := m.filter.Search
 	if !validSearchScope(scope) {
 		scope = domain.SearchNames
@@ -408,6 +410,34 @@ func (m Model) feedControls(width int) string {
 		return strings.Join([]string{rows[0], rows[1], rows[2], m.searchInputLine(scope, width)}, "\n")
 	}
 	return strings.Join(rows[:], "\n")
+}
+
+func (m Model) freshnessText() string {
+	if m.freshness.LastSync.IsZero() {
+		if m.freshnessErr != nil {
+			return "Sync unavailable"
+		}
+		return "Sync never"
+	}
+	now := m.deps.Now()
+	text := "Sync " + m.freshness.LastSync.In(time.Local).Format("Jan 2 2006 15:04")
+	if age := now.Sub(m.freshness.LastSync); age > freshnessWarningAfter {
+		text += "   ! sync " + compactAge(age) + " old"
+	}
+	if lag := m.freshness.LastSync.Sub(m.freshness.LastPackageUpdate); !m.freshness.LastPackageUpdate.IsZero() && lag > freshnessWarningAfter {
+		text += "   ! updates " + compactAge(lag) + " behind"
+	}
+	if m.freshnessErr != nil {
+		text += "   ! freshness unavailable"
+	}
+	return text
+}
+
+func compactAge(duration time.Duration) string {
+	if duration < 48*time.Hour {
+		return fmt.Sprintf("%dh", int(duration.Round(time.Hour)/time.Hour))
+	}
+	return fmt.Sprintf("%dd", int(duration.Round(24*time.Hour)/(24*time.Hour)))
 }
 
 func (m Model) searchInputLine(scope domain.SearchScope, width int) string {

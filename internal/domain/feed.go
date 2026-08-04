@@ -18,13 +18,14 @@ const (
 
 // FeedFilter controls which update events appear and how they are grouped.
 type FeedFilter struct {
-	Now     time.Time
-	Horizon time.Duration
-	Kinds   map[EventKind]bool
-	Types   map[PackageType]bool
-	Query   string
-	Search  SearchScope
-	RollUp  bool
+	Now             time.Time
+	Horizon         time.Duration
+	Kinds           map[EventKind]bool
+	Types           map[PackageType]bool
+	Query           string
+	Search          SearchScope
+	RollUp          bool
+	ExternalMatches []PackageID
 }
 
 // FeedGroup is one feed row. Events contains the newest event first.
@@ -87,10 +88,14 @@ func BuildFeed(events []UpdateEvent, installed map[PackageID]bool, f FeedFilter)
 	})
 
 	groups := make([]FeedGroup, 0, len(filtered))
+	groupByPackage := make(map[PackageID]int)
 	for _, event := range filtered {
-		if f.RollUp && len(groups) > 0 && groups[len(groups)-1].Events[0].PackageID == event.PackageID {
-			groups[len(groups)-1].Events = append(groups[len(groups)-1].Events, event)
-			continue
+		if f.RollUp {
+			if index, ok := groupByPackage[event.PackageID]; ok {
+				groups[index].Events = append(groups[index].Events, event)
+				continue
+			}
+			groupByPackage[event.PackageID] = len(groups)
 		}
 		groups = append(groups, FeedGroup{ID: event.ID, Events: []UpdateEvent{event}})
 	}

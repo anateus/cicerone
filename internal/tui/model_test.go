@@ -23,6 +23,16 @@ type fakeData struct {
 	prefs  domain.FeedFilter
 }
 
+type recordingData struct {
+	fakeData
+	queried domain.FeedFilter
+}
+
+func (f *recordingData) QueryFeed(_ context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
+	f.queried = filter
+	return f.groups, nil
+}
+
 type fakeSeenData struct {
 	*fakeData
 	marked []domain.EventID
@@ -149,6 +159,52 @@ func updateAndRunCommand(t *testing.T, m Model, msg tea.Msg) (Model, tea.Msg) {
 		return next.(Model), nil
 	}
 	return next.(Model), cmd()
+}
+
+func TestInitialFeedQueryUsesCurrentTimeForHorizon(t *testing.T) {
+	now := time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC)
+	data := &recordingData{}
+	m := NewModel(Dependencies{Data: data, Now: func() time.Time { return now }})
+	msg := m.queryFeed(m.feedRequestID)()
+	if _, ok := msg.(FeedLoaded); !ok {
+		t.Fatalf("query result = %T, want FeedLoaded", msg)
+	}
+	if !data.queried.Now.Equal(now) {
+		t.Fatalf("feed query time = %v, want %v", data.queried.Now, now)
+	}
+}
+
+func TestInspectorShowsSelectedVersionUpdateDate(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 120, 20, false
+	e := event("version", "pkg")
+	e.Time = time.Date(2026, time.August, 1, 14, 30, 0, 0, time.Local)
+	m.groups = []domain.FeedGroup{{ID: e.ID, Events: []domain.UpdateEvent{e}}}
+
+	view := ansi.Strip(m.renderInspector(60))
+	if !strings.Contains(view, "Updated    Aug 1, 2026 2:30 PM") {
+		t.Fatalf("inspector missing version update date: %q", view)
+	}
+}
+
+func TestFeedTabsShowLatestSyncAndFreshnessWarnings(t *testing.T) {
+	now := time.Date(2026, time.August, 3, 15, 0, 0, 0, time.Local)
+	m := NewModel(Dependencies{Now: func() time.Time { return now }})
+	m = update(t, m, FreshnessLoaded{RequestID: m.freshnessRequestID, Status: store.FreshnessStatus{
+		LastSync:          now.Add(-25 * time.Hour),
+		LastPackageUpdate: now.Add(-50 * time.Hour),
+	}})
+
+	header := ansi.Strip(m.renderFeedHeader(140))
+	for _, want := range []string{"Sync Aug 2 2026 14:00", "! sync 25h old", "! updates 25h behind"} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("feed header missing %q: %q", want, header)
+		}
+	}
+	compactHeader := ansi.Strip(m.renderFeedHeader(62))
+	if !strings.Contains(compactHeader, "Sync Aug 2 2026 14:00") || !strings.Contains(compactHeader, "!") {
+		t.Fatalf("ordinary wide feed hides sync date or warning: %q", compactHeader)
+	}
 }
 
 func TestGlobalQuitKeys(t *testing.T) {
@@ -298,9 +354,16 @@ func TestOpeningSearchReturnsFocusToVisibleFeed(t *testing.T) {
 			m.groups = groups("a")
 			m.syncViewports()
 
-			m = update(t, m, key("/"))
+			next, cmd := m.Update(key("/"))
+			m = next.(Model)
 			if !m.searching || m.focus != feedPane || m.detailOpen {
 				t.Fatalf("search focus/open state = %t/%v/%t, want true/feed/false", m.searching, m.focus, m.detailOpen)
+			}
+			if !m.filter.RollUp {
+				t.Fatal("opening search did not enable roll-up")
+			}
+			if cmd == nil {
+				t.Fatal("opening search did not schedule rolled-up feed refresh")
 			}
 			if !strings.Contains(ansi.Strip(m.View().Content), "search names:") {
 				t.Fatal("focused search input is not visible")
@@ -1520,23 +1583,42 @@ func TestNotifyRejectsStaleRequestID(t *testing.T) {
 	}
 }
 
-func TestReadyCommandStartsOnlyAfterCachedFeedLoads(t *testing.T) {
+func TestInitialRefreshStartsBeforeFirstFeedQuery(t *testing.T) {
 	started := false
-	m := NewModel(Dependencies{OnReady: func() tea.Msg { started = true; return nil }})
-	if started {
-		t.Fatal("ready callback ran before cached feed")
+	data := &recordingData{}
+	m := NewModel(Dependencies{Data: data, OnReady: func() tea.Msg { started = true; return nil }})
+	msg := m.Init()()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("initial command = %T, want tea.BatchMsg", msg)
 	}
-	_, cmd := m.Update(FeedLoaded{RequestID: 1})
-	if cmd == nil {
-		t.Fatal("cached feed did not schedule ready callback")
-	}
-	msg := cmd()
-	if batch, ok := msg.(tea.BatchMsg); ok {
-		for _, nested := range batch {
-			_ = nested()
+	for _, command := range batch {
+		if command != nil {
+			_ = command()
 		}
 	}
 	if !started {
-		t.Fatal("ready callback was not run")
+		t.Fatal("initial refresh was not started")
+	}
+	if !data.queried.Now.IsZero() {
+		t.Fatalf("feed queried before initial refresh: %+v", data.queried)
+	}
+	next, command := m.Update(PreferencesLoaded{Filter: domain.FeedFilter{Horizon: 7 * 24 * time.Hour}})
+	m = next.(Model)
+	if command != nil {
+		t.Fatal("preferences load scheduled a feed query before initial refresh")
+	}
+	if m.filter.Horizon != 7*24*time.Hour {
+		t.Fatalf("preferences horizon = %v, want 7 days", m.filter.Horizon)
+	}
+	next, command = m.Update(DatasetChanged{})
+	m = next.(Model)
+	if command != nil || !m.awaitingInitialRefresh {
+		t.Fatal("intermediate dataset change exposed the feed before initial refresh completed")
+	}
+	next, command = m.Update(InitialRefreshDone{})
+	m = next.(Model)
+	if command == nil || m.awaitingInitialRefresh {
+		t.Fatal("completed initial refresh did not schedule the first feed query")
 	}
 }

@@ -239,15 +239,6 @@ func (f fakeJob) Index(ctx context.Context, req Request) (Result, error) {
 	return Result{Events: 1, Cursor: "head"}, nil
 }
 
-type fakeCachedJob struct {
-	fakeJob
-	indexCached func(context.Context, Request) (Result, bool, error)
-}
-
-func (f fakeCachedJob) IndexCached(ctx context.Context, req Request) (Result, bool, error) {
-	return f.indexCached(ctx, req)
-}
-
 func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
@@ -283,27 +274,20 @@ func TestStartLoadsCacheBeforeExternalRefreshAndInstalledBeforeIndex(t *testing.
 	c.Close()
 }
 
-func TestRefreshIndexesUsableRepositoryCacheBeforeNetwork(t *testing.T) {
+func TestRefreshFetchesBeforeIndexingRepository(t *testing.T) {
 	destination := &fakeDestination{installed: true}
 	var sequence []string
-	job := fakeCachedJob{
-		fakeJob: fakeJob{
-			name:        "core",
-			destination: destination,
-			refresh: func(context.Context) error {
-				sequence = append(sequence, "refresh")
-				return nil
-			},
-			index: func(_ context.Context, req Request) (Result, error) {
-				sequence = append(sequence, "fresh")
-				req.Progress(Progress{Commits: 50, Events: 2, Batches: 1})
-				return Result{Events: 2, Cursor: "fresh-head"}, nil
-			},
+	job := fakeJob{
+		name:        "core",
+		destination: destination,
+		refresh: func(context.Context) error {
+			sequence = append(sequence, "refresh")
+			return nil
 		},
-		indexCached: func(_ context.Context, req Request) (Result, bool, error) {
-			sequence = append(sequence, "cached")
-			req.Progress(Progress{Commits: 100, Events: 4, Batches: 1})
-			return Result{Events: 4, Cursor: "cached-head"}, true, nil
+		index: func(_ context.Context, req Request) (Result, error) {
+			sequence = append(sequence, "fresh")
+			req.Progress(Progress{Commits: 50, Events: 2, Batches: 1})
+			return Result{Events: 2, Cursor: "fresh-head"}, nil
 		},
 	}
 	var progress []Progress
@@ -323,18 +307,15 @@ func TestRefreshIndexesUsableRepositoryCacheBeforeNetwork(t *testing.T) {
 	c.Start(context.Background())
 	c.Wait()
 
-	if want := []string{"cached", "refresh", "fresh"}; !slices.Equal(sequence, want) {
+	if want := []string{"refresh", "fresh"}; !slices.Equal(sequence, want) {
 		t.Fatalf("work sequence = %v, want %v", sequence, want)
 	}
-	wantProgress := []Progress{
-		{Commits: 100, Events: 4, Batches: 1},
-		{Commits: 150, Events: 6, Batches: 2},
-	}
+	wantProgress := []Progress{{Commits: 50, Events: 2, Batches: 1}}
 	if !slices.Equal(progress, wantProgress) {
-		t.Fatalf("cached progress = %#v", progress)
+		t.Fatalf("progress = %#v, want %#v", progress, wantProgress)
 	}
-	if committed.Events != 6 || committed.Cursor != "fresh-head" {
-		t.Fatalf("committed result = %#v, want 6 events at fresh-head", committed)
+	if committed.Events != 2 || committed.Cursor != "fresh-head" {
+		t.Fatalf("committed result = %#v, want 2 events at fresh-head", committed)
 	}
 }
 

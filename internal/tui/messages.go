@@ -12,7 +12,14 @@ type FeedLoaded struct {
 	Err       error
 }
 
+type FreshnessLoaded struct {
+	RequestID uint64
+	Status    store.FreshnessStatus
+	Err       error
+}
+
 type DatasetChanged struct{ Stale bool }
+type InitialRefreshDone struct{}
 type WindowSize struct{ Width, Height int }
 type SyncProgress struct {
 	Source                                string

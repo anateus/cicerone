@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -88,6 +89,38 @@ func TestQueryFeedSelectsRecentEventsAndInstalledFallback(t *testing.T) {
 	}
 	if diff := cmp.Diff([]domain.EventID{"recent", "installed-old"}, got); diff != "" {
 		t.Fatalf("feed mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestLatestFreshnessReturnsNewestSuccessfulSyncAndIndexedUpdate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	olderSync := time.Date(2026, time.August, 2, 9, 0, 0, 0, time.UTC)
+	latestSync := time.Date(2026, time.August, 3, 15, 0, 0, 0, time.UTC)
+	latestUpdate := latestSync.Add(-2 * time.Hour)
+
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{
+		testEvent("older", "older", domain.EventVersion, latestUpdate.Add(-time.Hour)),
+		testEvent("latest", "latest", domain.EventVersion, latestUpdate),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for index, syncTime := range []time.Time{olderSync, latestSync} {
+		source := fmt.Sprintf("source-%d", index)
+		if err := s.SyncStarted(ctx, source, syncTime.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SyncFinished(ctx, source, syncTime, SyncResult{}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.LatestFreshness(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastSync.Equal(latestSync) || !got.LastPackageUpdate.Equal(latestUpdate) {
+		t.Fatalf("freshness = %+v, want sync %v and update %v", got, latestSync, latestUpdate)
 	}
 }
 
@@ -226,6 +259,21 @@ func TestQueryFeedCyclesThroughCachedDescriptionAndDocumentScopes(t *testing.T) 
 		[]domain.PackageID{"changelog-hit", "description-hit"})
 	assertSearchPackages(t, s, domain.FeedFilter{Query: "quas", Search: domain.SearchREADMEs},
 		[]domain.PackageID{"changelog-hit", "description-hit", "readme-hit"})
+}
+
+func TestQueryFeedIncludesExternalDescriptionMatches(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, packageID := range []domain.PackageID{"cbc", "unrelated"} {
+		if err := s.UpsertEvents(ctx, []domain.UpdateEvent{testEvent("event-"+string(packageID), packageID, domain.EventVersion, now)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertSearchPackages(t, s, domain.FeedFilter{
+		Query: "solver", Search: domain.SearchDescriptions, ExternalMatches: []domain.PackageID{"cbc"},
+	}, []domain.PackageID{"cbc"})
 }
 
 func assertSearchPackages(t *testing.T, s *Store, filter domain.FeedFilter, want []domain.PackageID) {

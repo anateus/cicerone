@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"time"
 
 	"cicerone/internal/domain"
 	"cicerone/internal/store"
@@ -39,6 +40,10 @@ func (m Model) renderInspector(width int) string {
 	b.WriteByte('\n')
 	b.WriteString(m.inspectorLine(m.versionTransition(e), width, p.raisedBG))
 	b.WriteByte('\n')
+	if !e.Time.IsZero() {
+		b.WriteString(m.inspectorLine("Updated    "+e.Time.In(time.Local).Format("Jan 2, 2006 3:04 PM"), width, p.raisedBG))
+		b.WriteByte('\n')
+	}
 	if m.packageInfo.StableVersion != "" {
 		b.WriteString(m.inspectorLine(fmt.Sprintf("Installed  %s", m.packageInfo.InstalledVersion), width, p.raisedBG))
 		b.WriteByte('\n')

@@ -73,14 +73,14 @@ func TestBuildFeed(t *testing.T) {
 			want:   [][]EventID{{"foo-1.3", "foo-1.2", "foo-1.1"}, {"bar-3.2"}},
 		},
 		{
-			name: "does not roll up nonadjacent events",
+			name: "rolls up nonadjacent events for the same package",
 			events: []UpdateEvent{
 				event("foo-new", "foo", "Foo", EventVersion, PackageFormula, time.Hour),
 				event("bar", "bar", "Bar", EventVersion, PackageFormula, 2*time.Hour),
 				event("foo-old", "foo", "Foo", EventVersion, PackageFormula, 3*time.Hour),
 			},
 			filter: FeedFilter{Now: now, Horizon: 30 * 24 * time.Hour, RollUp: true},
-			want:   [][]EventID{{"foo-new"}, {"bar"}, {"foo-old"}},
+			want:   [][]EventID{{"foo-new", "foo-old"}, {"bar"}},
 		},
 	}
 

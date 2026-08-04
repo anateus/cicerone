@@ -1,6 +1,6 @@
 # Cicerone
 
-Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. It opens from a durable SQLite cache first, then refreshes installed state and Git history in the background.
+Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. On interactive startup it refreshes installed state and Git history before showing the feed, falling back to the durable SQLite cache if synchronization fails.
 
 ## Build and run
 
@@ -60,7 +60,7 @@ The default feed contains version events from the last 30 days. An installed pac
 
 Search starts with package names. `tab` cycles through cumulative scopes: names; names and cached descriptions; those plus cached changelogs; then those plus cached READMEs. Unquoted terms are prefix searches, so `rip gre` matches tokens beginning with `rip` and `gre`. Surround the whole query with quotes for a non-prefix phrase search, such as `"rip grep"`. Document and description results are limited to content already present in Cicerone's durable cache.
 
-Cicerone displays cached rows immediately. Background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
+Cicerone keeps the loading view up until the initial refresh publishes data, so stale cached rows do not flash before current results. Sync failures still fall back to the durable feed. Later background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
 When selection settles for 250 ms, Cicerone loads and refreshes package information, README, and changelog content independently. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
 
@@ -72,7 +72,7 @@ When GitHub Releases supplies a changelog, the selected release renders first an
 - Cicerone-owned Git mirrors and other cache data: `~/Library/Caches/cicerone/`
 
 Cicerone prefers usable local `homebrew-core` and `homebrew-cask` tap clones. Those user/Homebrew-owned repositories are read-only: Cicerone never fetches, checks out, resets, or rewrites them. If a local clone is unavailable, Cicerone creates and fetches its own bare, filtered mirror under its cache directory.
-On later runs, an existing Cicerone mirror is indexed before its network refresh, so locally cached history can populate the feed while newer commits are fetched.
+On later runs, Cicerone fetches each existing mirror before indexing it so the first interactive feed is based on the newest available commits.
 
 Cached feed, package information, README, and changelog content remains readable offline. The in-memory download queue is reconstructed from navigation demand after restart. See [Cache and recovery](docs/cache-and-recovery.md) before moving or rebuilding a damaged database; Cicerone never silently deletes it.
 

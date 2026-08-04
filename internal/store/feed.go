@@ -119,6 +119,12 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 			)`)
 			args = append(args, match)
 		}
+		if len(filter.ExternalMatches) > 0 {
+			matches = append(matches, `p.id IN (`+placeholders(len(filter.ExternalMatches))+`)`)
+			for _, packageID := range filter.ExternalMatches {
+				args = append(args, packageID)
+			}
+		}
 		where = append(where, `(`+strings.Join(matches, ` OR `)+`)`)
 	}
 	query := `SELECT e.id, e.package_id, p.name, p.type, e.kind,

@@ -33,6 +33,35 @@ type installedReader interface {
 	Installed(context.Context) ([]domain.InstalledPackage, error)
 }
 
+type descriptionSearcher interface {
+	SearchDescriptions(context.Context, string) ([]domain.PackageID, error)
+}
+
+type searchableFeedData struct {
+	*store.Store
+	descriptions descriptionSearcher
+}
+
+func (d searchableFeedData) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
+	if d.descriptions != nil && strings.TrimSpace(filter.Query) != "" && searchScopeIncludesDescriptions(filter.Search) {
+		matches, err := d.descriptions.SearchDescriptions(ctx, filter.Query)
+		if err != nil {
+			return nil, err
+		}
+		filter.ExternalMatches = matches
+	}
+	return d.Store.QueryFeed(ctx, filter)
+}
+
+func searchScopeIncludesDescriptions(scope domain.SearchScope) bool {
+	switch scope {
+	case domain.SearchDescriptions, domain.SearchChangelogs, domain.SearchREADMEs:
+		return true
+	default:
+		return false
+	}
+}
+
 type installedWriter interface {
 	SetInstalled(context.Context, []domain.InstalledPackage) error
 }
@@ -190,14 +219,6 @@ func (s repositorySource) Refresh(ctx context.Context) error {
 	}
 	return nil
 }
-func (s repositorySource) IndexCached(ctx context.Context, req syncer.Request) (syncer.Result, bool, error) {
-	available, err := s.repository.Cached(ctx)
-	if err != nil || !available {
-		return syncer.Result{}, false, err
-	}
-	result, err := s.Index(ctx, req)
-	return result, true, err
-}
 func (s repositorySource) Index(ctx context.Context, req syncer.Request) (syncer.Result, error) {
 	result, err := s.indexer.Index(ctx, s.source, history.Request{Since: req.Since, Installed: req.Installed, Kinds: req.Kinds, Progress: func(progress history.Progress) {
 		if req.Progress != nil {
@@ -226,7 +247,11 @@ func run() (runErr error) {
 			runErr = closeErr
 		}
 	}()
-	dependencies := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg { runtime.coordinator.Start(runtime.ctx); return nil }, runtime.brew,
+	dependencies := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg {
+		runtime.coordinator.Start(runtime.ctx)
+		runtime.coordinator.Wait()
+		return tui.InitialRefreshDone{}
+	}, runtime.brew,
 		func(msg tea.Msg) {
 			if program != nil {
 				program.Send(msg)
@@ -243,7 +268,7 @@ func run() (runErr error) {
 
 func tuiDependencies(destination *store.Store, changelogs tui.ChangelogSource, ctx context.Context, onReady tea.Cmd, brew *homebrew.Client, send func(tea.Msg)) tui.Dependencies {
 	return tui.Dependencies{
-		Data: destination, Changelog: changelogs, Context: ctx, OnReady: onReady,
+		Data: searchableFeedData{Store: destination, descriptions: brew}, Changelog: changelogs, Context: ctx, OnReady: onReady,
 		Actions: brew, Installed: installedRefresher{client: brew, store: destination}, Send: send,
 	}
 }
@@ -389,7 +414,7 @@ Usage: cicerone [--help] [--plain]
 Keys: h/j/k/l or arrows navigate · / searches · enter opens details · space expands · a installs/upgrades · q/esc quit
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
-Cached data is displayed before background Homebrew/Git refreshes begin.
+Installed state and Git history refresh before the interactive feed is displayed; cached data remains available if refresh fails.
 Database: ~/Library/Application Support/cicerone/cicerone.db
 Owned Git cache: ~/Library/Caches/cicerone
 `
