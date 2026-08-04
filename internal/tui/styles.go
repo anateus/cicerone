@@ -383,6 +383,9 @@ func (m Model) feedListHeader(width int) string {
 func (m Model) seenSeparator(width int) string {
 	p := m.palette()
 	label := "   --- previously seen "
+	if m.initialRefreshRunning {
+		label = "   --- loading additional packages… "
+	}
 	label += strings.Repeat("-", max(3, width-ansi.StringWidth(label)))
 	return lipgloss.NewStyle().Faint(true).Foreground(p.primary).Background(p.feedBG).
 		Render(fit(label, width))

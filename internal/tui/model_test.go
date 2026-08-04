@@ -1171,6 +1171,28 @@ func TestFeedSeparatesNewUpdatesFromPreviouslySeenUpdates(t *testing.T) {
 	}
 }
 
+func TestFeedLabelsSeenBoundaryAsLoadingDuringInitialSynchronization(t *testing.T) {
+	m := NewModel(Dependencies{OnReady: func() tea.Msg { return nil }})
+	newUpdate := event("new", "new")
+	seen := event("seen", "seen")
+	seen.Seen = true
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{
+		{ID: newUpdate.ID, Events: []domain.UpdateEvent{newUpdate}},
+		{ID: seen.ID, Events: []domain.UpdateEvent{seen}},
+	}})
+
+	view := ansi.Strip(m.renderFeedRows(72))
+	if !strings.Contains(view, "loading additional packages…") || strings.Contains(view, "previously seen") {
+		t.Fatalf("active synchronization boundary is unclear:\n%s", view)
+	}
+	next, _ := m.Update(InitialRefreshDone{})
+	m = next.(Model)
+	view = ansi.Strip(m.renderFeedRows(72))
+	if strings.Contains(view, "loading additional packages…") || !strings.Contains(view, "previously seen") {
+		t.Fatalf("completed synchronization boundary did not settle:\n%s", view)
+	}
+}
+
 func TestFeedOmitsPreviouslySeenSeparatorWhenThereAreNoNewUpdates(t *testing.T) {
 	m := NewModel(Dependencies{})
 	seen := event("seen", "seen")

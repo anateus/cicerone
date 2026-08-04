@@ -135,7 +135,7 @@ type Model struct {
 	feedViewport, inspectorViewport                                 viewport.Model
 	refreshAnchors                                                  map[uint64]domain.Anchor
 	detailCancel                                                    context.CancelFunc
-	awaitingInitialRefresh                                          bool
+	awaitingInitialRefresh, initialRefreshRunning                   bool
 	pendingAction                                                   *homebrew.Action
 	actionResult                                                    *homebrew.Action
 	actionRunning                                                   bool
@@ -158,7 +158,9 @@ func NewModel(deps Dependencies) Model {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true, awaitingInitialRefresh: deps.OnReady != nil, feedRequestID: 1, freshnessRequestID: 1, document: store.DocumentChangelog,
+	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true,
+		awaitingInitialRefresh: deps.OnReady != nil, initialRefreshRunning: deps.OnReady != nil,
+		feedRequestID: 1, freshnessRequestID: 1, document: store.DocumentChangelog,
 		filter: domain.FeedFilter{
 			Now: deps.Now(), Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true},
 			Search: domain.SearchNames,
@@ -242,6 +244,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
 	case InitialRefreshDone:
 		m.awaitingInitialRefresh = false
+		m.initialRefreshRunning = false
 		m.stale, m.loading = true, true
 		m.feedRequestID++
 		m.freshnessRequestID++
