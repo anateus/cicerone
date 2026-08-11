@@ -58,6 +58,40 @@ func TestMatchVersionComparesNumericRangeComponents(t *testing.T) {
 	}
 }
 
+func TestMatchVersionIncludesNestedReleaseSubsections(t *testing.T) {
+	body := []byte(`# Changelog
+
+## [1.33.0](https://example.test/compare/v1.32.0..v1.33.0) - 2026-08-08
+
+### Features
+
+- Added custom fields.
+
+### Bug Fixes
+
+- Supported slashes in custom fields.
+
+## [1.32.0](https://example.test/compare/v1.31.1..v1.32.0) - 2026-08-01
+
+### Features
+
+- Added an older feature.
+`)
+
+	section, ok := MatchVersion("1.33.0", []Artifact{{Extracted: body}})
+	if !ok {
+		t.Fatal("MatchVersion did not match")
+	}
+	for _, want := range []string{"### Features", "Added custom fields.", "### Bug Fixes", "Supported slashes in custom fields."} {
+		if !contains(section.Body, want) {
+			t.Fatalf("body = %q, want %q", section.Body, want)
+		}
+	}
+	if contains(section.Body, "\n## [1.32.0]") || contains(section.Body, "Added an older feature.") {
+		t.Fatalf("body includes the following release: %q", section.Body)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

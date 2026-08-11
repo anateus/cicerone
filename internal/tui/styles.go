@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -416,6 +417,17 @@ func (m Model) feedControls(width int) string {
 }
 
 func (m Model) freshnessText() string {
+	if len(m.activeSync) > 0 {
+		var sources []string
+		for source := range m.activeSync {
+			sources = append(sources, source)
+		}
+		sort.Strings(sources)
+		return "Syncing " + strings.Join(sources, ", ") + "…"
+	}
+	if m.freshness.LastError != "" && (m.freshness.LastSync.IsZero() || m.freshness.LastAttempt.After(m.freshness.LastSync)) {
+		return "Sync failed " + m.freshness.LastAttempt.In(time.Local).Format("Jan 2 2006 15:04")
+	}
 	if m.freshness.LastSync.IsZero() {
 		if m.freshnessErr != nil {
 			return "Sync unavailable"

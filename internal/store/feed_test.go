@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -121,6 +122,26 @@ func TestLatestFreshnessReturnsNewestSuccessfulSyncAndIndexedUpdate(t *testing.T
 	}
 	if !got.LastSync.Equal(latestSync) || !got.LastPackageUpdate.Equal(latestUpdate) {
 		t.Fatalf("freshness = %+v, want sync %v and update %v", got, latestSync, latestUpdate)
+	}
+}
+
+func TestLatestFreshnessReturnsLatestCompletedFailureWithoutCallingItASuccess(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	failedAt := time.Date(2026, 8, 7, 16, 30, 0, 0, time.UTC)
+	if err := s.SyncStarted(ctx, "homebrew-core", failedAt.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncFinished(ctx, "homebrew-core", failedAt, SyncResult{}, errors.New("network unavailable")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LatestFreshness(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastSync.IsZero() || !got.LastAttempt.Equal(failedAt) || got.LastError != "network unavailable" {
+		t.Fatalf("freshness = %#v", got)
 	}
 }
 

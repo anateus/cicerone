@@ -151,6 +151,9 @@ func (r Repository) WalkCommits(ctx context.Context, requested Range, yield func
 
 func (r Repository) Blob(ctx context.Context, revision, path string) ([]byte, error) {
 	result, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "show", revision+":"+path)
+	if err != nil && ctx.Err() == nil {
+		result, err = r.runner.Run(ctx, "git", "-C", r.source.Path, "show", revision+":"+path)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read blob %s:%s: %w", revision, path, err)
 	}

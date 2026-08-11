@@ -240,9 +240,13 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 	c.mu.Lock()
 	req.Installed = append([]domain.PackageID(nil), c.installed...)
 	c.mu.Unlock()
+	lastPublishedBatch := 0
 	req.Progress = func(progress Progress) {
 		c.notify(SyncProgress{Source: source.Name(), At: c.deps.Now(), Progress: progress})
-		c.notify(tui.DatasetChanged{})
+		if progress.Batches > lastPublishedBatch {
+			lastPublishedBatch = progress.Batches
+			c.notify(tui.DatasetChanged{})
+		}
 	}
 	if refresh {
 		err = source.Refresh(ctx)

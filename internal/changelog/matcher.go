@@ -28,7 +28,7 @@ type ReleasePage struct {
 }
 
 var (
-	atxHeading    = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$`)
+	atxHeading    = regexp.MustCompile(`^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$`)
 	setextHeading = regexp.MustCompile(`^\s*(?:=+|-+)\s*$`)
 	versionToken  = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+(?:\.[0-9A-Za-z-]+)+)(?:$|[^0-9A-Za-z.-])`)
 	rangeToken    = regexp.MustCompile(`(?i)v?([0-9]+(?:\.[0-9A-Za-z-]+)+)\s*(?:\.\.|-|–|—|to)\s*v?([0-9]+(?:\.[0-9A-Za-z-]+)+)`)
@@ -37,6 +37,7 @@ var (
 type heading struct {
 	title                 string
 	start, bodyStart, end int
+	level                 int
 }
 
 // MatchVersion deterministically selects the strongest version section.
@@ -76,17 +77,22 @@ func markdownHeadings(text string) []heading {
 	type raw struct {
 		title            string
 		start, bodyStart int
+		level            int
 	}
 	var found []raw
 	offset := 0
 	for i, line := range lines {
 		plain := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if match := atxHeading.FindStringSubmatch(plain); match != nil {
-			found = append(found, raw{strings.TrimSpace(match[1]), offset, offset + len(line)})
+			found = append(found, raw{title: strings.TrimSpace(match[2]), start: offset, bodyStart: offset + len(line), level: len(match[1])})
 		} else if i+1 < len(lines) {
 			next := strings.TrimSpace(lines[i+1])
 			if plain != "" && setextHeading.MatchString(next) {
-				found = append(found, raw{strings.TrimSpace(plain), offset, offset + len(line) + len(lines[i+1])})
+				level := 2
+				if strings.HasPrefix(next, "=") {
+					level = 1
+				}
+				found = append(found, raw{title: strings.TrimSpace(plain), start: offset, bodyStart: offset + len(line) + len(lines[i+1]), level: level})
 			}
 		}
 		offset += len(line)
@@ -94,10 +100,13 @@ func markdownHeadings(text string) []heading {
 	result := make([]heading, len(found))
 	for i, h := range found {
 		end := len(text)
-		if i+1 < len(found) {
-			end = found[i+1].start
+		for j := i + 1; j < len(found); j++ {
+			if found[j].level <= h.level {
+				end = found[j].start
+				break
+			}
 		}
-		result[i] = heading{h.title, h.start, h.bodyStart, end}
+		result[i] = heading{title: h.title, start: h.start, bodyStart: h.bodyStart, end: end, level: h.level}
 	}
 	return result
 }

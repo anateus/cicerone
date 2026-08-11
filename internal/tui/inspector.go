@@ -24,16 +24,17 @@ func (m Model) renderInspector(width int) string {
 	if m.packageInfo.Name != "" {
 		name = m.packageInfo.Name
 	}
+	infoSpinner := m.detailSpinner(m.packageInfoLoading || m.packageInfoRefreshing)
 	p := m.palette()
 	b.WriteString(m.inspectorRule("╭", "PACKAGE · "+packageTypeLabel(e.Type), "╮", width, p.raisedBG))
 	b.WriteByte('\n')
-	b.WriteString(m.inspectorLine(name, width, p.raisedBG))
+	b.WriteString(m.inspectorLine(name+infoSpinner, width, p.raisedBG))
 	b.WriteByte('\n')
 	for _, line := range []string{m.packageInfo.Description} {
 		if line == "" {
 			continue
 		}
-		b.WriteString(m.inspectorLine(line, width, p.raisedBG))
+		b.WriteString(m.inspectorLine(line+infoSpinner, width, p.raisedBG))
 		b.WriteByte('\n')
 	}
 	b.WriteString(m.inspectorLine(eventKindTitle(e.Kind)+" update", width, p.raisedBG))
@@ -45,21 +46,26 @@ func (m Model) renderInspector(width int) string {
 		b.WriteByte('\n')
 	}
 	if m.packageInfo.StableVersion != "" {
-		b.WriteString(m.inspectorLine(fmt.Sprintf("Installed  %s", m.packageInfo.InstalledVersion), width, p.raisedBG))
+		b.WriteString(m.inspectorLine(fmt.Sprintf("Installed  %s%s", m.packageInfo.InstalledVersion, infoSpinner), width, p.raisedBG))
 		b.WriteByte('\n')
-		b.WriteString(m.inspectorLine(fmt.Sprintf("Latest     %s", m.packageInfo.StableVersion), width, p.raisedBG))
+		b.WriteString(m.inspectorLine(fmt.Sprintf("Latest     %s%s", m.packageInfo.StableVersion, infoSpinner), width, p.raisedBG))
 		b.WriteByte('\n')
 	}
 	if m.packageInfo.License != "" {
-		b.WriteString(m.inspectorLine("License    "+m.packageInfo.License, width, p.raisedBG))
+		b.WriteString(m.inspectorLine("License    "+m.packageInfo.License+infoSpinner, width, p.raisedBG))
 		b.WriteByte('\n')
 	}
 	if m.packageInfo.Homepage != "" {
-		b.WriteString(m.inspectorLine("Homepage   "+m.packageInfo.Homepage, width, p.raisedBG))
+		b.WriteString(m.inspectorLine("Homepage   "+m.packageInfo.Homepage+infoSpinner, width, p.raisedBG))
 		b.WriteByte('\n')
 	}
-	if len(m.repositoryTags) > 0 {
-		tags := ansi.Wordwrap("Tags       "+strings.Join(m.repositoryTags, ", "), max(1, width-2), "")
+	{
+		tagsSpinner := m.detailSpinner(m.repositoryTagsLoading || m.repositoryTagsRefreshing)
+		tagsValue := strings.Join(m.repositoryTags, ", ")
+		tags := "Tags       "
+		if tagsValue != "" {
+			tags = ansi.Wordwrap(tags+tagsValue, max(1, width-2), "")
+		}
 		lines := strings.Split(tags, "\n")
 		if len(lines) > 3 {
 			if m.repositoryTagsExpanded {
@@ -67,6 +73,12 @@ func (m Model) renderInspector(width int) string {
 			} else {
 				lines = append(lines[:2], "           … more · t expand")
 			}
+		}
+		if len(lines) > 0 && tagsSpinner != "" {
+			if strings.TrimSpace(lines[len(lines)-1]) == "Tags" {
+				tagsSpinner = strings.TrimPrefix(tagsSpinner, " ")
+			}
+			lines[len(lines)-1] += tagsSpinner
 		}
 		for _, line := range lines {
 			b.WriteString(m.inspectorLine(line, width, p.raisedBG))
@@ -96,7 +108,11 @@ func (m Model) renderInspector(width int) string {
 	if m.document == store.DocumentChangelog {
 		documentTitle = "Changelog"
 	}
-	b.WriteString(m.inspectorLine(strings.ToUpper(documentTitle), width, p.recessedBG))
+	documentLoading := m.readmeLoading || m.readmeRefreshing
+	if m.document == store.DocumentChangelog {
+		documentLoading = m.changelogLoading || m.changelogMoreLoading
+	}
+	b.WriteString(m.inspectorLine(strings.ToUpper(documentTitle)+m.detailSpinner(documentLoading), width, p.recessedBG))
 	b.WriteByte('\n')
 	documentLines := make([]string, 0, 16)
 	if m.document == store.DocumentREADME {

@@ -117,6 +117,7 @@ func (l *packageDetailLoader) refreshPackageInfo(ctx context.Context, packageID 
 	call := &packageInfoCall{done: make(chan struct{})}
 	l.infoCalls[packageID] = call
 	l.infoMu.Unlock()
+	l.detailFieldLoading(packageID, tui.DetailPackageInfo, true)
 	if l.progress != nil {
 		l.progress.info(1)
 	}
@@ -128,6 +129,7 @@ func (l *packageDetailLoader) refreshPackageInfo(ctx context.Context, packageID 
 		if l.progress != nil {
 			l.progress.info(-1)
 		}
+		l.detailFieldLoading(packageID, tui.DetailPackageInfo, false)
 	}()
 
 	info, raw, err := l.brew.Info(ctx, string(packageID))
@@ -183,6 +185,8 @@ func (l *packageDetailLoader) LoadCachedRepositoryTags(ctx context.Context, pack
 }
 
 func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packageID domain.PackageID, eventID domain.EventID, cached store.PackageDocument) (store.PackageDocument, error) {
+	l.detailFieldLoading(packageID, tui.DetailREADME, true)
+	defer l.detailFieldLoading(packageID, tui.DetailREADME, false)
 	target, err := l.changelogs.cache.ChangelogTarget(ctx, packageID, eventID)
 	if err != nil {
 		return store.PackageDocument{}, err
@@ -278,6 +282,7 @@ func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, package
 	if l.queue == nil || l.changelogs.resolver == nil || repositoryURL == "" {
 		return
 	}
+	l.detailFieldLoading(packageID, tui.DetailRepositoryTags, true)
 	result, err := l.queue.Enqueue(download.Request{
 		URL: repositoryURL, Profile: "repository-tags", Priority: download.Speculative, Context: ctx,
 		Fetch: func(fetchCtx context.Context) (any, error) {
@@ -285,12 +290,14 @@ func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, package
 		},
 	})
 	if err != nil {
+		l.detailFieldLoading(packageID, tui.DetailRepositoryTags, false)
 		if l.send != nil {
 			l.send(tui.RepositoryTagsLoaded{PackageID: packageID, Err: err})
 		}
 		return
 	}
 	go func() {
+		defer l.detailFieldLoading(packageID, tui.DetailRepositoryTags, false)
 		completed := <-result
 		if completed.Err != nil {
 			if l.send != nil {
@@ -318,6 +325,12 @@ func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, package
 			l.send(tui.RepositoryTagsLoaded{PackageID: packageID, Record: record})
 		}
 	}()
+}
+
+func (l *packageDetailLoader) detailFieldLoading(packageID domain.PackageID, field tui.DetailField, loading bool) {
+	if l.send != nil {
+		l.send(tui.DetailFieldLoading{PackageID: packageID, Field: field, Loading: loading})
+	}
 }
 
 func githubOwnerRepo(raw string) (string, string, bool) {

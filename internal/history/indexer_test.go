@@ -106,8 +106,10 @@ func TestIndexerPublishesBatchesBeforeCompletion(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
+		firstBatchPublished := false
 		_, indexErr := NewIndexer(gitrepo.New(source, execx.NewRunner()), s).Index(ctx, source, Request{Since: now.Add(-24 * time.Hour), Progress: func(progress Progress) {
-			if progress.Batches == 1 {
+			if progress.Batches == 1 && !firstBatchPublished {
+				firstBatchPublished = true
 				firstBatch <- progress
 				<-release
 			}
@@ -146,8 +148,9 @@ func TestIndexerPublishesBatchesBeforeCompletion(t *testing.T) {
 func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	repo := testutil.NewGitRepo(t)
+	var commits []string
 	for version := 0; version < 101; version++ {
-		repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-101)*time.Minute))
+		commits = append(commits, repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-101)*time.Minute)))
 	}
 	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "db"))
 	if err != nil {
@@ -155,7 +158,8 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	source := gitrepo.Source{Name: "core", Path: repo.Path}
-	indexer := NewIndexer(gitrepo.New(source, execx.NewRunner()), s)
+	runner := &countingRunner{Runner: execx.NewRunner()}
+	indexer := NewIndexer(gitrepo.New(source, runner), s)
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err = indexer.Index(ctx, source, Request{Since: now.Add(-24 * time.Hour), Progress: func(progress Progress) {
 		if progress.Batches == 1 {
@@ -172,15 +176,79 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 	if err != nil || countEvents(groups) != 10 {
 		t.Fatalf("partial events=%d err=%v", countEvents(groups), err)
 	}
-	if _, err := indexer.Index(context.Background(), source, Request{Since: now.Add(-24 * time.Hour)}); err != nil {
+	checkpointed := append([]string(nil), commits[len(commits)-10:]...)
+	repo.Commit("Formula/foo.rb", formula("101"), "version 101", now)
+	runner.revisions = nil
+	var resumedProgress []Progress
+	if _, err := indexer.Index(context.Background(), source, Request{Since: now.Add(-23 * time.Hour), Progress: func(progress Progress) {
+		resumedProgress = append(resumedProgress, progress)
+	}}); err != nil {
 		t.Fatal(err)
 	}
+	foundHeartbeat := false
+	for _, progress := range resumedProgress {
+		if progress.Commits > len(checkpointed) && progress.Batches == 0 {
+			foundHeartbeat = true
+		}
+	}
+	if !foundHeartbeat {
+		t.Fatalf("resume progress = %#v, want visible progress before the next durable batch", resumedProgress)
+	}
+	processed := map[string]bool{}
+	for _, commit := range checkpointed {
+		processed[commit] = true
+	}
+	for _, revision := range runner.revisions {
+		commit := strings.TrimSuffix(strings.SplitN(revision, ":", 2)[0], "^")
+		if processed[commit] {
+			t.Fatalf("retry reopened blob from checkpointed commit %s", revision)
+		}
+	}
 	groups, err = s.QueryFeed(context.Background(), domain.FeedFilter{})
-	if err != nil || countEvents(groups) != 101 {
+	if err != nil || countEvents(groups) != 102 {
 		t.Fatalf("retried events=%d err=%v", countEvents(groups), err)
 	}
 	if state, ok, err := s.HistoryState(context.Background(), "core"); err != nil || !ok || state.Head == "" {
 		t.Fatalf("retried state=%#v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestIndexerResumeDropsCheckpointedCommitsRewrittenWhileInterrupted(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	var commits []string
+	for version := 0; version < 12; version++ {
+		commits = append(commits, repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-12)*time.Minute)))
+	}
+	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	indexer := NewIndexer(gitrepo.New(source, execx.NewRunner()), s)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = indexer.Index(ctx, source, Request{Since: now.Add(-time.Hour), Progress: func(progress Progress) {
+		if progress.Batches == 1 {
+			cancel()
+		}
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled index error=%v", err)
+	}
+
+	repo.Run("-C", repo.Path, "reset", "--hard", commits[0])
+	replacement := repo.Commit("Formula/foo.rb", formula("replacement"), "replacement", now)
+	result, err := indexer.Index(context.Background(), source, Request{Since: now.Add(-59 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Head != replacement {
+		t.Fatalf("resumed head=%s, want %s", result.Head, replacement)
+	}
+	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{})
+	if err != nil || countEvents(groups) != 2 {
+		t.Fatalf("events after interrupted rewrite=%d err=%v", countEvents(groups), err)
 	}
 }
 
@@ -280,6 +348,46 @@ func TestIndexerAddsOneOlderFallbackForEachInstalledKind(t *testing.T) {
 	}
 }
 
+func TestIndexerPersistsRecentCursorBeforeInstalledFallbackCompletes(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	old := repo.Commit("Formula/foo.rb", formula("1"), "old installed formula", now.Add(-90*24*time.Hour))
+	head := repo.Commit("Formula/bar.rb", strings.Replace(formula("1"), "class Foo", "class Bar", 1), "recent formula", now.Add(-time.Hour))
+	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	fallbackKey := historyScanKey("fallback", time.Time{}, time.Time{}, Request{Installed: []domain.PackageID{"foo"}}, true)
+	if err := s.ApplyHistoryBatch(context.Background(), store.HistoryBatch{
+		Repository: "core", ScanKey: fallbackKey,
+		Processed: []store.HistoryProgress{{Commit: "previously-checkpointed"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &cancelOnCommitRunner{Runner: execx.NewRunner(), commit: old, cancel: cancel}
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	_, err = NewIndexer(gitrepo.New(source, runner), s).Index(ctx, source, Request{
+		Since: now.Add(-30 * 24 * time.Hour), Installed: []domain.PackageID{"foo"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Index error = %v, want cancellation during installed fallback", err)
+	}
+	state, ok, err := s.HistoryState(context.Background(), "core")
+	if err != nil || !ok || state.Head != head {
+		t.Fatalf("recent state=%#v ok=%v err=%v, want head %s", state, ok, err, head)
+	}
+	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{Now: now, Horizon: 30 * 24 * time.Hour})
+	if err != nil || countEvents(groups) != 1 {
+		t.Fatalf("recent events=%d err=%v, want quick update persisted", countEvents(groups), err)
+	}
+	progress, err := s.HistoryScanProgress(context.Background(), "core", fallbackKey)
+	if err != nil || len(progress) != 1 || progress[0].Commit != "previously-checkpointed" {
+		t.Fatalf("fallback progress=%#v err=%v, want earlier checkpoint preserved", progress, err)
+	}
+}
+
 func TestIndexerPersistsRenameAlias(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -360,13 +468,33 @@ func formulaWith(version, revision, homepage string) string {
 
 type countingRunner struct {
 	execx.Runner
-	shows int
+	shows     int
+	revisions []string
+}
+
+type cancelOnCommitRunner struct {
+	execx.Runner
+	commit string
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCommitRunner) Run(ctx context.Context, name string, args ...string) (execx.Result, error) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, r.commit) {
+			r.cancel()
+			break
+		}
+	}
+	return r.Runner.Run(ctx, name, args...)
 }
 
 func (r *countingRunner) Run(ctx context.Context, name string, args ...string) (execx.Result, error) {
-	for _, arg := range args {
+	for index, arg := range args {
 		if arg == "show" {
 			r.shows++
+			if index+1 < len(args) {
+				r.revisions = append(r.revisions, args[index+1])
+			}
 		}
 	}
 	return r.Runner.Run(ctx, name, args...)

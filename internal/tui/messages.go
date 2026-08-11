@@ -25,6 +25,7 @@ type SyncProgress struct {
 	Source                                string
 	Commits, Events, Diagnostics, Batches int
 }
+type SyncStarted struct{ Source string }
 type SyncDone struct{ Source string }
 
 type ChangelogLoaded struct {
@@ -66,6 +67,20 @@ type RepositoryTagsLoaded struct {
 	Err         error
 }
 
+type DetailField uint8
+
+const (
+	DetailPackageInfo DetailField = iota
+	DetailREADME
+	DetailRepositoryTags
+)
+
+type DetailFieldLoading struct {
+	PackageID domain.PackageID
+	Field     DetailField
+	Loading   bool
+}
+
 type DetailProgress struct {
 	Active, Pending int
 	Sequence        uint64
@@ -86,6 +101,7 @@ type preferencesSaved struct{ Err error }
 type eventsSeen struct{ Err error }
 type ChangelogDebounced struct{ SelectionID uint64 }
 type SearchDebounced struct{ RequestID uint64 }
+type detailSpinnerTick struct{ SelectionID uint64 }
 type ToggleFilter struct{ Kind domain.EventKind }
 type ToggleTypeFilter struct{ Type domain.PackageType }
 type ToggleRollUp struct{}

@@ -88,6 +88,9 @@ func (r *Resolver) Resolve(ctx context.Context, pkg PackageRef, version string) 
 	var fallback Section
 	if section, ok := MatchVersion(version, fromStoreArtifacts(cached)); ok {
 		if section.Confidence >= .8 {
+			if err := r.persistSection(ctx, section); err != nil {
+				return Section{}, err
+			}
 			return section, nil
 		}
 		fallback = section

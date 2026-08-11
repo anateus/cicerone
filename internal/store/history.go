@@ -19,12 +19,19 @@ type HistoryAlias struct {
 	Repository, Commit string
 }
 type HistoryDiagnostic struct{ Repository, Commit, Path, Message string }
+type HistoryProgress struct {
+	Commit              string
+	Events, Diagnostics int
+}
 type HistoryBatch struct {
 	Repository, Path, Head string
+	ScanKey                string
+	CompletedScanKeys      []string
 	Since                  time.Time
 	Events                 []domain.UpdateEvent
 	Aliases                []HistoryAlias
 	Diagnostics            []HistoryDiagnostic
+	Processed              []HistoryProgress
 	RemoveCommits          []string
 }
 
@@ -81,6 +88,23 @@ func (s *Store) HistoryState(ctx context.Context, repository string) (HistorySta
 	return result, true, nil
 }
 
+func (s *Store) HistoryScanProgress(ctx context.Context, repository, scanKey string) ([]HistoryProgress, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT commit_hash,event_count,diagnostic_count FROM history_scan_progress WHERE repository=? AND scan_key=?`, repository, scanKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var progress []HistoryProgress
+	for rows.Next() {
+		var item HistoryProgress
+		if err := rows.Scan(&item.Commit, &item.Events, &item.Diagnostics); err != nil {
+			return nil, err
+		}
+		progress = append(progress, item)
+	}
+	return progress, rows.Err()
+}
+
 // ApplyHistory makes events, aliases, reconciliation, range and cursor visible atomically.
 func (s *Store) ApplyHistory(ctx context.Context, batch HistoryBatch) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
@@ -129,6 +153,13 @@ func applyHistoryRows(ctx context.Context, tx *sql.Tx, batch HistoryBatch) error
 			return err
 		}
 	}
+	if batch.ScanKey != "" {
+		for _, progress := range batch.Processed {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO history_scan_progress(repository,scan_key,commit_hash,event_count,diagnostic_count) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`, batch.Repository, batch.ScanKey, progress.Commit, progress.Events, progress.Diagnostics); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -154,6 +185,17 @@ func finalizeHistory(ctx context.Context, tx *sql.Tx, batch HistoryBatch) error 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM repository_ranges WHERE repository_id=?`, batch.Repository); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO repository_ranges(repository_id,start_commit,end_commit) VALUES(?,?,?)`, batch.Repository, batch.Since.Format(time.RFC3339Nano), batch.Head)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO repository_ranges(repository_id,start_commit,end_commit) VALUES(?,?,?)`, batch.Repository, batch.Since.Format(time.RFC3339Nano), batch.Head); err != nil {
+		return err
+	}
+	if len(batch.CompletedScanKeys) > 0 {
+		args := []any{batch.Repository}
+		for _, scanKey := range batch.CompletedScanKeys {
+			args = append(args, scanKey)
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM history_scan_progress WHERE repository=? AND scan_key IN (`+placeholders(len(batch.CompletedScanKeys))+`)`, args...)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM history_scan_progress WHERE repository=?`, batch.Repository)
 	return err
 }

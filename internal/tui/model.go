@@ -15,9 +15,12 @@ import (
 )
 
 const (
-	changelogDebounce = 250 * time.Millisecond
-	searchDebounce    = 120 * time.Millisecond
+	changelogDebounce  = 250 * time.Millisecond
+	searchDebounce     = 120 * time.Millisecond
+	detailSpinInterval = 100 * time.Millisecond
 )
+
+var detailSpinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type DataSource interface {
 	QueryFeed(context.Context, domain.FeedFilter) ([]domain.FeedGroup, error)
@@ -95,58 +98,62 @@ const (
 )
 
 type Model struct {
-	deps                                                            Dependencies
-	width, height                                                   int
-	groups                                                          []domain.FeedGroup
-	selected                                                        int
-	viewportOffset                                                  int
-	focus                                                           pane
-	expanded                                                        map[domain.EventID]bool
-	filter                                                          domain.FeedFilter
-	detailOpen                                                      bool
-	loading, stale                                                  bool
-	err                                                             error
-	notification                                                    string
-	light                                                           bool
-	feedRequestID, changelogRequestID, detailRequestID, selectionID uint64
-	freshnessRequestID                                              uint64
-	notifyRequestID                                                 uint64
-	changelog                                                       []store.ChangelogSection
-	packageInfo                                                     homebrew.PackageInfo
-	packageDescriptions                                             map[domain.PackageID]string
-	descriptionRequests                                             map[domain.PackageID]bool
-	sessionNew                                                      map[domain.EventID]bool
-	seenBoundaryIndex                                               int
-	readme                                                          store.PackageDocument
-	repositoryTags                                                  []string
-	repositoryTagsExpanded                                          bool
-	packageInfoErr, readmeErr                                       error
-	repositoryTagsErr                                               error
-	changelogErr                                                    error
-	changelogLoading                                                bool
-	changelogArchiveStarted                                         bool
-	changelogNextPage                                               int
-	changelogMoreLoading                                            bool
-	changelogMoreErr                                                error
-	changelogPageCancel                                             context.CancelFunc
-	detailProgress                                                  DetailProgress
-	document                                                        store.DocumentKind
-	documentExplicit                                                bool
-	feedViewport, inspectorViewport                                 viewport.Model
-	refreshAnchors                                                  map[uint64]domain.Anchor
-	detailCancel                                                    context.CancelFunc
-	awaitingInitialRefresh, initialRefreshRunning                   bool
-	pendingAction                                                   *homebrew.Action
-	actionResult                                                    *homebrew.Action
-	actionRunning                                                   bool
-	actionOutput                                                    string
-	actionAnchor                                                    domain.Anchor
-	syncProgress                                                    map[string]SyncProgress
-	activeSync                                                      map[string]bool
-	searching                                                       bool
-	searchQueryCancel                                               context.CancelFunc
-	freshness                                                       store.FreshnessStatus
-	freshnessErr                                                    error
+	deps                                                              Dependencies
+	width, height                                                     int
+	groups                                                            []domain.FeedGroup
+	selected                                                          int
+	viewportOffset                                                    int
+	focus                                                             pane
+	expanded                                                          map[domain.EventID]bool
+	filter                                                            domain.FeedFilter
+	detailOpen                                                        bool
+	loading, stale                                                    bool
+	err                                                               error
+	notification                                                      string
+	light                                                             bool
+	feedRequestID, changelogRequestID, detailRequestID, selectionID   uint64
+	freshnessRequestID                                                uint64
+	notifyRequestID                                                   uint64
+	changelog                                                         []store.ChangelogSection
+	packageInfo                                                       homebrew.PackageInfo
+	packageDescriptions                                               map[domain.PackageID]string
+	descriptionRequests                                               map[domain.PackageID]bool
+	sessionNew                                                        map[domain.EventID]bool
+	seenBoundaryIndex                                                 int
+	readme                                                            store.PackageDocument
+	repositoryTags                                                    []string
+	repositoryTagsExpanded                                            bool
+	packageInfoErr, readmeErr                                         error
+	repositoryTagsErr                                                 error
+	packageInfoLoading, readmeLoading, repositoryTagsLoading          bool
+	packageInfoRefreshing, readmeRefreshing, repositoryTagsRefreshing bool
+	detailSpinnerFrame                                                int
+	detailSpinnerRunning                                              bool
+	changelogErr                                                      error
+	changelogLoading                                                  bool
+	changelogArchiveStarted                                           bool
+	changelogNextPage                                                 int
+	changelogMoreLoading                                              bool
+	changelogMoreErr                                                  error
+	changelogPageCancel                                               context.CancelFunc
+	detailProgress                                                    DetailProgress
+	document                                                          store.DocumentKind
+	documentExplicit                                                  bool
+	feedViewport, inspectorViewport                                   viewport.Model
+	refreshAnchors                                                    map[uint64]domain.Anchor
+	detailCancel                                                      context.CancelFunc
+	initialRefreshRunning                                             bool
+	pendingAction                                                     *homebrew.Action
+	actionResult                                                      *homebrew.Action
+	actionRunning                                                     bool
+	actionOutput                                                      string
+	actionAnchor                                                      domain.Anchor
+	syncProgress                                                      map[string]SyncProgress
+	activeSync                                                        map[string]bool
+	searching                                                         bool
+	searchQueryCancel                                                 context.CancelFunc
+	freshness                                                         store.FreshnessStatus
+	freshnessErr                                                      error
 }
 
 func New(deps Dependencies) tea.Model { return NewModel(deps) }
@@ -159,8 +166,8 @@ func NewModel(deps Dependencies) Model {
 		deps.Now = time.Now
 	}
 	return Model{deps: deps, expanded: make(map[domain.EventID]bool), loading: true,
-		awaitingInitialRefresh: deps.OnReady != nil, initialRefreshRunning: deps.OnReady != nil,
-		feedRequestID: 1, freshnessRequestID: 1, document: store.DocumentChangelog,
+		initialRefreshRunning: deps.OnReady != nil,
+		feedRequestID:         1, freshnessRequestID: 1, document: store.DocumentChangelog,
 		filter: domain.FeedFilter{
 			Now: deps.Now(), Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true},
 			Search: domain.SearchNames,
@@ -172,11 +179,9 @@ func NewModel(deps Dependencies) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.loadFreshness(m.freshnessRequestID)}
-	if m.awaitingInitialRefresh {
+	cmds := []tea.Cmd{m.loadFreshness(m.freshnessRequestID), m.queryFeed(m.feedRequestID)}
+	if m.deps.OnReady != nil {
 		cmds = append(cmds, m.deps.OnReady)
-	} else {
-		cmds = append(cmds, m.queryFeed(m.feedRequestID))
 	}
 	if m.deps.Data != nil {
 		cmds = append(cmds, m.loadPreferences())
@@ -186,6 +191,16 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case detailSpinnerTick:
+		if msg.SelectionID != m.selectionID {
+			return m, nil
+		}
+		m.detailSpinnerRunning = false
+		if !m.detailFieldsLoading() {
+			return m, nil
+		}
+		m.detailSpinnerFrame = (m.detailSpinnerFrame + 1) % len(detailSpinnerFrames)
+		return m, m.startDetailSpinner()
 	case WindowSize:
 		m.width, m.height = msg.Width, msg.Height
 		if m.width >= 100 {
@@ -230,20 +245,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncViewports()
 		}
+		m.startCachedDetailLoads()
 		cmds := []tea.Cmd{m.debounceChangelog(), m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
 			m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
-			m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.markFeedSeen(msg.Groups)}
+			m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.markFeedSeen(msg.Groups), m.startDetailSpinner()}
 		cmds = append(cmds, m.loadVisiblePackageDescriptions()...)
 		return m, tea.Batch(cmds...)
 	case DatasetChanged:
-		m.awaitingInitialRefresh = false
 		m.stale, m.loading = true, true
 		m.feedRequestID++
 		m.freshnessRequestID++
 		m.refreshAnchors[m.feedRequestID] = m.anchor()
 		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
 	case InitialRefreshDone:
-		m.awaitingInitialRefresh = false
 		m.initialRefreshRunning = false
 		m.stale, m.loading = true, true
 		m.feedRequestID++
@@ -258,12 +272,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			m.freshness = msg.Status
 		}
+	case SyncStarted:
+		m.activeSync[msg.Source] = true
+		m.notification = "Fetching latest " + msg.Source + "…"
 	case SyncProgress:
 		m.syncProgress[msg.Source] = msg
 		m.activeSync[msg.Source] = true
 		m.notification = fmt.Sprintf("%s · %d commits scanned · %d updates · %d batches", msg.Source, msg.Commits, msg.Events, msg.Batches)
 	case SyncDone:
 		delete(m.activeSync, msg.Source)
+		m.freshnessRequestID++
+		return m, m.loadFreshness(m.freshnessRequestID)
 	case PreferencesLoaded:
 		if msg.Err == nil {
 			msg.Filter.Now = m.filter.Now
@@ -280,9 +299,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.Filter.Search = domain.SearchNames
 			}
 			m.filter = msg.Filter
-			if m.awaitingInitialRefresh {
-				return m, nil
-			}
 			m.feedRequestID++
 			return m, m.queryFeed(m.feedRequestID)
 		}
@@ -326,13 +342,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detailContext, cancel := context.WithCancel(m.deps.Context)
 		m.detailCancel = cancel
 		m.changelogRequestID++
-		m.changelogLoading = true
+		m.packageInfoLoading = m.deps.PackageInfo != nil
+		m.readmeLoading = m.deps.README != nil
+		m.changelogLoading = m.deps.Changelog != nil
 		e := m.selectedEvent()
 		m.detailRequestID++
 		return m, tea.Batch(
 			m.loadChangelog(detailContext, m.changelogRequestID, msg.SelectionID, e),
 			m.loadPackageInfo(detailContext, m.detailRequestID, msg.SelectionID, e),
 			m.loadREADME(detailContext, m.detailRequestID, msg.SelectionID, e),
+			m.startDetailSpinner(),
 		)
 	case ChangelogLoaded:
 		e := m.selectedEvent()
@@ -395,6 +414,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			m.packageInfo = msg.Info
 		}
+		m.packageInfoLoading = false
 		m.packageInfoErr = msg.Err
 	case READMELoaded:
 		e := m.selectedEvent()
@@ -408,6 +428,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.document = store.DocumentREADME
 			}
 		}
+		m.readmeLoading = false
 		m.readmeErr = msg.Err
 	case RepositoryTagsLoaded:
 		if m.selectedEvent().PackageID != msg.PackageID ||
@@ -417,7 +438,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			m.repositoryTags = append([]string(nil), msg.Record.Tags...)
 		}
+		m.repositoryTagsLoading = false
 		m.repositoryTagsErr = msg.Err
+	case DetailFieldLoading:
+		if m.selectedEvent().PackageID != msg.PackageID {
+			return m, nil
+		}
+		switch msg.Field {
+		case DetailPackageInfo:
+			m.packageInfoRefreshing = msg.Loading
+		case DetailREADME:
+			m.readmeRefreshing = msg.Loading
+		case DetailRepositoryTags:
+			m.repositoryTagsRefreshing = msg.Loading
+		}
+		if msg.Loading {
+			return m, m.startDetailSpinner()
+		}
 	case DetailProgress:
 		if msg.Sequence != 0 && msg.Sequence < m.detailProgress.Sequence {
 			return m, nil
@@ -749,7 +786,7 @@ func (m Model) selectFeedIndex(index int) (tea.Model, tea.Cmd) {
 	m.keepSelectionVisible()
 	commands := []tea.Cmd{m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
 		m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
-		m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.debounceChangelog()}
+		m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.debounceChangelog(), m.startDetailSpinner()}
 	commands = append(commands, m.loadVisiblePackageDescriptions()...)
 	return m, tea.Batch(commands...)
 }
@@ -805,7 +842,12 @@ func (m *Model) resetDetails() {
 	m.repositoryTagsExpanded = false
 	m.changelog = nil
 	m.changelogErr = nil
-	m.changelogLoading = false
+	m.startCachedDetailLoads()
+	m.packageInfoRefreshing = false
+	m.readmeRefreshing = false
+	m.repositoryTagsRefreshing = false
+	m.detailSpinnerFrame = 0
+	m.detailSpinnerRunning = false
 	m.changelogArchiveStarted = false
 	m.changelogNextPage = 0
 	m.changelogMoreLoading = false
@@ -820,6 +862,16 @@ func (m *Model) resetDetails() {
 	m.err = nil
 	m.documentExplicit = false
 	m.inspectorViewport.SetYOffset(0)
+}
+
+func (m *Model) startCachedDetailLoads() {
+	if m.selectedEvent().PackageID == "" {
+		return
+	}
+	_, m.packageInfoLoading = m.deps.PackageInfo.(CachedPackageInfoSource)
+	_, m.readmeLoading = m.deps.README.(CachedREADMESource)
+	_, m.changelogLoading = m.deps.Changelog.(CachedChangelogSource)
+	m.repositoryTagsLoading = m.deps.Tags != nil
 }
 
 func (m Model) queryFeed(id uint64) tea.Cmd {
@@ -925,6 +977,9 @@ func (m Model) seenBoundary() int {
 
 func (m Model) hasSeenSeparator() bool {
 	boundary := m.seenBoundary()
+	if m.initialRefreshRunning {
+		return boundary >= 0 && boundary < len(m.groups)
+	}
 	return boundary > 0 && boundary < len(m.groups)
 }
 
@@ -940,6 +995,32 @@ func (m Model) debounceChangelog() tea.Cmd {
 	id := m.selectionID
 	return tea.Tick(changelogDebounce, func(time.Time) tea.Msg { return ChangelogDebounced{SelectionID: id} })
 }
+
+func (m Model) detailFieldsLoading() bool {
+	return m.packageInfoLoading || m.packageInfoRefreshing ||
+		m.readmeLoading || m.readmeRefreshing ||
+		m.repositoryTagsLoading || m.repositoryTagsRefreshing ||
+		m.changelogLoading || m.changelogMoreLoading
+}
+
+func (m *Model) startDetailSpinner() tea.Cmd {
+	if m.detailSpinnerRunning || !m.detailFieldsLoading() {
+		return nil
+	}
+	m.detailSpinnerRunning = true
+	selection := m.selectionID
+	return tea.Tick(detailSpinInterval, func(time.Time) tea.Msg {
+		return detailSpinnerTick{SelectionID: selection}
+	})
+}
+
+func (m Model) detailSpinner(loading bool) string {
+	if !loading {
+		return ""
+	}
+	return " " + detailSpinnerFrames[m.detailSpinnerFrame%len(detailSpinnerFrames)]
+}
+
 func (m Model) loadChangelog(ctx context.Context, request, selection uint64, e domain.UpdateEvent) tea.Cmd {
 	return func() tea.Msg {
 		var s []store.ChangelogSection
@@ -1049,10 +1130,7 @@ func (m Model) loadCachedPackageInfo(selection uint64, e domain.UpdateEvent) tea
 		if !ok {
 			return nil
 		}
-		info, found, err := source.LoadCachedPackageInfo(m.deps.Context, e.PackageID)
-		if !found && err == nil {
-			return nil
-		}
+		info, _, err := source.LoadCachedPackageInfo(m.deps.Context, e.PackageID)
 		return PackageInfoLoaded{SelectionID: selection, PackageID: e.PackageID, Info: info, Err: err}
 	}
 }
@@ -1101,10 +1179,7 @@ func (m Model) loadCachedREADME(selection uint64, e domain.UpdateEvent) tea.Cmd 
 		if !ok {
 			return nil
 		}
-		document, found, err := source.LoadCachedREADME(m.deps.Context, e.PackageID)
-		if !found && err == nil {
-			return nil
-		}
+		document, _, err := source.LoadCachedREADME(m.deps.Context, e.PackageID)
 		return READMELoaded{SelectionID: selection, PackageID: e.PackageID, Document: document, Err: err}
 	}
 }
@@ -1114,10 +1189,7 @@ func (m Model) loadCachedRepositoryTags(selection uint64, e domain.UpdateEvent) 
 		if e.PackageID == "" || m.deps.Tags == nil {
 			return nil
 		}
-		record, found, err := m.deps.Tags.LoadCachedRepositoryTags(m.deps.Context, e.PackageID)
-		if !found && err == nil {
-			return nil
-		}
+		record, _, err := m.deps.Tags.LoadCachedRepositoryTags(m.deps.Context, e.PackageID)
 		return RepositoryTagsLoaded{SelectionID: selection, PackageID: e.PackageID, Record: record, Err: err}
 	}
 }
@@ -1132,9 +1204,6 @@ func (m Model) loadCachedChangelog(selection uint64, e domain.UpdateEvent) tea.C
 			return nil
 		}
 		sections, err := source.LoadCachedChangelog(m.deps.Context, e.PackageID, e.ID)
-		if len(sections) == 0 && err == nil {
-			return nil
-		}
 		return ChangelogLoaded{SelectionID: selection, EventID: e.ID, PackageID: e.PackageID, Sections: sections, Err: err}
 	}
 }

@@ -207,6 +207,22 @@ func TestFeedTabsShowLatestSyncAndFreshnessWarnings(t *testing.T) {
 	}
 }
 
+func TestSynchronizationIsVisibleBeforeFirstScanProgressAndFailureReplacesSyncNever(t *testing.T) {
+	now := time.Date(2026, 8, 7, 17, 0, 0, 0, time.Local)
+	m := NewModel(Dependencies{Now: func() time.Time { return now }})
+	m = update(t, m, SyncStarted{Source: "homebrew-core"})
+	if got := m.freshnessText(); got != "Syncing homebrew-core…" {
+		t.Fatalf("active freshness = %q", got)
+	}
+	m = update(t, m, SyncDone{Source: "homebrew-core"})
+	m = update(t, m, FreshnessLoaded{RequestID: m.freshnessRequestID, Status: store.FreshnessStatus{
+		LastAttempt: now.Add(-time.Minute), LastError: "network unavailable",
+	}})
+	if got := m.freshnessText(); !strings.Contains(got, "Sync failed") || strings.Contains(got, "Sync never") {
+		t.Fatalf("failed freshness = %q", got)
+	}
+}
+
 func TestGlobalQuitKeys(t *testing.T) {
 	states := []struct {
 		name  string
@@ -1001,6 +1017,46 @@ func TestInspectorRendersRepositoryTagsForCurrentPackage(t *testing.T) {
 	}
 }
 
+func TestInspectorRendersEmptyRepositoryTags(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 120, 20, false
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+	m = update(t, m, RepositoryTagsLoaded{
+		PackageID: "pkg-a",
+		Record:    store.PackageRepositoryTags{Tags: []string{}},
+	})
+
+	view := ansi.Strip(m.renderInspector(72))
+	if !strings.Contains(view, "Tags       ") {
+		t.Fatalf("inspector omitted empty repository tags:\n%s", view)
+	}
+}
+
+func TestInspectorAnimatesLoadingDetailFields(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 120, 24, false
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+	m.packageInfo = homebrew.PackageInfo{
+		Name: "Widget", Description: "A useful package", InstalledVersion: "1", StableVersion: "2",
+	}
+	m.packageInfoLoading = true
+	m.repositoryTagsLoading = true
+	m.changelogLoading = true
+
+	view := ansi.Strip(m.renderInspector(72))
+	for _, want := range []string{"Widget ⠋", "A useful package ⠋", "Installed  1 ⠋", "Tags       ⠋", "CHANGELOG ⠋"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("loading inspector missing %q:\n%s", want, view)
+		}
+	}
+
+	m = update(t, m, detailSpinnerTick{SelectionID: m.selectionID})
+	view = ansi.Strip(m.renderInspector(72))
+	if !strings.Contains(view, "Tags       ⠙") {
+		t.Fatalf("detail spinner did not advance:\n%s", view)
+	}
+}
+
 func TestInspectorRepositoryTagsCollapseToThreeLinesAndToggle(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m.width, m.height, m.loading, m.focus = 120, 30, false, inspectorPane
@@ -1193,6 +1249,25 @@ func TestFeedLabelsSeenBoundaryAsLoadingDuringInitialSynchronization(t *testing.
 	}
 }
 
+func TestInitialSynchronizationLabelsAllCachedRowsBeforeNewUpdatesArrive(t *testing.T) {
+	m := NewModel(Dependencies{OnReady: func() tea.Msg { return nil }})
+	seenA := event("seen-a", "seen-a")
+	seenA.Seen = true
+	seenB := event("seen-b", "seen-b")
+	seenB.Seen = true
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{
+		{ID: seenA.ID, Events: []domain.UpdateEvent{seenA}},
+		{ID: seenB.ID, Events: []domain.UpdateEvent{seenB}},
+	}})
+
+	view := ansi.Strip(m.renderFeedRows(72))
+	separator := strings.Index(view, "loading additional packages…")
+	firstCachedRow := strings.Index(view, "seen-a")
+	if separator < 0 || firstCachedRow < 0 || separator > firstCachedRow {
+		t.Fatalf("cached startup feed was not labeled while synchronization continued:\n%s", view)
+	}
+}
+
 func TestFeedOmitsPreviouslySeenSeparatorWhenThereAreNoNewUpdates(t *testing.T) {
 	m := NewModel(Dependencies{})
 	seen := event("seen", "seen")
@@ -1315,8 +1390,8 @@ func TestChangingSelectionCancelsObsoleteDetailRefreshes(t *testing.T) {
 	next, command := m.Update(ChangelogDebounced{SelectionID: m.selectionID})
 	m = next.(Model)
 	batch, ok := command().(tea.BatchMsg)
-	if !ok || len(batch) != 3 {
-		t.Fatalf("detail refresh command = %T with %d children, want three", command(), len(batch))
+	if !ok || len(batch) != 4 {
+		t.Fatalf("detail refresh command = %T with %d children, want three loads and a spinner tick", command(), len(batch))
 	}
 	for _, child := range batch {
 		go child()
@@ -1605,7 +1680,7 @@ func TestNotifyRejectsStaleRequestID(t *testing.T) {
 	}
 }
 
-func TestInitialRefreshStartsBeforeFirstFeedQuery(t *testing.T) {
+func TestInitialFeedQueryStartsAlongsideRefresh(t *testing.T) {
 	started := false
 	data := &recordingData{}
 	m := NewModel(Dependencies{Data: data, OnReady: func() tea.Msg { started = true; return nil }})
@@ -1622,25 +1697,25 @@ func TestInitialRefreshStartsBeforeFirstFeedQuery(t *testing.T) {
 	if !started {
 		t.Fatal("initial refresh was not started")
 	}
-	if !data.queried.Now.IsZero() {
-		t.Fatalf("feed queried before initial refresh: %+v", data.queried)
+	if data.queried.Now.IsZero() {
+		t.Fatal("cached feed was not queried while initial refresh started")
 	}
 	next, command := m.Update(PreferencesLoaded{Filter: domain.FeedFilter{Horizon: 7 * 24 * time.Hour}})
 	m = next.(Model)
-	if command != nil {
-		t.Fatal("preferences load scheduled a feed query before initial refresh")
+	if command == nil {
+		t.Fatal("preferences load did not refresh the cached feed")
 	}
 	if m.filter.Horizon != 7*24*time.Hour {
 		t.Fatalf("preferences horizon = %v, want 7 days", m.filter.Horizon)
 	}
 	next, command = m.Update(DatasetChanged{})
 	m = next.(Model)
-	if command == nil || m.awaitingInitialRefresh {
+	if command == nil {
 		t.Fatal("first durable dataset batch did not schedule the initial feed query")
 	}
 	next, command = m.Update(InitialRefreshDone{})
 	m = next.(Model)
-	if command == nil || m.awaitingInitialRefresh {
+	if command == nil {
 		t.Fatal("completed initial refresh did not schedule the first feed query")
 	}
 }

@@ -2,8 +2,10 @@ package history
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +25,7 @@ type Progress struct{ Commits, Events, Diagnostics, Batches int }
 const (
 	historyInitialBatchCommits = 10
 	historyBatchCommits        = 100
+	historyProgressCommits     = 10
 )
 
 type Result struct {
@@ -56,9 +59,11 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 		since = state.Since
 	}
 	var ranges []gitrepo.Range
+	var rangeKeys []string
 	var remove []string
 	if !exists {
 		ranges = append(ranges, gitrepo.Range{Revision: head, Since: since})
+		rangeKeys = append(rangeKeys, historyScanKey("initial", time.Time{}, time.Time{}, req, false))
 	} else if state.Head != head {
 		base, e := i.repository.MergeBase(ctx, state.Head, head)
 		if e != nil {
@@ -74,9 +79,11 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			}
 		}
 		ranges = append(ranges, gitrepo.Range{Revision: base + ".." + head})
+		rangeKeys = append(rangeKeys, historyScanKey("forward:"+state.Head, time.Time{}, time.Time{}, req, false))
 	}
 	if exists && !req.Since.IsZero() && req.Since.Before(state.Since) {
 		ranges = append(ranges, gitrepo.Range{Revision: head, Since: req.Since, Until: state.Since})
+		rangeKeys = append(rangeKeys, historyScanKey("backward", req.Since, state.Since, req, false))
 	}
 	seen := map[string]bool{}
 	missing := map[string]bool{}
@@ -102,18 +109,23 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	if len(missing) > 0 {
 		fallbackIndex = len(ranges)
 		ranges = append(ranges, gitrepo.Range{Revision: head})
+		rangeKeys = append(rangeKeys, historyScanKey("fallback", time.Time{}, time.Time{}, req, true))
 	}
 	var events []domain.UpdateEvent
 	var aliases []store.HistoryAlias
 	var persistedDiagnostics []store.HistoryDiagnostic
+	var processed []store.HistoryProgress
 	progress := Progress{}
+	countedProgress := map[string]bool{}
+	loadedCheckpoints := map[string]bool{}
+	encountered := map[string]bool{}
 	batchCommits := 0
 	batchLimit := historyInitialBatchCommits
-	flush := func() error {
+	flush := func(scanKey string) error {
 		if batchCommits == 0 {
 			return nil
 		}
-		if err := i.store.ApplyHistoryBatch(ctx, store.HistoryBatch{Repository: source.Name, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics}); err != nil {
+		if err := i.store.ApplyHistoryBatch(ctx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, Processed: processed}); err != nil {
 			return err
 		}
 		progress.Batches++
@@ -123,19 +135,49 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 		events = nil
 		aliases = nil
 		persistedDiagnostics = nil
+		processed = nil
 		batchCommits = 0
 		batchLimit = historyBatchCommits
 		return nil
 	}
 	for rangeIndex, r := range ranges {
-		e := i.repository.WalkCommits(ctx, r, func(commit gitrepo.Commit) error {
+		scanKey := rangeKeys[rangeIndex]
+		checkpointRows, e := i.store.HistoryScanProgress(ctx, source.Name, scanKey)
+		if e != nil {
+			return Result{}, e
+		}
+		checkpoint := make(map[string]bool, len(checkpointRows))
+		for _, item := range checkpointRows {
+			checkpoint[item.Commit] = true
+			loadedCheckpoints[item.Commit] = true
+			if !countedProgress[item.Commit] {
+				countedProgress[item.Commit] = true
+				progress.Commits++
+				progress.Events += item.Events
+				progress.Diagnostics += item.Diagnostics
+			}
+		}
+		if len(checkpointRows) > 0 {
+			batchLimit = historyBatchCommits
+			if req.Progress != nil {
+				req.Progress(progress)
+			}
+		}
+		e = i.repository.WalkCommits(ctx, r, func(commit gitrepo.Commit) error {
+			encountered[commit.Hash] = true
 			if seen[commit.Hash] {
+				return nil
+			}
+			if checkpoint[commit.Hash] {
+				seen[commit.Hash] = true
 				return nil
 			}
 			if rangeIndex == fallbackIndex && !since.IsZero() && !commit.AuthorTime.Before(since) {
 				return nil
 			}
 			seen[commit.Hash] = true
+			eventsBefore := progress.Events
+			diagnosticsBefore := progress.Diagnostics
 			progress.Commits++
 			batchCommits++
 			for _, change := range commit.Changes {
@@ -201,22 +243,73 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				progress.Events++
 				delete(missing, key)
 			}
+			processed = append(processed, store.HistoryProgress{Commit: commit.Hash, Events: progress.Events - eventsBefore, Diagnostics: progress.Diagnostics - diagnosticsBefore})
 			if batchCommits == batchLimit {
-				return flush()
+				return flush(scanKey)
+			}
+			if batchCommits%historyProgressCommits == 0 && req.Progress != nil {
+				req.Progress(progress)
 			}
 			return nil
 		})
 		if e != nil {
 			return Result{}, e
 		}
+		if err := flush(scanKey); err != nil {
+			return Result{}, err
+		}
+		if fallbackIndex > 0 && rangeIndex == fallbackIndex-1 {
+			if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{
+				Repository:        source.Name,
+				Path:              source.Path,
+				Head:              head,
+				Since:             since,
+				RemoveCommits:     remove,
+				CompletedScanKeys: append([]string(nil), rangeKeys[:fallbackIndex]...),
+			}); err != nil {
+				return Result{}, err
+			}
+		}
 	}
-	if err := flush(); err != nil {
-		return Result{}, err
+	removeSet := make(map[string]bool, len(remove))
+	for _, commit := range remove {
+		removeSet[commit] = true
+	}
+	for commit := range loadedCheckpoints {
+		if !encountered[commit] && !removeSet[commit] {
+			remove = append(remove, commit)
+		}
 	}
 	if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, RemoveCommits: remove}); err != nil {
 		return Result{}, err
 	}
 	return Result{Events: progress.Events, Diagnostics: progress.Diagnostics, Head: head, Since: since}, nil
+}
+
+func historyScanKey(label string, since, until time.Time, req Request, includeInstalled bool) string {
+	var installed []string
+	if includeInstalled {
+		installed = make([]string, len(req.Installed))
+		for index, id := range req.Installed {
+			installed[index] = string(id)
+		}
+		sort.Strings(installed)
+	}
+	var kinds []string
+	for kind, enabled := range req.Kinds {
+		if enabled {
+			kinds = append(kinds, string(kind))
+		}
+	}
+	sort.Strings(kinds)
+	identity := strings.Join([]string{
+		label,
+		since.UTC().Format(time.RFC3339Nano),
+		until.UTC().Format(time.RFC3339Nano),
+		strings.Join(installed, "\x00"),
+		strings.Join(kinds, "\x00"),
+	}, "\x01")
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))
 }
 
 func (i *Indexer) definition(ctx context.Context, revision, path string, absent bool) (*Definition, []string, error) {

@@ -42,7 +42,7 @@ func TestPackageDetailLoaderFetchesCachesAndPublishesRepositoryTags(t *testing.T
 	queue := download.NewQueue(download.Options{Context: ctx, Workers: 1, HostInterval: -1})
 	t.Cleanup(queue.Close)
 	resolver := &repositoryMetadataResolver{tags: []string{"terminal", "Go", "Shell"}}
-	messages := make(chan tea.Msg, 1)
+	messages := make(chan tea.Msg, 4)
 	loader := &packageDetailLoader{
 		store: cache, queue: queue, changelogs: changelogLoader{resolver: resolver},
 		send: func(message tea.Msg) { messages <- message },
@@ -50,15 +50,33 @@ func TestPackageDetailLoaderFetchesCachesAndPublishesRepositoryTags(t *testing.T
 
 	loader.enqueueRepositoryTags(ctx, "widget", "https://github.com/acme/widget")
 
-	select {
-	case raw := <-messages:
-		message, ok := raw.(tui.RepositoryTagsLoaded)
-		if !ok || message.PackageID != domain.PackageID("widget") ||
-			!reflect.DeepEqual(message.Record.Tags, []string{"terminal", "Go", "Shell"}) {
-			t.Fatalf("repository tags message = %#v", raw)
+	loadingStarted, loadingFinished, tagsLoaded := false, false, false
+	deadline := time.After(2 * time.Second)
+	for !loadingFinished || !tagsLoaded {
+		select {
+		case raw := <-messages:
+			switch message := raw.(type) {
+			case tui.DetailFieldLoading:
+				if message.PackageID == domain.PackageID("widget") && message.Field == tui.DetailRepositoryTags {
+					if message.Loading {
+						loadingStarted = true
+					} else {
+						loadingFinished = true
+					}
+				}
+			case tui.RepositoryTagsLoaded:
+				if message.PackageID != domain.PackageID("widget") ||
+					!reflect.DeepEqual(message.Record.Tags, []string{"terminal", "Go", "Shell"}) {
+					t.Fatalf("repository tags message = %#v", raw)
+				}
+				tagsLoaded = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for repository tags")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for repository tags")
+	}
+	if !loadingStarted {
+		t.Fatal("repository tags load did not publish its start")
 	}
 	record, found, err := loader.LoadCachedRepositoryTags(ctx, "widget")
 	if err != nil || !found || !reflect.DeepEqual(record.Tags, []string{"terminal", "Go", "Shell"}) {

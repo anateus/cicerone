@@ -366,6 +366,31 @@ func TestCoordinatorPublishesDurableBatchProgress(t *testing.T) {
 	}
 }
 
+func TestCoordinatorPublishesScanHeartbeatsWithoutReloadingUndurableData(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	job := fakeJob{name: "core", destination: destination, index: func(_ context.Context, req Request) (Result, error) {
+		req.Progress(Progress{Commits: 18_158, Events: 12_751, Batches: 0})
+		req.Progress(Progress{Commits: 18_248, Events: 12_760, Batches: 1})
+		return Result{Events: 12_760}, nil
+	}}
+	var messages []tea.Msg
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) { messages = append(messages, msg) }})
+	c.Start(context.Background())
+	c.Wait()
+	heartbeats, changed := 0, 0
+	for _, message := range messages {
+		switch message.(type) {
+		case SyncProgress:
+			heartbeats++
+		case tui.DatasetChanged:
+			changed++
+		}
+	}
+	if heartbeats != 2 || changed != 2 {
+		t.Fatalf("progress messages=%d dataset changes=%d, want two status updates and durable/final reloads", heartbeats, changed)
+	}
+}
+
 func TestRepositoryConcurrencyIsTwoAndFailuresAreIsolated(t *testing.T) {
 	destination := &fakeDestination{}
 	var active, maximum atomic.Int32

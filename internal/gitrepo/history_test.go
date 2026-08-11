@@ -2,6 +2,7 @@ package gitrepo_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -211,6 +212,32 @@ func TestRepositoryHistoryProtocol(t *testing.T) {
 	if err != nil || string(blob) != "one" {
 		t.Fatalf("Blob = %q, %v", blob, err)
 	}
+}
+
+func TestBlobRetriesOneTransientGitFailure(t *testing.T) {
+	runner := &transientBlobRunner{result: execx.Result{Stdout: []byte("formula")}}
+	repository := gitrepo.New(gitrepo.Source{Path: "/repo"}, runner)
+	body, err := repository.Blob(context.Background(), "abc", "Formula/a.rb")
+	if err != nil || string(body) != "formula" || runner.calls != 2 {
+		t.Fatalf("Blob = %q, %v after %d calls", body, err, runner.calls)
+	}
+}
+
+type transientBlobRunner struct {
+	calls  int
+	result execx.Result
+}
+
+func (r *transientBlobRunner) Run(context.Context, string, ...string) (execx.Result, error) {
+	r.calls++
+	if r.calls == 1 {
+		return execx.Result{}, errors.New("temporary network failure")
+	}
+	return r.result, nil
+}
+
+func (*transientBlobRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
+	panic("unused")
 }
 
 func TestMergeBaseAcrossDivergentBranches(t *testing.T) {

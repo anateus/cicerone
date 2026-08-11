@@ -27,13 +27,18 @@ type SyncRunStatus struct {
 type FreshnessStatus struct {
 	LastSync          time.Time
 	LastPackageUpdate time.Time
+	LastAttempt       time.Time
+	LastError         string
 }
 
 func (s *Store) LatestFreshness(ctx context.Context) (FreshnessStatus, error) {
-	var lastSync, lastUpdate int64
+	var lastSync, lastUpdate, lastAttempt int64
+	var lastError string
 	err := s.db.QueryRowContext(ctx, `SELECT
 		COALESCE((SELECT MAX(last_success_at) FROM sync_runs), 0),
-		COALESCE((SELECT MAX(event_time) FROM update_events), 0)`).Scan(&lastSync, &lastUpdate)
+		COALESCE((SELECT MAX(event_time) FROM update_events), 0),
+		COALESCE((SELECT completed_at FROM sync_runs WHERE completed_at IS NOT NULL ORDER BY completed_at DESC, id DESC LIMIT 1), 0),
+		COALESCE((SELECT error FROM sync_runs WHERE completed_at IS NOT NULL ORDER BY completed_at DESC, id DESC LIMIT 1), '')`).Scan(&lastSync, &lastUpdate, &lastAttempt, &lastError)
 	if err != nil {
 		return FreshnessStatus{}, err
 	}
@@ -44,6 +49,10 @@ func (s *Store) LatestFreshness(ctx context.Context) (FreshnessStatus, error) {
 	if lastUpdate != 0 {
 		status.LastPackageUpdate = time.Unix(0, lastUpdate).UTC()
 	}
+	if lastAttempt != 0 {
+		status.LastAttempt = time.Unix(0, lastAttempt).UTC()
+	}
+	status.LastError = lastError
 	return status, nil
 }
 

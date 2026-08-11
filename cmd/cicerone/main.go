@@ -94,15 +94,24 @@ type changelogLoader struct {
 
 func (l changelogLoader) LoadChangelog(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) ([]store.ChangelogSection, error) {
 	cached, err := l.cache.LoadChangelog(ctx, packageID, eventID)
-	if err != nil || len(cached) > 0 {
+	if err != nil {
 		return cached, err
+	}
+	if l.resolver == nil {
+		return cached, nil
 	}
 	ref, version, err := l.packageRef(ctx, packageID, eventID)
 	if err != nil {
+		if len(cached) > 0 {
+			return cached, nil
+		}
 		return nil, err
 	}
 	section, err := l.resolver.Resolve(ctx, ref, version)
 	if err != nil {
+		if len(cached) > 0 {
+			return cached, nil
+		}
 		return nil, err
 	}
 	return []store.ChangelogSection{{ArtifactID: section.ArtifactID, Version: section.Version, Body: section.Body, Confidence: section.Confidence, SourceURL: section.SourceURL}}, nil

@@ -91,11 +91,12 @@ type fakeChangelogResolver struct {
 	ref         changelog.PackageRef
 	version     string
 	page, limit int
+	err         error
 }
 
 func (f *fakeChangelogResolver) Resolve(_ context.Context, ref changelog.PackageRef, version string) (changelog.Section, error) {
 	f.ref, f.version = ref, version
-	return changelog.Section{Version: version, Body: "resolved", SourceURL: "https://github.com/acme/fixture/releases/v2.0", Confidence: 1}, nil
+	return changelog.Section{Version: version, Body: "resolved", SourceURL: "https://github.com/acme/fixture/releases/v2.0", Confidence: 1}, f.err
 }
 
 func (*fakeChangelogResolver) RepositoryMetadataTags(context.Context, string) ([]string, error) {
@@ -140,6 +141,49 @@ end`, "fixture 2.0", time.Now())
 	}
 	if resolver.ref.RepositoryURL != "https://github.com/acme/fixture" || resolver.ref.Homepage != "https://github.com/acme/fixture" || resolver.version != "2.0" {
 		t.Fatalf("resolver input = %#v, %q", resolver.ref, resolver.version)
+	}
+}
+
+func TestChangelogLoaderReResolvesCachedDerivedSection(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	repo := testutil.NewGitRepo(t)
+	commit := repo.Commit("Formula/f/fixture.rb", `class Fixture < Formula
+  homepage "https://github.com/acme/fixture"
+  url "https://github.com/acme/fixture/archive/v2.0.tar.gz"
+  version "2.0"
+end`, "fixture 2.0", time.Now())
+	event := domain.UpdateEvent{ID: "event", PackageID: "fixture", Name: "fixture", Type: domain.PackageFormula, Kind: domain.EventVersion, NewVersion: "2.0", Repository: "homebrew-core", DefinitionPath: "Formula/f/fixture.rb", Commit: commit, Time: time.Now()}
+	if err := destination.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("## 2.0\n\n### Fixes\n\n- Complete notes.\n")
+	artifact, err := destination.SaveChangelogArtifact(ctx, "fixture", store.ChangelogArtifact{URL: "https://example.test/CHANGELOG.md", Hash: "old", Raw: body, Extracted: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.SaveChangelogSection(ctx, store.ChangelogSection{ArtifactID: artifact.ID, Version: "2.0", Body: "## 2.0", Confidence: 1, SourceURL: artifact.URL}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeChangelogResolver{}
+	loader := changelogLoader{cache: destination, resolver: resolver, repository: func(context.Context, string) (gitrepo.Repository, error) {
+		return gitrepo.New(gitrepo.Source{Name: "homebrew-core", Path: repo.Path}, execx.NewRunner()), nil
+	}}
+	sections, err := loader.LoadChangelog(ctx, event.PackageID, event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 1 || sections[0].Body != "resolved" || resolver.version != "2.0" {
+		t.Fatalf("sections=%#v resolver version=%q, want refreshed derived section", sections, resolver.version)
+	}
+	resolver.err = errors.New("refresh failed")
+	sections, err = loader.LoadChangelog(ctx, event.PackageID, event.ID)
+	if err != nil || len(sections) != 1 || sections[0].Body != "## 2.0" {
+		t.Fatalf("fallback sections=%#v err=%v, want previous cached section", sections, err)
 	}
 }
 
