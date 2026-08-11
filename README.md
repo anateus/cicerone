@@ -27,10 +27,12 @@ Run `./cicerone --plain` for a one-shot plaintext feed. It prints cached rows,
 performs real read-only Homebrew metadata synchronization, prints refreshed
 rows, and exits. This may update Cicerone's database and Cicerone-owned Git
 caches, but it never installs, upgrades, or uninstalls Homebrew packages.
-On a first run, history is streamed into durable 100-commit batches. Plain mode
-prints numeric progress and newly queryable rows after each batch. Interrupted
-scans retain valid rows without advancing the completed cursor, so retry is safe
-and idempotent.
+On a first run, history is streamed into durable batches (10 commits initially,
+then 100 commits at a time). Plain mode prints numeric progress and newly
+queryable rows after each batch. Interrupted scans retain valid rows and
+per-commit progress without advancing the completed cursor, so the next run can
+resume without reopening already checkpointed commits. Rewritten history is
+reconciled when that scan resumes.
 
 ## Keys
 
@@ -60,9 +62,9 @@ The default feed contains version events from the last 30 days. An installed pac
 
 Search starts with package names. `tab` cycles through cumulative scopes: names; names and cached descriptions; those plus cached changelogs; then those plus cached READMEs. Unquoted terms are prefix searches, so `rip gre` matches tokens beginning with `rip` and `gre`. Surround the whole query with quotes for a non-prefix phrase search, such as `"rip grep"`. Document and description results are limited to content already present in Cicerone's durable cache.
 
-Cicerone keeps the loading view up until the initial refresh publishes its first durable history batch, so current rows appear quickly while the remaining history continues indexing in the background. Sync failures still fall back to the durable feed. Later background commits requery the feed while preserving the selected stable event and its viewport-relative row. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
+Cicerone queries the durable feed immediately on startup while repository synchronization runs in the background. Each durable history batch refreshes the feed while preserving the selected stable event and its viewport-relative row. The header shows active synchronization and retains the latest failed-attempt status; failures continue to fall back to cached rows. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
-When selection settles for 250 ms, Cicerone loads and refreshes package information, README, and changelog content independently. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host. The fixed status line reports active and queued detail jobs while cached content remains usable. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
+When selection settles for 250 ms, Cicerone loads and refreshes package information, README, repository tags, and changelog content independently. Each inspector field shows its own loading or refreshing indicator, while cached content remains usable. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host, and the fixed status line reports active and queued detail jobs. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
 
 When GitHub Releases supplies a changelog, the selected release renders first and the next 10 releases are appended in the background. If more releases are available, the end of the changelog offers another 10-release page.
 
