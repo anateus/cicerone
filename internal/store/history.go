@@ -23,6 +23,10 @@ type HistoryProgress struct {
 	Commit              string
 	Events, Diagnostics int
 }
+type HistoryCoverage struct {
+	PackageID domain.PackageID
+	Kind      domain.EventKind
+}
 type HistoryBatch struct {
 	Repository, Path, Head string
 	ScanKey                string
@@ -32,6 +36,7 @@ type HistoryBatch struct {
 	Aliases                []HistoryAlias
 	Diagnostics            []HistoryDiagnostic
 	Processed              []HistoryProgress
+	Exhausted              []HistoryCoverage
 	RemoveCommits          []string
 }
 
@@ -39,6 +44,21 @@ func (s *Store) HasHistoryEvent(ctx context.Context, repository string, packageI
 	var found bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM update_events WHERE repository=? AND package_id=? AND kind=?)`, repository, packageID, kind).Scan(&found)
 	return found, err
+}
+
+func (s *Store) HasHistoryFallbackCoverage(ctx context.Context, repository string, packageID domain.PackageID, kind domain.EventKind) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM history_fallback_coverage WHERE repository=? AND package_id=? AND kind=?)`, repository, packageID, kind).Scan(&found)
+	return found, err
+}
+
+func (s *Store) HistoryPackageType(ctx context.Context, packageID domain.PackageID) (domain.PackageType, bool, error) {
+	var packageType domain.PackageType
+	err := s.db.QueryRowContext(ctx, `SELECT type FROM packages WHERE id=?`, packageID).Scan(&packageType)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return packageType, err == nil, err
 }
 
 func (s *Store) ResolveHistoryPackageID(ctx context.Context, repository string, id domain.PackageID) (domain.PackageID, error) {
@@ -176,6 +196,14 @@ func finalizeHistory(ctx context.Context, tx *sql.Tx, batch HistoryBatch) error 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM history_diagnostics WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`)`, args...); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM history_fallback_coverage WHERE repository=?`, batch.Repository); err != nil {
+			return err
+		}
+	}
+	for _, coverage := range batch.Exhausted {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO history_fallback_coverage(repository,package_id,kind) VALUES(?,?,?) ON CONFLICT DO NOTHING`, batch.Repository, coverage.PackageID, coverage.Kind); err != nil {
 			return err
 		}
 	}

@@ -185,14 +185,14 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	foundHeartbeat := false
+	foundStartupBatch := false
 	for _, progress := range resumedProgress {
-		if progress.Commits > len(checkpointed) && progress.Batches == 0 {
-			foundHeartbeat = true
+		if progress.Commits == len(checkpointed)+historyInitialBatchCommits && progress.Batches == 1 {
+			foundStartupBatch = true
 		}
 	}
-	if !foundHeartbeat {
-		t.Fatalf("resume progress = %#v, want visible progress before the next durable batch", resumedProgress)
+	if !foundStartupBatch {
+		t.Fatalf("resume progress = %#v, want the next 10 commits durable as the startup batch", resumedProgress)
 	}
 	processed := map[string]bool{}
 	for _, commit := range checkpointed {
@@ -210,6 +210,37 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 	}
 	if state, ok, err := s.HistoryState(context.Background(), "core"); err != nil || !ok || state.Head == "" {
 		t.Fatalf("retried state=%#v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestIndexerCancellationCheckpointsPartialBatch(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	for version := 0; version < 25; version++ {
+		repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-25)*time.Minute))
+	}
+	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	ctx, cancel := context.WithCancel(context.Background())
+	request := Request{Since: now.Add(-time.Hour), Progress: func(progress Progress) {
+		if progress.Commits == 20 {
+			cancel()
+		}
+	}}
+	_, err = NewIndexer(gitrepo.New(source, execx.NewRunner()), s).Index(ctx, source, request)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Index error=%v, want context cancellation", err)
+	}
+	progress, err := s.HistoryScanProgress(context.Background(), "core", historyScanKey("initial", time.Time{}, time.Time{}, request, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) != 20 {
+		t.Fatalf("checkpointed commits=%d, want first batch plus 10-commit partial batch", len(progress))
 	}
 }
 
@@ -345,6 +376,83 @@ func TestIndexerAddsOneOlderFallbackForEachInstalledKind(t *testing.T) {
 		if !kinds[kind] {
 			t.Fatalf("missing %s fallback", kind)
 		}
+	}
+}
+
+func TestIndexerDoesNotRepeatExhaustedInstalledFallback(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	repo.Commit("Formula/foo.rb", formula("1"), "add", now.Add(-40*24*time.Hour))
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	runner := &countingRunner{Runner: execx.NewRunner()}
+	idx := NewIndexer(gitrepo.New(source, runner), s)
+
+	request := Request{Since: now.Add(-30 * 24 * time.Hour), Installed: []domain.PackageID{"never-existed"}}
+	if _, err := idx.Index(ctx, source, request); err != nil {
+		t.Fatal(err)
+	}
+	if runner.shows == 0 {
+		t.Fatal("first fallback did not inspect repository history")
+	}
+	runner.shows = 0
+	if _, err := idx.Index(ctx, source, request); err != nil {
+		t.Fatal(err)
+	}
+	if runner.shows != 0 {
+		t.Fatalf("second fallback reopened %d historical blobs after exhaustive coverage", runner.shows)
+	}
+}
+
+func TestIndexerSkipsCustomTapPackagesDuringCoreFallback(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	repo.Commit("Formula/foo.rb", formula("1"), "add", now.Add(-40*24*time.Hour))
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	source := gitrepo.Source{Name: "core", Path: repo.Path}
+	runner := &countingRunner{Runner: execx.NewRunner()}
+	idx := NewIndexer(gitrepo.New(source, runner), s)
+
+	if _, err := idx.Index(ctx, source, Request{Since: now.Add(-30 * 24 * time.Hour), Installed: []domain.PackageID{"owner/tap/private"}}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.shows != 0 {
+		t.Fatalf("custom-tap fallback inspected %d core repository blobs", runner.shows)
+	}
+}
+
+func TestIndexerSkipsPackagesFromAnotherRepositoryType(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := testutil.NewGitRepo(t)
+	repo.Commit("Formula/foo.rb", formula("1"), "add", now.Add(-40*24*time.Hour))
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.SetInstalled(ctx, []domain.InstalledPackage{{PackageID: "cask-only", Name: "cask-only", Type: domain.PackageCask}}); err != nil {
+		t.Fatal(err)
+	}
+	source := gitrepo.Source{Name: "core", Kind: string(domain.PackageFormula), Path: repo.Path}
+	runner := &countingRunner{Runner: execx.NewRunner()}
+	idx := NewIndexer(gitrepo.New(source, runner), s)
+
+	if _, err := idx.Index(ctx, source, Request{Since: now.Add(-30 * 24 * time.Hour), Installed: []domain.PackageID{"cask-only"}}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.shows != 0 {
+		t.Fatalf("cask fallback inspected %d core repository blobs", runner.shows)
 	}
 }
 

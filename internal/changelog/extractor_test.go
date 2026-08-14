@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 func TestExtractorRetainsStructureRemovesBoilerplateAndFindsLinks(t *testing.T) {
@@ -38,6 +40,17 @@ func TestExtractorRetainsStructureRemovesBoilerplateAndFindsLinks(t *testing.T) 
 	}
 	if len(first.Links) == 0 || first.Links[0].URL.String() != "https://example.test/releases/2.3.0" {
 		t.Fatalf("links=%#v", first.Links)
+	}
+}
+
+func TestRenderPlainHandlesListItemsOutsideAList(t *testing.T) {
+	doc, err := html.Parse(strings.NewReader("<article><li>Loose item</li></article>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := renderPlain(doc), "- Loose item"; got != want {
+		t.Errorf("renderPlain() = %q, want %q", got, want)
 	}
 }
 

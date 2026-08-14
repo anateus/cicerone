@@ -174,7 +174,7 @@ func (m *Model) keepSelectionVisible() {
 	if line < top {
 		top = line
 	}
-	rowBottom := line + feedRowHeight(m.feedViewport.Width()) - 1
+	rowBottom := line + m.feedGroupHeight(m.groups[m.selected], m.feedViewport.Width()) - 1
 	if rowBottom >= top+height {
 		top = rowBottom - height + 1
 	}
@@ -183,17 +183,17 @@ func (m *Model) keepSelectionVisible() {
 }
 
 func (m Model) selectedFeedLine() int {
-	line := m.selected * feedRowHeight(m.feedViewport.Width())
-	for index := 0; index < m.selected && index < len(m.groups); index++ {
-		group := m.groups[index]
-		if m.expanded[group.ID] && len(group.Events) > 1 {
-			line += len(group.Events) - 1
+	line := 0
+	for index, group := range m.groups {
+		if m.hasSeenSeparator() && index == m.seenBoundary() {
+			line++
 		}
+		if index == m.selected {
+			return line
+		}
+		line += m.feedGroupHeight(group, m.feedViewport.Width())
 	}
-	if boundary := m.seenBoundary(); m.hasSeenSeparator() && boundary <= m.selected {
-		line++
-	}
-	return line
+	return 0
 }
 
 func feedRowHeight(width int) int {
@@ -284,8 +284,12 @@ func (m Model) footerHints(width int, status string) []footerHint {
 			{"[", "readme", 2}, {"]", "changelog", 2}, {"q", "quit", 1},
 		}
 	default:
-		hints = []footerHint{{"/", "search", 0}, {"↑↓", "move", 0}, {"enter", "details", 1}, {"space", "expand", 3}}
-		if m.deps.Actions != nil && len(m.groups) > 0 {
+		hints = []footerHint{{"/", "search", 0}}
+		if m.deps.Refresh != nil {
+			hints = append(hints, footerHint{"r", "refresh", 1})
+		}
+		hints = append(hints, footerHint{"↑↓", "move", 0}, footerHint{"enter", "details", 1}, footerHint{"space", "expand", 3})
+		if m.deps.Actions != nil && m.hasSelection() {
 			label := "install"
 			if m.selectedEvent().Installed {
 				label = "upgrade"
@@ -504,7 +508,7 @@ func (m Model) tabStrip(labels []string, active, width int, background color.Col
 func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []string {
 	cadence := m.updateCadenceLabel(e)
 	transition := eventKindBadge(e.Kind) + m.versionTransition(e)
-	nameWidth := ansi.StringWidth(e.Name)
+	nameWidth := ansi.StringWidth(packageNameWithStatus(e))
 	cadenceWidth := ansi.StringWidth(cadence)
 	versionWidth := ansi.StringWidth(transition)
 	overflow := ansi.StringWidth(marker) + nameWidth + 1 + cadenceWidth + 1 + versionWidth - width
@@ -512,7 +516,7 @@ func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []s
 	if overflow <= 0 {
 		right := cadence + " " + transition
 		paddedNameWidth := max(1, width-ansi.StringWidth(marker)-ansi.StringWidth(right)-2)
-		versionLine = fit(marker+fit(e.Name, paddedNameWidth)+" "+right, width)
+		versionLine = fit(marker+fitPackageName(e, paddedNameWidth)+" "+right, width)
 	} else {
 		shrinkOptional := func(segmentWidth *int) {
 			if overflow <= 0 || *segmentWidth <= 0 {
@@ -529,7 +533,7 @@ func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []s
 		shrinkOptional(&versionWidth)
 		nameWidth = max(0, nameWidth-overflow)
 
-		versionLine = marker + ansi.Truncate(e.Name, nameWidth, "")
+		versionLine = marker + truncatePackageName(e, nameWidth)
 		if cadenceWidth > 0 {
 			versionLine += " " + ansi.Truncate(cadence, cadenceWidth, "")
 		}
@@ -550,6 +554,45 @@ func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []s
 		}
 	}
 	return []string{versionLine}
+}
+
+func packageNameWithStatus(event domain.UpdateEvent) string {
+	return stylePackageName(event, event.Name+packageStatusSuffix(event.Status))
+}
+
+func fitPackageName(event domain.UpdateEvent, width int) string {
+	return fit(truncatePackageName(event, width), width)
+}
+
+func truncatePackageName(event domain.UpdateEvent, width int) string {
+	suffix := packageStatusSuffix(event.Status)
+	if suffix == "" {
+		return ansi.Truncate(event.Name, width, "")
+	}
+	if width <= ansi.StringWidth(suffix) {
+		return stylePackageName(event, ansi.Truncate(strings.TrimSpace(suffix), width, ""))
+	}
+	return stylePackageName(event, ansi.Truncate(event.Name, width-ansi.StringWidth(suffix), "")+suffix)
+}
+
+func packageStatusSuffix(status domain.PackageStatus) string {
+	switch status {
+	case domain.PackageStatusStarred:
+		return " ★"
+	case domain.PackageStatusSnoozed:
+		return " 💤"
+	default:
+		return ""
+	}
+}
+
+func stylePackageName(event domain.UpdateEvent, name string) string {
+	switch event.Status {
+	case domain.PackageStatusSnoozed:
+		return lipgloss.NewStyle().Faint(true).Render(name)
+	default:
+		return name
+	}
 }
 
 func (m Model) updateCadenceLabel(event domain.UpdateEvent) string {

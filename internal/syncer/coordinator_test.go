@@ -42,6 +42,7 @@ type fakeDestination struct {
 	installed           bool
 	starts, finishes    []string
 	startErr, finishErr error
+	finishContextErr    error
 }
 
 func (f *fakeDestination) SetInstalled(context.Context, []domain.InstalledPackage) error {
@@ -56,10 +57,11 @@ func (f *fakeDestination) SyncStarted(_ context.Context, source string, _ time.T
 	f.starts = append(f.starts, source)
 	return f.startErr
 }
-func (f *fakeDestination) SyncFinished(_ context.Context, source string, _ time.Time, _ Result, _ error) error {
+func (f *fakeDestination) SyncFinished(ctx context.Context, source string, _ time.Time, _ Result, _ error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finishes = append(f.finishes, source)
+	f.finishContextErr = ctx.Err()
 	return f.finishErr
 }
 
@@ -274,6 +276,97 @@ func TestStartLoadsCacheBeforeExternalRefreshAndInstalledBeforeIndex(t *testing.
 	c.Close()
 }
 
+func TestStartupIndexesRecentHistoryBeforeInstalledFallback(t *testing.T) {
+	installedCalled := make(chan struct{})
+	requests := make(chan Request, 2)
+	destination := &fakeDestination{}
+	job := fakeJob{name: "core", destination: destination, index: func(_ context.Context, req Request) (Result, error) {
+		requests <- req
+		return Result{}, nil
+	}}
+	c := New(Dependencies{
+		Installed: fakeInstalled{called: installedCalled, packages: []domain.InstalledPackage{{PackageID: "foo", Type: domain.PackageFormula}}},
+		Store:     destination, Sources: []Source{job}, InitialSince: time.Now().Add(-30 * 24 * time.Hour),
+	})
+	c.Start(context.Background())
+	defer c.Close()
+
+	var recent, fallback Request
+	select {
+	case recent = <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for recent index")
+	}
+	select {
+	case fallback = <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for installed fallback index")
+	}
+	if len(recent.Installed) != 0 {
+		t.Fatalf("recent index installed targets=%v, want none", recent.Installed)
+	}
+	if !slices.Equal(fallback.Installed, []domain.PackageID{"foo"}) {
+		t.Fatalf("fallback installed targets=%v, want foo", fallback.Installed)
+	}
+}
+
+func TestWaitInitialReturnsWhileHistoricalFallbackContinues(t *testing.T) {
+	installedCalled := make(chan struct{})
+	fallbackStarted, releaseFallback := make(chan struct{}), make(chan struct{})
+	destination := &fakeDestination{}
+	job := fakeJob{name: "homebrew-core", destination: destination, index: func(ctx context.Context, req Request) (Result, error) {
+		if !req.HistoricalFallback {
+			return Result{Cursor: "current"}, nil
+		}
+		close(fallbackStarted)
+		select {
+		case <-releaseFallback:
+			return Result{}, nil
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
+		}
+	}}
+	c := New(Dependencies{
+		Installed: fakeInstalled{called: installedCalled, packages: []domain.InstalledPackage{{PackageID: "foo", Type: domain.PackageFormula}}},
+		Store:     destination, Sources: []Source{job},
+	})
+	c.Start(context.Background())
+	waitClosed(t, fallbackStarted, "historical fallback")
+
+	initialDone := make(chan struct{})
+	go func() { c.WaitInitial(); close(initialDone) }()
+	waitClosed(t, initialDone, "initial synchronization")
+
+	close(releaseFallback)
+	c.Close()
+}
+
+func TestWaitInitialReturnsAfterFirstDurableRecentBatch(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	batchPublished, releaseIndex := make(chan struct{}), make(chan struct{})
+	job := fakeJob{name: "core", destination: destination, index: func(ctx context.Context, req Request) (Result, error) {
+		req.Progress(Progress{Commits: 10, Events: 3, Batches: 1})
+		close(batchPublished)
+		select {
+		case <-releaseIndex:
+			return Result{Events: 3, Cursor: "current"}, nil
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
+		}
+	}}
+	c := New(Dependencies{Store: destination, Sources: []Source{job}})
+	c.Start(context.Background())
+	defer func() {
+		close(releaseIndex)
+		c.Close()
+	}()
+	waitClosed(t, batchPublished, "first durable recent batch")
+
+	initialDone := make(chan struct{})
+	go func() { c.WaitInitial(); close(initialDone) }()
+	waitClosed(t, initialDone, "initial synchronization after first batch")
+}
+
 func TestRefreshFetchesBeforeIndexingRepository(t *testing.T) {
 	destination := &fakeDestination{installed: true}
 	var sequence []string
@@ -316,6 +409,61 @@ func TestRefreshFetchesBeforeIndexingRepository(t *testing.T) {
 	}
 	if committed.Events != 2 || committed.Cursor != "fresh-head" {
 		t.Fatalf("committed result = %#v, want 2 events at fresh-head", committed)
+	}
+}
+
+func TestRefreshPreemptsActiveCatchupAndPublishesANewInitialBatch(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	firstStarted := make(chan struct{})
+	firstCanceled := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var calls atomic.Int32
+	var messagesMu sync.Mutex
+	var messages []tea.Msg
+	job := fakeJob{
+		name:        "core",
+		destination: destination,
+		index: func(ctx context.Context, req Request) (Result, error) {
+			switch calls.Add(1) {
+			case 1:
+				close(firstStarted)
+				req.Progress(Progress{Commits: 10, Events: 1, Batches: 1})
+				<-ctx.Done()
+				close(firstCanceled)
+				return Result{}, ctx.Err()
+			case 2:
+				close(secondStarted)
+				req.Progress(Progress{Commits: 10, Events: 2, Batches: 1})
+				return Result{Events: 2, Cursor: "new-head"}, nil
+			default:
+				return Result{}, fmt.Errorf("unexpected index call %d", calls.Load())
+			}
+		},
+	}
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) {
+		messagesMu.Lock()
+		messages = append(messages, msg)
+		messagesMu.Unlock()
+	}})
+	c.Start(context.Background())
+	waitClosed(t, firstStarted, "initial catch-up")
+	c.WaitInitial()
+
+	c.Refresh(context.Background())
+	waitClosed(t, firstCanceled, "preempted catch-up")
+	waitClosed(t, secondStarted, "forced refresh")
+	c.WaitInitial()
+	c.Wait()
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("index calls = %d, want initial catch-up and forced refresh", got)
+	}
+	messagesMu.Lock()
+	defer messagesMu.Unlock()
+	for _, msg := range messages {
+		if failed, ok := msg.(SyncFailed); ok && failed.Err.Error() == context.Canceled.Error() {
+			t.Fatal("preempted catch-up was reported as a user-visible failure")
+		}
 	}
 }
 
@@ -473,6 +621,29 @@ func TestCancellationStopsAllWorkers(t *testing.T) {
 	c.Close()
 	<-stopped
 	<-stopped
+}
+
+func TestCancellationRecordsFinishedRunWithLiveCleanupContext(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	started := make(chan struct{})
+	job := fakeJob{name: "core", destination: destination, index: func(ctx context.Context, _ Request) (Result, error) {
+		close(started)
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	}}
+	c := New(Dependencies{Store: destination, Sources: []Source{job}})
+	c.Start(context.Background())
+	<-started
+	c.Close()
+
+	destination.mu.Lock()
+	defer destination.mu.Unlock()
+	if !slices.Equal(destination.finishes, []string{"core"}) {
+		t.Fatalf("finished runs=%v, want canceled core run", destination.finishes)
+	}
+	if destination.finishContextErr != nil {
+		t.Fatalf("cleanup context error=%v, want live persistence context", destination.finishContextErr)
+	}
 }
 
 func TestEnsureRangeIndexesOnlyEarlierRangeAndRetrySelectsSource(t *testing.T) {

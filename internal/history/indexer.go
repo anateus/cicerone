@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -26,6 +27,7 @@ const (
 	historyInitialBatchCommits = 10
 	historyBatchCommits        = 100
 	historyProgressCommits     = 10
+	historyCancelFlushWindow   = 500 * time.Millisecond
 )
 
 type Result struct {
@@ -86,8 +88,20 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 		rangeKeys = append(rangeKeys, historyScanKey("backward", req.Since, state.Since, req, false))
 	}
 	seen := map[string]bool{}
-	missing := map[string]bool{}
+	missing := map[string]store.HistoryCoverage{}
 	for _, installedID := range req.Installed {
+		if strings.Contains(string(installedID), "/") {
+			continue
+		}
+		if source.Kind != "" {
+			packageType, found, e := i.store.HistoryPackageType(ctx, installedID)
+			if e != nil {
+				return Result{}, e
+			}
+			if found && string(packageType) != source.Kind {
+				continue
+			}
+		}
 		packageID, e := i.store.ResolveHistoryPackageID(ctx, source.Name, installedID)
 		if e != nil {
 			return Result{}, e
@@ -101,7 +115,13 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				return Result{}, e
 			}
 			if !has {
-				missing[string(packageID)+"\x00"+string(kind)] = true
+				covered, e := i.store.HasHistoryFallbackCoverage(ctx, source.Name, packageID, kind)
+				if e != nil {
+					return Result{}, e
+				}
+				if !covered {
+					missing[string(packageID)+"\x00"+string(kind)] = store.HistoryCoverage{PackageID: packageID, Kind: kind}
+				}
 			}
 		}
 	}
@@ -121,11 +141,11 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	encountered := map[string]bool{}
 	batchCommits := 0
 	batchLimit := historyInitialBatchCommits
-	flush := func(scanKey string) error {
+	flush := func(flushCtx context.Context, scanKey string) error {
 		if batchCommits == 0 {
 			return nil
 		}
-		if err := i.store.ApplyHistoryBatch(ctx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, Processed: processed}); err != nil {
+		if err := i.store.ApplyHistoryBatch(flushCtx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, Processed: processed}); err != nil {
 			return err
 		}
 		progress.Batches++
@@ -158,7 +178,6 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			}
 		}
 		if len(checkpointRows) > 0 {
-			batchLimit = historyBatchCommits
 			if req.Progress != nil {
 				req.Progress(progress)
 			}
@@ -226,8 +245,10 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 					continue
 				}
 				key := string(pkgID) + "\x00" + string(classification.Kind)
-				if rangeIndex == fallbackIndex && !missing[key] {
-					continue
+				if rangeIndex == fallbackIndex {
+					if _, wanted := missing[key]; !wanted {
+						continue
+					}
 				}
 				diagnostic := strings.Join(append(append(bd, ad...), classification.Diagnostic), "; ")
 				event := domain.UpdateEvent{ID: domain.NewEventID(source.Name, commit.Hash, pkgID, classification.Kind), PackageID: pkgID, Name: identity.Name, Type: identity.Type, Kind: classification.Kind, Repository: source.Name, DefinitionPath: change.Path, Commit: commit.Hash, Time: commit.AuthorTime, Diagnostic: diagnostic}
@@ -245,7 +266,7 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			}
 			processed = append(processed, store.HistoryProgress{Commit: commit.Hash, Events: progress.Events - eventsBefore, Diagnostics: progress.Diagnostics - diagnosticsBefore})
 			if batchCommits == batchLimit {
-				return flush(scanKey)
+				return flush(ctx, scanKey)
 			}
 			if batchCommits%historyProgressCommits == 0 && req.Progress != nil {
 				req.Progress(progress)
@@ -253,9 +274,17 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			return nil
 		})
 		if e != nil {
+			if batchCommits > 0 && ctx.Err() != nil {
+				flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), historyCancelFlushWindow)
+				flushErr := flush(flushCtx, scanKey)
+				cancelFlush()
+				if flushErr != nil {
+					return Result{}, errors.Join(e, flushErr)
+				}
+			}
 			return Result{}, e
 		}
-		if err := flush(scanKey); err != nil {
+		if err := flush(ctx, scanKey); err != nil {
 			return Result{}, err
 		}
 		if fallbackIndex > 0 && rangeIndex == fallbackIndex-1 {
@@ -280,7 +309,14 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			remove = append(remove, commit)
 		}
 	}
-	if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, RemoveCommits: remove}); err != nil {
+	var exhausted []store.HistoryCoverage
+	if fallbackIndex >= 0 {
+		exhausted = make([]store.HistoryCoverage, 0, len(missing))
+		for _, coverage := range missing {
+			exhausted = append(exhausted, coverage)
+		}
+	}
+	if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, RemoveCommits: remove, Exhausted: exhausted}); err != nil {
 		return Result{}, err
 	}
 	return Result{Events: progress.Events, Diagnostics: progress.Diagnostics, Head: head, Since: since}, nil

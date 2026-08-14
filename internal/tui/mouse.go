@@ -124,11 +124,11 @@ func (m Model) feedGroupAtLine(line int) int {
 			}
 			cursor++
 		}
-		rows := feedRowHeight(m.feedViewport.Width())
-		if m.expanded[group.ID] {
-			rows += len(group.Events) - 1
-		}
+		rows := m.feedGroupHeight(group, m.feedViewport.Width())
 		if line >= cursor && line < cursor+rows {
+			if m.snoozedGroupCollapsed(group) {
+				return -1
+			}
 			return index
 		}
 		cursor += rows

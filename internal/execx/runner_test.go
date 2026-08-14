@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +27,19 @@ func TestRunCancellation(t *testing.T) {
 	_, err := execx.NewRunner().Run(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "block")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunCancellationDoesNotWaitForInheritedPipes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := execx.NewRunner().Run(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "spawn-pipe-holder")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Run() cancellation took %v while a descendant held its pipes", elapsed)
 	}
 }
 
@@ -143,6 +157,15 @@ func TestHelperProcess(t *testing.T) {
 	case "ready-block":
 		fmt.Fprintln(os.Stdout, "ready")
 		time.Sleep(time.Hour)
+	case "spawn-pipe-holder":
+		child := exec.Command(os.Args[0], "-test.run=TestHelperProcess", "--", "short-block")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(4)
+		}
+		time.Sleep(time.Hour)
+	case "short-block":
+		time.Sleep(2 * time.Second)
 	case "output":
 		fmt.Fprint(os.Stdout, "stream-output")
 		os.Exit(0)

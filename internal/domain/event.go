@@ -60,6 +60,7 @@ type UpdateEvent struct {
 	PackageID      PackageID
 	Name           string
 	Type           PackageType
+	Status         PackageStatus
 	Kind           EventKind
 	OldVersion     string
 	NewVersion     string

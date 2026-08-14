@@ -58,6 +58,17 @@ func (s *Store) SetInstalled(ctx context.Context, packages []domain.InstalledPac
 	})
 }
 
+// SetPackageStatus persists the user-assigned status for a package.
+func (s *Store) SetPackageStatus(ctx context.Context, packageID domain.PackageID, status domain.PackageStatus) error {
+	if status == "" {
+		status = domain.PackageStatusDefault
+	}
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE packages SET status=? WHERE id=?`, status, packageID)
+		return err
+	})
+}
+
 // QueryFeed selects relevant event rows in SQL and applies domain grouping rules.
 func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
 	where := []string{"1=1"}
@@ -127,7 +138,7 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		}
 		where = append(where, `(`+strings.Join(matches, ` OR `)+`)`)
 	}
-	query := `SELECT e.id, e.package_id, p.name, p.type, e.kind,
+	query := `SELECT e.id, e.package_id, p.name, p.type, p.status, e.kind,
 		e.old_version, e.new_version, e.old_revision, e.new_revision,
 		e.repository, e.definition_path, e.commit_hash, e.event_time, e.diagnostic, e.seen,
 		i.package_id IS NOT NULL,
@@ -155,7 +166,7 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		var versionCount int
 		var firstUpdate, lastUpdate int64
 		var isInstalled bool
-		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.Kind,
+		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.Status, &event.Kind,
 			&event.OldVersion, &event.NewVersion, &event.OldRevision, &event.NewRevision,
 			&event.Repository, &event.DefinitionPath, &event.Commit, &timestamp, &event.Diagnostic, &event.Seen, &isInstalled,
 			&versionCount, &firstUpdate, &lastUpdate); err != nil {

@@ -81,7 +81,9 @@ func renderPlain(root *html.Node) string {
 			b.WriteByte(' ')
 		case "li":
 			blockBreak(&b)
-			b.WriteString(strings.Repeat("  ", listDepth))
+			if listDepth > 0 {
+				b.WriteString(strings.Repeat("  ", listDepth))
+			}
 			b.WriteString("- ")
 		case "p", "div", "article", "section", "blockquote", "pre":
 			blockBreak(&b)

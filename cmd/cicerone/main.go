@@ -258,7 +258,7 @@ func run() (runErr error) {
 	}()
 	dependencies := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg {
 		runtime.coordinator.Start(runtime.ctx)
-		runtime.coordinator.Wait()
+		runtime.coordinator.WaitInitial()
 		return tui.InitialRefreshDone{}
 	}, runtime.brew,
 		func(msg tea.Msg) {
@@ -266,6 +266,11 @@ func run() (runErr error) {
 				program.Send(msg)
 			}
 		})
+	dependencies.Refresh = func() tea.Msg {
+		runtime.coordinator.Refresh(runtime.ctx)
+		runtime.coordinator.WaitInitial()
+		return tui.RefreshDone{}
+	}
 	dependencies.PackageInfo = runtime.details
 	dependencies.README = runtime.details
 	dependencies.Tags = runtime.details
@@ -420,7 +425,7 @@ const helpText = `Cicerone — a cached Homebrew update feed
 
 Usage: cicerone [--help] [--plain]
 
-Keys: h/j/k/l or arrows navigate · / searches · enter opens details · space expands · a installs/upgrades · q/esc quit
+Keys: h/j/k/l or arrows navigate · / searches · r refreshes · enter opens details · space expands · a installs/upgrades · alt-s sets package status · alt-shift-s toggles snoozed packages · q/esc quit
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
 The interactive feed appears after the first refreshed history batch; cached data remains available if refresh fails.

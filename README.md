@@ -42,6 +42,9 @@ reconciled when that scan resumes.
 | `k`, `↑` | Move up; scroll up while reading package details |
 | `1`, `2`, `3` | Show Formulae, Casks, or both |
 | `/` | Enter package search; typing filters after a short debounce |
+| `r` | Force a newest-first repository refresh; active catch-up resumes from its durable checkpoint |
+| `alt-s` | Cycle the selected package through normal, starred, and snoozed |
+| `alt-shift-s` | Show or collapse snoozed package rows; they start collapsed |
 | `tab` while searching | Broaden search through names, descriptions, changelogs, and READMEs |
 | `enter`, `esc` while searching | Apply and leave search, or leave search input |
 | `h`, `←` / `l`, `→` | Switch toward package details; scroll horizontally while reading |
@@ -62,7 +65,7 @@ The default feed contains version events from the last 30 days. An installed pac
 
 Search starts with package names. `tab` cycles through cumulative scopes: names; names and cached descriptions; those plus cached changelogs; then those plus cached READMEs. Unquoted terms are prefix searches, so `rip gre` matches tokens beginning with `rip` and `gre`. Surround the whole query with quotes for a non-prefix phrase search, such as `"rip grep"`. Document and description results are limited to content already present in Cicerone's durable cache.
 
-Cicerone queries the durable feed immediately on startup while repository synchronization runs in the background. Each durable history batch refreshes the feed while preserving the selected stable event and its viewport-relative row. The header shows active synchronization and retains the latest failed-attempt status; failures continue to fall back to cached rows. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
+Cicerone queries the durable feed immediately on startup while repository synchronization runs in the background. Each durable history batch refreshes the feed while preserving the selected stable event and its viewport-relative row. After fetching, each repository publishes its newest 10-commit slice and releases the startup loading marker before continuing the remaining recent catch-up. Pressing `r` preempts that catch-up, fetches both repositories immediately, publishes the same quick newest-first slice, and then resumes from durable checkpoints. Older installed-package history starts only after that catch-up and continues as resumable, low-priority enrichment. Exhaustive searches remember packages and event kinds that have no older match, and custom-tap or wrong-repository packages are excluded. The header shows active synchronization and retains the latest failed-attempt status; failures continue to fall back to cached rows. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
 When selection settles for 250 ms, Cicerone loads and refreshes package information, README, repository tags, and changelog content independently. Each inspector field shows its own loading or refreshing indicator, while cached content remains usable. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host, and the fixed status line reports active and queued detail jobs. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
 

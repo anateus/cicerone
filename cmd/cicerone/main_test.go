@@ -17,10 +17,12 @@ import (
 	"cicerone/internal/app"
 	"cicerone/internal/changelog"
 	"cicerone/internal/domain"
+	"cicerone/internal/download"
 	"cicerone/internal/execx"
 	"cicerone/internal/gitrepo"
 	"cicerone/internal/homebrew"
 	"cicerone/internal/store"
+	"cicerone/internal/syncer"
 	"cicerone/internal/testutil"
 )
 
@@ -75,6 +77,63 @@ func TestRuntimeServicesWiresTUIDependenciesAndClosesIdempotently(t *testing.T) 
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("second Close() = %v, want nil", err)
+	}
+}
+
+type shutdownTestSource struct {
+	started, canceled chan struct{}
+	release           <-chan struct{}
+}
+
+func (s shutdownTestSource) Name() string                  { return "core" }
+func (s shutdownTestSource) Refresh(context.Context) error { return nil }
+func (s shutdownTestSource) Index(ctx context.Context, _ syncer.Request) (syncer.Result, error) {
+	close(s.started)
+	<-ctx.Done()
+	close(s.canceled)
+	<-s.release
+	return syncer.Result{}, ctx.Err()
+}
+
+func TestRuntimeCloseCancelsAllSubsystemsBeforeWaiting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceStarted, sourceCanceled, releaseSource := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	downloadStarted, downloadCanceled, releaseDownload := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	coordinator := syncer.New(syncer.Dependencies{Sources: []syncer.Source{shutdownTestSource{
+		started: sourceStarted, canceled: sourceCanceled, release: releaseSource,
+	}}})
+	downloads := download.NewQueue(download.Options{Context: ctx, Workers: 1, HostInterval: -1})
+	if _, err := downloads.Enqueue(download.Request{URL: "https://example.test/document", Fetch: func(fetchCtx context.Context) (any, error) {
+		close(downloadStarted)
+		<-fetchCtx.Done()
+		close(downloadCanceled)
+		<-releaseDownload
+		return nil, fetchCtx.Err()
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.Start(ctx)
+	<-sourceStarted
+	<-downloadStarted
+	runtime := &runtimeServices{ctx: ctx, store: destination, coordinator: coordinator, downloads: downloads, cancel: cancel}
+
+	closed := make(chan struct{})
+	go func() { _ = runtime.Close(); close(closed) }()
+	<-sourceCanceled
+	select {
+	case <-downloadCanceled:
+		close(releaseSource)
+		close(releaseDownload)
+		<-closed
+	case <-time.After(100 * time.Millisecond):
+		close(releaseSource)
+		close(releaseDownload)
+		<-closed
+		t.Fatal("download cancellation waited for repository shutdown")
 	}
 }
 
@@ -298,7 +357,7 @@ func TestHelpDocumentsKeysAndCacheBehavior(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("execute --help = %d, stderr %q", code, stderr.String())
 	}
-	for _, text := range []string{"h/j/k/l", "arrows", "q/esc", "30 days", "Library/Application Support/cicerone/cicerone.db", "cached"} {
+	for _, text := range []string{"h/j/k/l", "arrows", "r refreshes", "alt-shift-s", "q/esc", "30 days", "Library/Application Support/cicerone/cicerone.db", "cached"} {
 		if !strings.Contains(stdout.String(), text) {
 			t.Errorf("help missing %q:\n%s", text, stdout.String())
 		}

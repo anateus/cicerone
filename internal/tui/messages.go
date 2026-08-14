@@ -20,6 +20,7 @@ type FreshnessLoaded struct {
 
 type DatasetChanged struct{ Stale bool }
 type InitialRefreshDone struct{}
+type RefreshDone struct{}
 type WindowSize struct{ Width, Height int }
 type SyncProgress struct {
 	Source                                string
@@ -96,6 +97,12 @@ type Notify struct {
 type PreferencesLoaded struct {
 	Filter domain.FeedFilter
 	Err    error
+}
+
+type PackageStatusSaved struct {
+	PackageID domain.PackageID
+	Status    domain.PackageStatus
+	Err       error
 }
 type preferencesSaved struct{ Err error }
 type eventsSeen struct{ Err error }

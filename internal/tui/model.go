@@ -32,6 +32,10 @@ type SeenRecorder interface {
 	MarkEventsSeen(context.Context, []domain.EventID) error
 }
 
+type PackageStatusSource interface {
+	SetPackageStatus(context.Context, domain.PackageID, domain.PackageStatus) error
+}
+
 type FreshnessSource interface {
 	LatestFreshness(context.Context) (store.FreshnessStatus, error)
 }
@@ -84,6 +88,7 @@ type Dependencies struct {
 	Tags        CachedRepositoryTagsSource
 	Context     context.Context
 	OnReady     tea.Cmd
+	Refresh     tea.Cmd
 	Actions     ActionRunner
 	Installed   InstalledRefresher
 	Send        func(tea.Msg)
@@ -102,6 +107,7 @@ type Model struct {
 	width, height                                                     int
 	groups                                                            []domain.FeedGroup
 	selected                                                          int
+	showSnoozed                                                       bool
 	viewportOffset                                                    int
 	focus                                                             pane
 	expanded                                                          map[domain.EventID]bool
@@ -143,6 +149,7 @@ type Model struct {
 	refreshAnchors                                                    map[uint64]domain.Anchor
 	detailCancel                                                      context.CancelFunc
 	initialRefreshRunning                                             bool
+	manualRefreshRunning                                              bool
 	pendingAction                                                     *homebrew.Action
 	actionResult                                                      *homebrew.Action
 	actionRunning                                                     bool
@@ -264,6 +271,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.freshnessRequestID++
 		m.refreshAnchors[m.feedRequestID] = m.anchor()
 		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
+	case RefreshDone:
+		m.manualRefreshRunning = false
+		m.stale, m.loading = true, true
+		m.feedRequestID++
+		m.freshnessRequestID++
+		m.refreshAnchors[m.feedRequestID] = m.anchor()
+		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
 	case FreshnessLoaded:
 		if msg.RequestID != m.freshnessRequestID {
 			return m, nil
@@ -283,6 +297,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.activeSync, msg.Source)
 		m.freshnessRequestID++
 		return m, m.loadFreshness(m.freshnessRequestID)
+	case PackageStatusSaved:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.notification = "Error: save package status: " + msg.Err.Error()
+			return m, nil
+		}
+		for groupIndex := range m.groups {
+			for eventIndex := range m.groups[groupIndex].Events {
+				if m.groups[groupIndex].Events[eventIndex].PackageID == msg.PackageID {
+					m.groups[groupIndex].Events[eventIndex].Status = msg.Status
+				}
+			}
+		}
+		previousSelection := m.selected
+		m.clampSelection()
+		m.syncViewports()
+		if m.selected != previousSelection {
+			return m.selectionChanged()
+		}
 	case PreferencesLoaded:
 		if msg.Err == nil {
 			msg.Filter.Now = m.filter.Now
@@ -328,12 +361,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filter.RollUp = !m.filter.RollUp
 		return m.filterChanged()
 	case ToggleExpanded:
-		if len(m.groups) > 0 {
+		if m.hasSelection() {
 			m.expanded[m.groups[m.selected].ID] = !m.expanded[m.groups[m.selected].ID]
 			m.syncViewports()
 		}
 	case ChangelogDebounced:
-		if msg.SelectionID != m.selectionID || len(m.groups) == 0 {
+		if msg.SelectionID != m.selectionID || !m.hasSelection() {
 			return m, nil
 		}
 		if m.detailCancel != nil {
@@ -540,6 +573,12 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.searching {
 		return m.handleSearchKey(key)
 	}
+	if key.Key().Code == 's' && key.Key().Mod == tea.ModAlt|tea.ModShift {
+		return m.toggleSnoozedVisibility()
+	}
+	if key.Key().Code == 's' && key.Key().Mod == tea.ModAlt {
+		return m.cycleSelectedPackageStatus()
+	}
 	if key.String() == "q" {
 		return m, tea.Quit
 	}
@@ -604,6 +643,13 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch key.String() {
+	case "r":
+		if m.deps.Refresh == nil || m.initialRefreshRunning || m.manualRefreshRunning {
+			return m, nil
+		}
+		m.manualRefreshRunning = true
+		m.notification = "Refreshing latest updates…"
+		return m, m.deps.Refresh
 	case "t":
 		m.repositoryTagsExpanded = !m.repositoryTagsExpanded
 		m.syncViewports()
@@ -622,25 +668,9 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "j", "down":
-		if m.selected+1 < len(m.groups) {
-			m.selected++
-			m.selectionID++
-			m.resetDetails()
-			m.keepSelectionVisible()
-			commands := []tea.Cmd{m.debounceChangelog()}
-			commands = append(commands, m.loadVisiblePackageDescriptions()...)
-			return m, tea.Batch(commands...)
-		}
+		return m.moveSelection(1)
 	case "k", "up":
-		if m.selected > 0 {
-			m.selected--
-			m.selectionID++
-			m.resetDetails()
-			m.keepSelectionVisible()
-			commands := []tea.Cmd{m.debounceChangelog()}
-			commands = append(commands, m.loadVisiblePackageDescriptions()...)
-			return m, tea.Batch(commands...)
-		}
+		return m.moveSelection(-1)
 	case "h", "left":
 		if m.width >= 100 {
 			m.focus = feedPane
@@ -650,7 +680,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "l", "right":
 		if m.width >= 100 {
 			m.focus = inspectorPane
-		} else if len(m.groups) > 0 {
+		} else if m.hasSelection() {
 			m.detailOpen = true
 		}
 	case "tab":
@@ -662,7 +692,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "enter":
-		if m.width < 100 && len(m.groups) > 0 {
+		if m.width < 100 && m.hasSelection() {
 			m.detailOpen = true
 		}
 		if m.width >= 100 {
@@ -671,7 +701,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.syncViewports()
 		}
 	case " ":
-		if len(m.groups) > 0 {
+		if m.hasSelection() {
 			m.expanded[m.groups[m.selected].ID] = !m.expanded[m.groups[m.selected].ID]
 		}
 	case "1":
@@ -764,7 +794,7 @@ func validSearchScope(scope domain.SearchScope) bool {
 }
 
 func (m Model) requestSelectedAction() (tea.Model, tea.Cmd) {
-	if len(m.groups) == 0 {
+	if !m.hasSelection() {
 		return m, nil
 	}
 	e := m.selectedEvent()
@@ -777,18 +807,57 @@ func (m Model) requestSelectedAction() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) selectFeedIndex(index int) (tea.Model, tea.Cmd) {
-	if index < 0 || index >= len(m.groups) || index == m.selected {
+	if !m.selectableFeedIndex(index) || index == m.selected {
 		return m, nil
 	}
 	m.selected = index
+	return m.selectionChanged()
+}
+
+func (m Model) selectionChanged() (tea.Model, tea.Cmd) {
 	m.selectionID++
 	m.resetDetails()
+	if !m.hasSelection() {
+		m.viewportOffset = 0
+		m.feedViewport.SetYOffset(0)
+		m.syncViewports()
+		return m, tea.Batch(m.loadVisiblePackageDescriptions()...)
+	}
 	m.keepSelectionVisible()
 	commands := []tea.Cmd{m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
 		m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
 		m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.debounceChangelog(), m.startDetailSpinner()}
 	commands = append(commands, m.loadVisiblePackageDescriptions()...)
 	return m, tea.Batch(commands...)
+}
+
+func (m Model) moveSelection(direction int) (tea.Model, tea.Cmd) {
+	start := m.selected + direction
+	if m.selected < 0 && direction < 0 {
+		start = len(m.groups) - 1
+	}
+	next := m.nextSelectableFeedIndex(start, direction)
+	if next < 0 {
+		return m, nil
+	}
+	m.selected = next
+	m.selectionID++
+	m.resetDetails()
+	m.keepSelectionVisible()
+	commands := []tea.Cmd{m.debounceChangelog()}
+	commands = append(commands, m.loadVisiblePackageDescriptions()...)
+	return m, tea.Batch(commands...)
+}
+
+func (m Model) toggleSnoozedVisibility() (tea.Model, tea.Cmd) {
+	m.showSnoozed = !m.showSnoozed
+	previousSelection := m.selected
+	m.clampSelection()
+	m.syncViewports()
+	if m.selected != previousSelection {
+		return m.selectionChanged()
+	}
+	return m, tea.Batch(m.loadVisiblePackageDescriptions()...)
 }
 
 func (m *Model) setPackageScope(formulae, casks bool) {
@@ -804,8 +873,23 @@ func (m Model) filterChanged() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.queryFeed(m.feedRequestID), m.savePreferences())
 }
 
+func (m Model) cycleSelectedPackageStatus() (tea.Model, tea.Cmd) {
+	if !m.hasSelection() {
+		return m, nil
+	}
+	source, ok := m.deps.Data.(PackageStatusSource)
+	if !ok {
+		return m, nil
+	}
+	event := m.selectedEvent()
+	status := domain.NextPackageStatus(event.Status)
+	return m, func() tea.Msg {
+		return PackageStatusSaved{PackageID: event.PackageID, Status: status, Err: source.SetPackageStatus(m.deps.Context, event.PackageID, status)}
+	}
+}
+
 func (m Model) anchor() domain.Anchor {
-	if len(m.groups) == 0 {
+	if !m.hasSelection() {
 		return domain.Anchor{FallbackIndex: m.selected, ViewportOffset: m.viewportOffset}
 	}
 	e := m.selectedEvent()
@@ -814,7 +898,7 @@ func (m Model) anchor() domain.Anchor {
 
 func (m *Model) clampSelection() {
 	if len(m.groups) == 0 {
-		m.selected = 0
+		m.selected = -1
 		return
 	}
 	if m.selected < 0 {
@@ -823,9 +907,37 @@ func (m *Model) clampSelection() {
 	if m.selected >= len(m.groups) {
 		m.selected = len(m.groups) - 1
 	}
+	if m.selectableFeedIndex(m.selected) {
+		return
+	}
+	if next := m.nextSelectableFeedIndex(m.selected+1, 1); next >= 0 {
+		m.selected = next
+		return
+	}
+	if next := m.nextSelectableFeedIndex(m.selected-1, -1); next >= 0 {
+		m.selected = next
+		return
+	}
+	m.selected = -1
 }
+
+func (m Model) hasSelection() bool { return m.selectableFeedIndex(m.selected) }
+
+func (m Model) selectableFeedIndex(index int) bool {
+	return index >= 0 && index < len(m.groups) && !m.snoozedGroupCollapsed(m.groups[index])
+}
+
+func (m Model) nextSelectableFeedIndex(start, direction int) int {
+	for index := start; index >= 0 && index < len(m.groups); index += direction {
+		if m.selectableFeedIndex(index) {
+			return index
+		}
+	}
+	return -1
+}
+
 func (m Model) selectedEvent() domain.UpdateEvent {
-	if len(m.groups) == 0 {
+	if !m.hasSelection() {
 		return domain.UpdateEvent{}
 	}
 	return m.groups[m.selected].Events[0]
@@ -1149,10 +1261,7 @@ func (m *Model) loadVisiblePackageDescriptions() []tea.Cmd {
 		if m.hasSeenSeparator() && index == boundary {
 			line++
 		}
-		height := feedRowHeight(m.feedViewport.Width())
-		if m.expanded[group.ID] && len(group.Events) > 1 {
-			height += len(group.Events) - 1
-		}
+		height := m.feedGroupHeight(group, m.feedViewport.Width())
 		if line < bottom && line+height > top {
 			event := group.Events[0]
 			if !m.descriptionRequests[event.PackageID] {

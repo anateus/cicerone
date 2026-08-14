@@ -23,6 +23,21 @@ type fakeData struct {
 	prefs  domain.FeedFilter
 }
 
+type statusRecordingData struct {
+	*fakeData
+	updates []packageStatusUpdate
+}
+
+type packageStatusUpdate struct {
+	PackageID domain.PackageID
+	Status    domain.PackageStatus
+}
+
+func (f *statusRecordingData) SetPackageStatus(_ context.Context, packageID domain.PackageID, status domain.PackageStatus) error {
+	f.updates = append(f.updates, packageStatusUpdate{PackageID: packageID, Status: status})
+	return nil
+}
+
 type recordingData struct {
 	fakeData
 	queried domain.FeedFilter
@@ -146,6 +161,14 @@ func key(s string) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: []rune(s)[0], Text: s})
 }
 
+func altKey(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: code, Mod: tea.ModAlt})
+}
+
+func altShiftKey(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: code, Mod: tea.ModAlt | tea.ModShift})
+}
+
 func update(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	next, _ := m.Update(msg)
@@ -171,6 +194,120 @@ func TestInitialFeedQueryUsesCurrentTimeForHorizon(t *testing.T) {
 	}
 	if !data.queried.Now.Equal(now) {
 		t.Fatalf("feed query time = %v, want %v", data.queried.Now, now)
+	}
+}
+
+func TestAltSCyclesSelectedPackageStatus(t *testing.T) {
+	data := &statusRecordingData{fakeData: &fakeData{groups: groups("a")}}
+	m := NewModel(Dependencies{Data: data})
+	m.showSnoozed = true
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: data.groups})
+
+	for _, want := range []domain.PackageStatus{domain.PackageStatusStarred, domain.PackageStatusSnoozed, domain.PackageStatusDefault} {
+		var message tea.Msg
+		m, message = updateAndRunCommand(t, m, altKey('s'))
+		m = update(t, m, message)
+		if got := m.selectedEvent().Status; got != want {
+			t.Fatalf("package status = %q, want %q", got, want)
+		}
+	}
+	if diff := cmp.Diff([]packageStatusUpdate{
+		{PackageID: "pkg-a", Status: domain.PackageStatusStarred},
+		{PackageID: "pkg-a", Status: domain.PackageStatusSnoozed},
+		{PackageID: "pkg-a", Status: domain.PackageStatusDefault},
+	}, data.updates); diff != "" {
+		t.Fatalf("stored status updates (-want +got):\n%s", diff)
+	}
+}
+
+func TestFeedRowsMarkStarredAndSnoozedPackages(t *testing.T) {
+	m := NewModel(Dependencies{})
+	e := event("status", "package")
+	e.Status = domain.PackageStatusStarred
+	starred := m.feedGroupRows("› ", e, 72)[0]
+	if !strings.Contains(ansi.Strip(starred), "package ★") {
+		t.Fatalf("starred row = %q, want star after package name", starred)
+	}
+
+	e.Status = domain.PackageStatusSnoozed
+	snoozed := m.feedGroupRows("› ", e, 72)[0]
+	if !strings.Contains(ansi.Strip(snoozed), "package 💤") {
+		t.Fatalf("snoozed row = %q, want sleep marker after package name", snoozed)
+	}
+	if !strings.Contains(snoozed, "\x1b[2m") {
+		t.Fatalf("snoozed row = %q, want faint package name", snoozed)
+	}
+}
+
+func TestSnoozedRowsCollapseByDefaultAndAltShiftSTogglesThem(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 72, 20, false
+	m.groups = groups("a", "b", "c")
+	m.groups[1].Events[0].Status = domain.PackageStatusSnoozed
+	m.syncViewports()
+
+	if got, want := m.feedLineCount(72), 5; got != want {
+		t.Fatalf("collapsed feed lines = %d, want %d", got, want)
+	}
+	if rows := ansi.Strip(m.renderFeedRows(72)); strings.Contains(rows, "pkg-b") {
+		t.Fatalf("collapsed feed rendered snoozed package: %q", rows)
+	}
+	collapsed := m.renderFeedGroup(1, m.groups[1], 72)[0]
+	if !strings.Contains(ansi.Strip(collapsed), "┄") {
+		t.Fatalf("collapsed row lacks a subtle rule: %q", collapsed)
+	}
+	if !strings.Contains(collapsed, "48;2;41;47;57") {
+		t.Fatalf("collapsed row does not use the alternate surface: %q", collapsed)
+	}
+	if !strings.Contains(collapsed, "38;2;124;124;124") {
+		t.Fatalf("collapsed row does not use a neutral gray foreground: %q", collapsed)
+	}
+	if got := m.feedGroupAtLine(2); got != -1 {
+		t.Fatalf("collapsed snoozed row selects group %d, want no selection", got)
+	}
+
+	m = update(t, m, key("j"))
+	if got, want := m.selected, 2; got != want {
+		t.Fatalf("selection after moving past collapsed row = %d, want %d", got, want)
+	}
+
+	m = update(t, m, altShiftKey('s'))
+	if got, want := m.feedLineCount(72), 6; got != want {
+		t.Fatalf("expanded feed lines = %d, want %d", got, want)
+	}
+	if rows := ansi.Strip(m.renderFeedRows(72)); !strings.Contains(rows, "pkg-b 💤") {
+		t.Fatalf("expanded feed did not render snoozed package: %q", rows)
+	}
+	if got, want := m.feedGroupAtLine(2), 1; got != want {
+		t.Fatalf("expanded snoozed row selects group %d, want %d", got, want)
+	}
+}
+
+func TestSnoozingTheOnlyPackageClearsSelection(t *testing.T) {
+	data := &statusRecordingData{fakeData: &fakeData{groups: groups("a")}}
+	m := NewModel(Dependencies{Data: data})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: data.groups})
+
+	for range 2 { // default → starred → snoozed
+		var saved tea.Msg
+		m, saved = updateAndRunCommand(t, m, altKey('s'))
+		m = update(t, m, saved)
+	}
+	if m.hasSelection() || m.selected != -1 {
+		t.Fatalf("selection after snoozing only package = %d, want none", m.selected)
+	}
+	if got := m.feedGroupAtLine(0); got != -1 {
+		t.Fatalf("collapsed only row selects group %d, want no selection", got)
+	}
+}
+
+func TestFeedRowsKeepStatusMarkerWhenPackageNameIsTruncated(t *testing.T) {
+	m := NewModel(Dependencies{})
+	e := event("status", "a-very-long-package-name")
+	e.Status = domain.PackageStatusStarred
+	row := ansi.Strip(m.feedGroupRows("› ", e, 24)[0])
+	if !strings.Contains(row, "★") {
+		t.Fatalf("truncated starred row = %q, want status marker", row)
 	}
 }
 
@@ -1717,5 +1854,43 @@ func TestInitialFeedQueryStartsAlongsideRefresh(t *testing.T) {
 	m = next.(Model)
 	if command == nil {
 		t.Fatal("completed initial refresh did not schedule the first feed query")
+	}
+}
+
+func TestRefreshKeyStartsOneQuickRefreshUntilItCompletes(t *testing.T) {
+	refreshes := 0
+	m := NewModel(Dependencies{Refresh: func() tea.Msg {
+		refreshes++
+		return RefreshDone{}
+	}})
+
+	next, command := m.Update(key("r"))
+	m = next.(Model)
+	if command == nil {
+		t.Fatal("refresh key did not start a refresh")
+	}
+	if !m.manualRefreshRunning {
+		t.Fatal("refresh key did not mark the quick refresh active")
+	}
+	if _, repeated := m.Update(key("r")); repeated != nil {
+		t.Fatal("repeated refresh key queued overlapping work")
+	}
+	if msg := command(); msg == nil {
+		t.Fatal("refresh command returned no completion message")
+	} else {
+		m = update(t, m, msg)
+	}
+	if refreshes != 1 || m.manualRefreshRunning {
+		t.Fatalf("refreshes=%d running=%v, want one completed refresh", refreshes, m.manualRefreshRunning)
+	}
+}
+
+func TestRefreshKeyRemainsSearchTextWhileSearching(t *testing.T) {
+	refreshes := 0
+	m := NewModel(Dependencies{Refresh: func() tea.Msg { refreshes++; return RefreshDone{} }})
+	m = update(t, m, key("/"))
+	m = update(t, m, key("r"))
+	if m.filter.Query != "r" || refreshes != 0 || m.manualRefreshRunning {
+		t.Fatalf("query=%q refreshes=%d running=%v, want search text only", m.filter.Query, refreshes, m.manualRefreshRunning)
 	}
 }

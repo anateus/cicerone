@@ -153,9 +153,23 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 
 func (r *runtimeServices) Close() error {
 	r.closeOnce.Do(func() {
-		r.coordinator.Close()
-		r.downloads.Close()
 		r.cancel()
+		var closing sync.WaitGroup
+		if r.coordinator != nil {
+			closing.Add(1)
+			go func() {
+				defer closing.Done()
+				r.coordinator.Close()
+			}()
+		}
+		if r.downloads != nil {
+			closing.Add(1)
+			go func() {
+				defer closing.Done()
+				r.downloads.Close()
+			}()
+		}
+		closing.Wait()
 		r.closeErr = r.store.Close()
 	})
 	return r.closeErr

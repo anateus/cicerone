@@ -13,6 +13,27 @@ const (
 	PackageCask    PackageType = "cask"
 )
 
+// PackageStatus is the user-assigned state of a package in the feed.
+type PackageStatus string
+
+const (
+	PackageStatusDefault PackageStatus = "default"
+	PackageStatusStarred PackageStatus = "starred"
+	PackageStatusSnoozed PackageStatus = "snoozed"
+)
+
+// NextPackageStatus returns the next state in the user-facing status cycle.
+func NextPackageStatus(status PackageStatus) PackageStatus {
+	switch status {
+	case PackageStatusStarred:
+		return PackageStatusSnoozed
+	case PackageStatusSnoozed:
+		return PackageStatusDefault
+	default:
+		return PackageStatusStarred
+	}
+}
+
 // InstalledPackage describes the locally installed state of a package.
 type InstalledPackage struct {
 	PackageID        PackageID

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Result struct {
@@ -19,7 +20,10 @@ type Runner interface {
 	Stream(ctx context.Context, name string, args ...string) (io.ReadCloser, error)
 }
 
-const maxStderrBytes = 4 * 1024
+const (
+	maxStderrBytes   = 4 * 1024
+	processWaitDelay = 250 * time.Millisecond
+)
 
 type runner struct{}
 
@@ -29,6 +33,7 @@ func NewRunner() Runner {
 
 func (runner) Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = processWaitDelay
 	var stdout bytes.Buffer
 	stderr := &limitedBuffer{remaining: maxStderrBytes}
 	cmd.Stdout = &stdout
@@ -46,6 +51,7 @@ func (runner) Run(ctx context.Context, name string, args ...string) (Result, err
 
 func (runner) Stream(ctx context.Context, name string, args ...string) (io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = processWaitDelay
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pipe stdout for %s: %w", name, err)
