@@ -13,13 +13,15 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/changelog"
-	"cicerone/internal/domain"
-	"cicerone/internal/download"
-	"cicerone/internal/history"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
-	"cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/changelog"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/download"
+	"github.com/anateus/cicerone/internal/history"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/webpage"
+	"golang.org/x/sync/singleflight"
 )
 
 type packageDetailLoader struct {
@@ -29,15 +31,10 @@ type packageDetailLoader struct {
 	queue      *download.Queue
 	fetcher    *changelog.Fetcher
 	send       func(tea.Msg)
-	infoMu     sync.Mutex
-	infoCalls  map[domain.PackageID]*packageInfoCall
+	infoGroup  singleflight.Group
+	fieldMu    sync.Mutex
+	fieldSeq   uint64
 	progress   *detailProgressTracker
-}
-
-type packageInfoCall struct {
-	done chan struct{}
-	info homebrew.PackageInfo
-	err  error
 }
 
 type detailProgressTracker struct {
@@ -101,58 +98,50 @@ func (l *packageDetailLoader) LoadCachedPackageInfo(ctx context.Context, package
 }
 
 func (l *packageDetailLoader) refreshPackageInfo(ctx context.Context, packageID domain.PackageID) (homebrew.PackageInfo, error) {
-	l.infoMu.Lock()
-	if l.infoCalls == nil {
-		l.infoCalls = make(map[domain.PackageID]*packageInfoCall)
-	}
-	if active := l.infoCalls[packageID]; active != nil {
-		l.infoMu.Unlock()
-		select {
-		case <-active.done:
-			return active.info, active.err
-		case <-ctx.Done():
-			return homebrew.PackageInfo{}, ctx.Err()
-		}
-	}
-	call := &packageInfoCall{done: make(chan struct{})}
-	l.infoCalls[packageID] = call
-	l.infoMu.Unlock()
-	l.detailFieldLoading(packageID, tui.DetailPackageInfo, true)
-	if l.progress != nil {
-		l.progress.info(1)
-	}
-	defer func() {
-		l.infoMu.Lock()
-		delete(l.infoCalls, packageID)
-		close(call.done)
-		l.infoMu.Unlock()
+	result := l.infoGroup.DoChan(string(packageID), func() (any, error) {
+		fieldID := l.beginDetailField(packageID, tui.DetailPackageInfo)
 		if l.progress != nil {
-			l.progress.info(-1)
+			l.progress.info(1)
 		}
-		l.detailFieldLoading(packageID, tui.DetailPackageInfo, false)
-	}()
+		defer func() {
+			if l.progress != nil {
+				l.progress.info(-1)
+			}
+			l.endDetailField(packageID, tui.DetailPackageInfo, fieldID)
+		}()
 
-	info, raw, err := l.brew.Info(ctx, string(packageID))
-	if err != nil {
-		call.err = err
-		return homebrew.PackageInfo{}, err
+		info, raw, err := l.brew.Info(ctx, string(packageID))
+		if err != nil {
+			return nil, err
+		}
+		normalized, err := json.Marshal(info)
+		if err != nil {
+			return nil, err
+		}
+		if err := l.store.SavePackageInfo(ctx, store.PackageInfoRecord{
+			PackageID: string(packageID), FetchedAt: time.Now().UTC(), Raw: raw, Normalized: normalized,
+		}); err != nil {
+			return nil, err
+		}
+		if l.send != nil {
+			l.send(tui.PackageInfoLoaded{PackageID: packageID, Info: info})
+		}
+		return info, nil
+	})
+
+	select {
+	case completed := <-result:
+		if completed.Err != nil {
+			return homebrew.PackageInfo{}, completed.Err
+		}
+		info, ok := completed.Val.(homebrew.PackageInfo)
+		if !ok {
+			return homebrew.PackageInfo{}, errors.New("unexpected package info result")
+		}
+		return info, nil
+	case <-ctx.Done():
+		return homebrew.PackageInfo{}, ctx.Err()
 	}
-	normalized, err := json.Marshal(info)
-	if err != nil {
-		call.err = err
-		return homebrew.PackageInfo{}, err
-	}
-	if err := l.store.SavePackageInfo(ctx, store.PackageInfoRecord{
-		PackageID: string(packageID), FetchedAt: time.Now().UTC(), Raw: raw, Normalized: normalized,
-	}); err != nil {
-		call.err = err
-		return homebrew.PackageInfo{}, err
-	}
-	call.info = info
-	if l.send != nil {
-		l.send(tui.PackageInfoLoaded{PackageID: packageID, Info: info})
-	}
-	return info, nil
 }
 
 func (l *packageDetailLoader) LoadREADME(ctx context.Context, packageID domain.PackageID, eventID domain.EventID) (store.PackageDocument, error) {
@@ -164,7 +153,7 @@ func (l *packageDetailLoader) LoadREADME(ctx context.Context, packageID domain.P
 		go func() {
 			_, refreshErr := l.refreshREADMEWithCached(ctx, packageID, eventID, cachedDocument)
 			if refreshErr != nil && l.send != nil {
-				l.send(tui.READMELoaded{PackageID: packageID, Err: refreshErr})
+				l.send(tui.READMELoaded{PackageID: packageID, EventID: eventID, Err: refreshErr})
 			}
 		}()
 		return cachedDocument, nil
@@ -185,8 +174,8 @@ func (l *packageDetailLoader) LoadCachedRepositoryTags(ctx context.Context, pack
 }
 
 func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packageID domain.PackageID, eventID domain.EventID, cached store.PackageDocument) (store.PackageDocument, error) {
-	l.detailFieldLoading(packageID, tui.DetailREADME, true)
-	defer l.detailFieldLoading(packageID, tui.DetailREADME, false)
+	fieldID := l.beginDetailField(packageID, tui.DetailREADME)
+	defer l.endDetailField(packageID, tui.DetailREADME, fieldID)
 	target, err := l.changelogs.cache.ChangelogTarget(ctx, packageID, eventID)
 	if err != nil {
 		return store.PackageDocument{}, err
@@ -215,6 +204,10 @@ func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packa
 	}
 	defer l.enqueueRepositoryTags(ctx, packageID, repositoryURL)
 	candidates := readmeCandidateURLs(repositoryURL)
+	homepage := strings.TrimSpace(definition.Homepage)
+	if parsed, err := url.Parse(homepage); err == nil && parsed.Hostname() != "" && parsed.User == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		candidates = append(candidates, homepage)
+	}
 	if len(candidates) == 0 {
 		if repositoryErr != nil {
 			return store.PackageDocument{}, fmt.Errorf("discover upstream repository: %w", repositoryErr)
@@ -223,13 +216,20 @@ func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packa
 	}
 	var fetched changelog.Fetched
 	var fetchErr error
+	var requestedURL string
 	for _, rawURL := range candidates {
+		if err := ctx.Err(); err != nil {
+			return store.PackageDocument{}, err
+		}
 		validators := changelog.Validators{}
+		profile := "document"
 		if cached.URL == rawURL {
 			validators = changelog.Validators{ETag: cached.ETag, LastModified: cached.LastModified}
+			// A conditional response has no body and cannot serve discovery jobs.
+			profile = "readme:" + cached.ETag + ":" + cached.LastModified
 		}
 		result, err := l.queue.Enqueue(download.Request{
-			URL: rawURL, Profile: "document", Priority: download.Current, Context: ctx,
+			URL: rawURL, Profile: profile, Priority: download.Current, Context: ctx,
 			Fetch: func(fetchCtx context.Context) (any, error) {
 				return l.fetcher.FetchConditional(fetchCtx, rawURL, validators)
 			},
@@ -250,6 +250,7 @@ func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packa
 			continue
 		}
 		fetchErr = nil
+		requestedURL = rawURL
 		break
 	}
 	if fetchErr != nil {
@@ -261,19 +262,31 @@ func (l *packageDetailLoader) refreshREADMEWithCached(ctx context.Context, packa
 		}
 		cached.FetchedAt = fetched.FetchedAt
 		if l.send != nil {
-			l.send(tui.READMELoaded{PackageID: packageID, Document: cached})
+			l.send(tui.READMELoaded{PackageID: packageID, EventID: eventID, Document: cached})
 		}
 		return cached, nil
 	}
+	extracted := fetched.Body
+	if fetched.MediaType == "text/html" || fetched.MediaType == "application/xhtml+xml" {
+		markdown, err := webpage.Markdown(fetched.FinalURL, fetched.Body)
+		if err != nil {
+			return store.PackageDocument{}, fmt.Errorf("read homepage: %w", err)
+		}
+		extracted = []byte(markdown)
+	}
+	status := "ok"
+	if requestedURL == homepage {
+		status = "homepage"
+	}
 	sum := sha256.Sum256(fetched.Body)
 	document, err := l.store.SavePackageDocument(ctx, string(packageID), store.PackageDocument{
-		Kind: store.DocumentREADME, URL: fetched.FinalURL.String(), SourceURL: fetched.FinalURL.String(),
+		Kind: store.DocumentREADME, URL: requestedURL, SourceURL: fetched.FinalURL.String(),
 		MediaType: fetched.MediaType, ETag: fetched.ETag, LastModified: fetched.LastModified,
 		Hash: hex.EncodeToString(sum[:]), FetchedAt: fetched.FetchedAt, Raw: fetched.Body,
-		Extracted: fetched.Body, ExtractionStatus: "ok",
+		Extracted: extracted, ExtractionStatus: status,
 	})
 	if err == nil && l.send != nil {
-		l.send(tui.READMELoaded{PackageID: packageID, Document: document})
+		l.send(tui.READMELoaded{PackageID: packageID, EventID: eventID, Document: document})
 	}
 	return document, err
 }
@@ -282,7 +295,7 @@ func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, package
 	if l.queue == nil || l.changelogs.resolver == nil || repositoryURL == "" {
 		return
 	}
-	l.detailFieldLoading(packageID, tui.DetailRepositoryTags, true)
+	fieldID := l.beginDetailField(packageID, tui.DetailRepositoryTags)
 	result, err := l.queue.Enqueue(download.Request{
 		URL: repositoryURL, Profile: "repository-tags", Priority: download.Speculative, Context: ctx,
 		Fetch: func(fetchCtx context.Context) (any, error) {
@@ -290,14 +303,14 @@ func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, package
 		},
 	})
 	if err != nil {
-		l.detailFieldLoading(packageID, tui.DetailRepositoryTags, false)
+		l.endDetailField(packageID, tui.DetailRepositoryTags, fieldID)
 		if l.send != nil {
 			l.send(tui.RepositoryTagsLoaded{PackageID: packageID, Err: err})
 		}
 		return
 	}
 	go func() {
-		defer l.detailFieldLoading(packageID, tui.DetailRepositoryTags, false)
+		defer l.endDetailField(packageID, tui.DetailRepositoryTags, fieldID)
 		completed := <-result
 		if completed.Err != nil {
 			if l.send != nil {
@@ -327,9 +340,20 @@ func (l *packageDetailLoader) enqueueRepositoryTags(ctx context.Context, package
 	}()
 }
 
-func (l *packageDetailLoader) detailFieldLoading(packageID domain.PackageID, field tui.DetailField, loading bool) {
+func (l *packageDetailLoader) beginDetailField(packageID domain.PackageID, field tui.DetailField) uint64 {
+	l.fieldMu.Lock()
+	l.fieldSeq++
+	id := l.fieldSeq
+	l.fieldMu.Unlock()
 	if l.send != nil {
-		l.send(tui.DetailFieldLoading{PackageID: packageID, Field: field, Loading: loading})
+		l.send(tui.DetailFieldLoading{PackageID: packageID, RequestID: id, Field: field, Loading: true})
+	}
+	return id
+}
+
+func (l *packageDetailLoader) endDetailField(packageID domain.PackageID, field tui.DetailField, id uint64) {
+	if l.send != nil {
+		l.send(tui.DetailFieldLoading{PackageID: packageID, RequestID: id, Field: field, Loading: false})
 	}
 }
 

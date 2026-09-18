@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/execx"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/store"
 	"github.com/google/go-cmp/cmp"
 )
 

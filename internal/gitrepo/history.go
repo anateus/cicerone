@@ -52,7 +52,10 @@ func commitArgs(path string, requested Range) []string {
 	if revision == "" {
 		revision = "HEAD"
 	}
-	args := []string{"-C", path, "log", "--format=%H%x00%aI%x00%s%x00", "--name-status", "-z", "-M"}
+	// Homebrew records formula changes on the second parent of merge commits.
+	// Walk the mainline and diff each merge against its first parent so those
+	// changes are visible without traversing every pull-request branch commit.
+	args := []string{"-C", path, "log", "--first-parent", "-m", "--format=%H%x00%aI%x00%s%x00", "--name-status", "-z", "-M"}
 	if !requested.Since.IsZero() {
 		args = append(args, "--since="+requested.Since.Format(time.RFC3339Nano))
 	}

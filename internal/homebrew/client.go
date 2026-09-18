@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"time"
 
-	"cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/execx"
 )
 
 type Client struct {

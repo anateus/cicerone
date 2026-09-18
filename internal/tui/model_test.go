@@ -11,9 +11,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
 )
@@ -1117,6 +1117,59 @@ func TestNavigationClearsPreviousPackageDetailsBeforeDebouncedLoad(t *testing.T)
 	}
 }
 
+func TestFeedRefreshDoesNotRestartUnchangedDetailSelection(t *testing.T) {
+	source := &fakeCachedInfo{values: map[domain.PackageID]homebrew.PackageInfo{"pkg-a": {Description: "cached"}}}
+	m := NewModel(Dependencies{PackageInfo: source})
+	m.width, m.height, m.loading = 72, 10, false
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+	m.descriptionRequests["pkg-a"] = true
+	m.packageInfo = homebrew.PackageInfo{Name: "Widget"}
+	m.packageInfoLoading = true
+	m.detailCancel = func() { t.Fatal("unchanged feed refresh canceled active detail work") }
+	selection := m.selectionID
+
+	next, command := m.Update(FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+	m = next.(Model)
+	if m.selectionID != selection {
+		t.Fatalf("unchanged feed refresh changed selection generation from %d to %d", selection, m.selectionID)
+	}
+	if m.packageInfo.Name != "Widget" || !m.packageInfoLoading {
+		t.Fatalf("unchanged feed refresh reset detail state: info=%#v loading=%t", m.packageInfo, m.packageInfoLoading)
+	}
+	if command != nil {
+		t.Fatalf("unchanged feed refresh restarted detail commands: %T", command)
+	}
+}
+
+func TestStaleDetailFieldCompletionCannotStopNewRefresh(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a")})
+	m = update(t, m, DetailFieldLoading{PackageID: "pkg-a", RequestID: 1, Field: DetailREADME, Loading: true})
+	m = update(t, m, DetailFieldLoading{PackageID: "pkg-a", RequestID: 2, Field: DetailREADME, Loading: true})
+	m = update(t, m, DetailFieldLoading{PackageID: "pkg-a", RequestID: 1, Field: DetailREADME, Loading: false})
+	if !m.readmeRefreshing {
+		t.Fatal("stale README completion stopped the current refresh")
+	}
+	m = update(t, m, DetailFieldLoading{PackageID: "pkg-a", RequestID: 2, Field: DetailREADME, Loading: false})
+	if m.readmeRefreshing {
+		t.Fatal("current README completion left refresh active")
+	}
+}
+
+func TestStaleREADMEEventCompletionIsIgnored(t *testing.T) {
+	m := NewModel(Dependencies{})
+	events := []domain.UpdateEvent{event("a", "pkg-a"), event("b", "pkg-a")}
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{{ID: "pkg-a", Events: events}}})
+	m = update(t, m, READMELoaded{PackageID: "pkg-a", EventID: "b", Document: store.PackageDocument{ID: "stale"}})
+	if m.readme.ID != "" {
+		t.Fatalf("README for another event was applied: %#v", m.readme)
+	}
+	m = update(t, m, READMELoaded{PackageID: "pkg-a", EventID: "a", Document: store.PackageDocument{ID: "current"}})
+	if m.readme.ID != "current" {
+		t.Fatalf("current README was not applied: %#v", m.readme)
+	}
+}
+
 func TestBackgroundREADMECompletionOnlyUpdatesCurrentPackage(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a", "b")})
@@ -1789,7 +1842,7 @@ func TestNavigationCountsExpandedChildrenBeforeSelection(t *testing.T) {
 	}
 }
 
-func TestDatasetRefreshRestoresAnchorCapturedWhenRequestStarted(t *testing.T) {
+func TestDatasetRefreshPreservesSelectionChangedWhileRequestInFlight(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m = update(t, m, WindowSize{Width: 72, Height: 4})
 	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a", "b", "c")})
@@ -1799,12 +1852,12 @@ func TestDatasetRefreshRestoresAnchorCapturedWhenRequestStarted(t *testing.T) {
 	m = update(t, m, DatasetChanged{})
 	request := m.feedRequestID
 	m = update(t, m, key("j")) // interim interaction moves to c.
-	m = update(t, m, FeedLoaded{RequestID: request, Groups: groups("x", "b", "y")})
-	if got := m.selectedEvent().ID; got != "b" {
-		t.Fatalf("selection = %q, want request-start anchor b", got)
+	m = update(t, m, FeedLoaded{RequestID: request, Groups: groups("x", "b", "c")})
+	if got := m.selectedEvent().ID; got != "c" {
+		t.Fatalf("selection = %q, want the selection made while refresh was in flight", got)
 	}
-	if m.viewportOffset != 1 || m.feedViewport.YOffset() != 1 {
-		t.Fatalf("refresh did not restore viewport offset: state=%d viewport=%d", m.viewportOffset, m.feedViewport.YOffset())
+	if m.viewportOffset != m.feedViewport.YOffset() {
+		t.Fatalf("refresh lost current viewport offset: state=%d viewport=%d", m.viewportOffset, m.feedViewport.YOffset())
 	}
 }
 
@@ -1847,14 +1900,16 @@ func TestInitialFeedQueryStartsAlongsideRefresh(t *testing.T) {
 	}
 	next, command = m.Update(DatasetChanged{})
 	m = next.(Model)
-	if command == nil {
-		t.Fatal("first durable dataset batch did not schedule the initial feed query")
+	if command != nil || !m.feedRefreshPending {
+		t.Fatal("first durable dataset batch did not queue a refresh behind the in-flight feed query")
 	}
 	next, command = m.Update(InitialRefreshDone{})
 	m = next.(Model)
-	if command == nil {
-		t.Fatal("completed initial refresh did not schedule the first feed query")
+	if command != nil || !m.feedRefreshPending || m.initialRefreshRunning {
+		t.Fatal("completed initial refresh did not retain the queued feed refresh")
 	}
+	_, command = m.Update(FeedLoaded{RequestID: m.feedRequestID})
+	_ = feedResult(t, command)
 }
 
 func TestRefreshKeyStartsOneQuickRefreshUntilItCompletes(t *testing.T) {

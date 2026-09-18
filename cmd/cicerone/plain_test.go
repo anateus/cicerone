@@ -12,9 +12,9 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/store"
-	"cicerone/internal/syncer"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/syncer"
 )
 
 type fakePlainRuntime struct {

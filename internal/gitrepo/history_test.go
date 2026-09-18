@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/execx"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/testutil"
 )
 
 type pipeRunner struct{ reader io.ReadCloser }
@@ -23,6 +23,20 @@ func (r *pipeRunner) Run(context.Context, string, ...string) (execx.Result, erro
 	return execx.Result{}, nil
 }
 func (r *pipeRunner) Stream(context.Context, string, ...string) (io.ReadCloser, error) {
+	return r.reader, nil
+}
+
+type historyRecordingRunner struct {
+	reader io.ReadCloser
+	args   []string
+}
+
+func (r *historyRecordingRunner) Run(context.Context, string, ...string) (execx.Result, error) {
+	return execx.Result{}, nil
+}
+
+func (r *historyRecordingRunner) Stream(_ context.Context, _ string, args ...string) (io.ReadCloser, error) {
+	r.args = append([]string(nil), args...)
 	return r.reader, nil
 }
 
@@ -58,6 +72,25 @@ func TestWalkCommitsYieldsBeforeEOF(t *testing.T) {
 	got := <-yielded
 	if got.Hash != secondHash || len(got.Changes) != 1 || got.Changes[0] != (gitrepo.Change{Status: "R", OldPath: "Formula/old.rb", Path: "Formula/new.rb"}) {
 		t.Fatalf("second commit = %#v", got)
+	}
+}
+
+func TestWalkCommitsRequestsMainlineMergeDiffs(t *testing.T) {
+	hash := strings.Repeat("a", 40)
+	runner := &historyRecordingRunner{reader: io.NopCloser(strings.NewReader(hash + "\x00" + "2026-01-01T00:00:00Z\x00formula update\x00\nM\x00Formula/a.rb\x00"))}
+	repository := gitrepo.New(gitrepo.Source{Path: "/repo"}, runner)
+	var commits []gitrepo.Commit
+	if err := repository.WalkCommits(context.Background(), gitrepo.Range{Revision: "HEAD"}, func(commit gitrepo.Commit) error {
+		commits = append(commits, commit)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(runner.args, "--first-parent") || !slices.Contains(runner.args, "-m") {
+		t.Fatalf("git log args = %v, want mainline merge diff options", runner.args)
+	}
+	if len(commits) != 1 || len(commits[0].Changes) != 1 || commits[0].Changes[0].Path != "Formula/a.rb" {
+		t.Fatalf("commits = %#v, want one formula change", commits)
 	}
 }
 

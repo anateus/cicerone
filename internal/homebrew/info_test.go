@@ -5,9 +5,9 @@ import (
 	"slices"
 	"testing"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/execx"
-	"cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/testutil"
 )
 
 func TestInfoReturnsStructuredFormulaMetadata(t *testing.T) {

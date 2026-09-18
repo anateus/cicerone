@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/execx"
 )
 
 func TestRunCancellation(t *testing.T) {

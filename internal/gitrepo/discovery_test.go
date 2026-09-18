@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"cicerone/internal/execx"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/testutil"
 )
 
 func TestDiscoverPropagatesCancellation(t *testing.T) {

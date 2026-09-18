@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 // Definition is the conservative, non-executing view of a Homebrew definition.

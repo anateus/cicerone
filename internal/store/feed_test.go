@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 	"github.com/google/go-cmp/cmp"
 )
 

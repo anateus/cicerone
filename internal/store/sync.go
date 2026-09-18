@@ -57,15 +57,62 @@ func (s *Store) LatestFreshness(ctx context.Context) (FreshnessStatus, error) {
 }
 
 func (s *Store) SyncStarted(ctx context.Context, source string, at time.Time) error {
-	return s.Write(ctx, func(tx *sql.Tx) error {
+	_, err := s.SyncStartedRun(ctx, source, at)
+	return err
+}
+
+// SyncStartedRun records a synchronization attempt and returns its durable
+// row ID. Callers that can overlap attempts should use that ID when finishing
+// the run so cancellation cannot close a newer attempt.
+func (s *Store) SyncStartedRun(ctx context.Context, source string, at time.Time) (int64, error) {
+	var runID int64
+	err := s.Write(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO repositories(id) VALUES(?) ON CONFLICT(id) DO NOTHING`, source); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO sync_runs(repository_id,started_at) VALUES(?,?)`, source, at.UnixNano())
+		result, err := tx.ExecContext(ctx, `INSERT INTO sync_runs(repository_id,started_at) VALUES(?,?)`, source, at.UnixNano())
+		if err != nil {
+			return err
+		}
+		runID, err = result.LastInsertId()
 		return err
+	})
+	return runID, err
+}
+
+func (s *Store) SyncFinishedRun(ctx context.Context, runID int64, source string, at time.Time, result SyncResult, syncErr error) error {
+	errorText := ""
+	if syncErr != nil {
+		errorText = strings.TrimSpace(syncErr.Error())
+		if len(errorText) > maxSyncErrorBytes {
+			errorText = errorText[:maxSyncErrorBytes]
+		}
+	}
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		var previous sql.NullInt64
+		_ = tx.QueryRowContext(ctx, `SELECT last_success_at FROM sync_runs WHERE repository_id=? AND last_success_at IS NOT NULL ORDER BY id DESC LIMIT 1`, source).Scan(&previous)
+		lastSuccess := previous
+		if syncErr == nil {
+			lastSuccess = sql.NullInt64{Int64: at.UnixNano(), Valid: true}
+		}
+		updated, err := tx.ExecContext(ctx, `UPDATE sync_runs SET completed_at=?,error=?,cursor=?,event_count=?,diagnostic_count=?,last_success_at=? WHERE id=? AND repository_id=? AND completed_at IS NULL`, at.UnixNano(), errorText, result.Cursor, result.Events, result.Diagnostics, lastSuccess, runID, source)
+		if err != nil {
+			return err
+		}
+		rows, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return fmt.Errorf("no active sync run %d for %s", runID, source)
+		}
+		return nil
 	})
 }
 
+// SyncFinished is retained for callers that do not keep a run ID. Production
+// synchronization uses SyncFinishedRun through the coordinator's RunStore
+// interface; this compatibility method preserves the original behavior.
 func (s *Store) SyncFinished(ctx context.Context, source string, at time.Time, result SyncResult, syncErr error) error {
 	errorText := ""
 	if syncErr != nil {

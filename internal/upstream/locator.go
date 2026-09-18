@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/store"
 )
 
 type FetchedPage struct {

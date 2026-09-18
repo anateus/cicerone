@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/execx"
 )
 
 type Call struct {

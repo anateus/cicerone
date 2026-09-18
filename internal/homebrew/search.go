@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 func (c *Client) SearchDescriptions(ctx context.Context, query string) ([]domain.PackageID, error) {

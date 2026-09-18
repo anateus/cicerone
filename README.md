@@ -2,9 +2,30 @@
 
 Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. On interactive startup it refreshes installed state and begins fetching and indexing Git history before showing the feed, falling back to the durable SQLite cache if synchronization fails.
 
-## Build and run
+## Install
 
 Requirements: macOS, Go 1.26.5 or newer, Homebrew, and Git.
+
+Install directly from GitHub without cloning the repository:
+
+```sh
+go install github.com/anateus/cicerone/cmd/cicerone@latest
+```
+
+Go builds the binary from source. No prebuilt artifacts or generation steps are needed; the SQL migrations are included in the repository and embedded during compilation. Run the same command to update.
+
+The binary is installed in `$(go env GOPATH)/bin`, or `$(go env GOBIN)` if you've set it. Make sure that directory is on your `PATH`. With Go's default install location:
+
+```sh
+export PATH="$(go env GOPATH)/bin:$PATH"
+cicerone
+```
+
+Add the `export` line to your shell configuration (for example `~/.zshrc`) to keep it across sessions.
+
+## Build from a checkout
+
+From the repository root:
 
 ```sh
 go build -trimpath ./cmd/cicerone
@@ -21,9 +42,11 @@ install -m 0755 ./cicerone /usr/local/bin/cicerone
 
 If `/usr/local/bin` is not writable, choose a user-owned directory already listed in `PATH` (for example `~/bin`).
 
-Run `./cicerone --help` without opening the TUI. Cicerone's MVP is macOS-only; Linuxbrew support is deferred.
+## Run
 
-Run `./cicerone --plain` for a one-shot plaintext feed. It prints cached rows,
+Run `cicerone --help` without opening the TUI. Cicerone's MVP is macOS-only; Linuxbrew support is deferred. If you built from a checkout without installing, use `./cicerone` instead.
+
+Run `cicerone --plain` for a one-shot plaintext feed. It prints cached rows,
 performs real read-only Homebrew metadata synchronization, prints refreshed
 rows, and exits. This may update Cicerone's database and Cicerone-owned Git
 caches, but it never installs, upgrades, or uninstalls Homebrew packages.
@@ -65,9 +88,11 @@ The default feed contains version events from the last 30 days. An installed pac
 
 Search starts with package names. `tab` cycles through cumulative scopes: names; names and cached descriptions; those plus cached changelogs; then those plus cached READMEs. Unquoted terms are prefix searches, so `rip gre` matches tokens beginning with `rip` and `gre`. Surround the whole query with quotes for a non-prefix phrase search, such as `"rip grep"`. Document and description results are limited to content already present in Cicerone's durable cache.
 
-Cicerone queries the durable feed immediately on startup while repository synchronization runs in the background. Each durable history batch refreshes the feed while preserving the selected stable event and its viewport-relative row. After fetching, each repository publishes its newest 10-commit slice and releases the startup loading marker before continuing the remaining recent catch-up. Pressing `r` preempts that catch-up, fetches both repositories immediately, publishes the same quick newest-first slice, and then resumes from durable checkpoints. Older installed-package history starts only after that catch-up and continues as resumable, low-priority enrichment. Exhaustive searches remember packages and event kinds that have no older match, and custom-tap or wrong-repository packages are excluded. The header shows active synchronization and retains the latest failed-attempt status; failures continue to fall back to cached rows. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
+Cicerone queries the durable feed immediately on startup while repository synchronization runs in the background. It checks for repository updates every five minutes while the TUI is open. Each durable history batch refreshes the feed while preserving the selected stable event and its viewport-relative row. After fetching, each repository publishes its newest 10-commit slice and releases the startup loading marker before continuing the remaining recent catch-up. Pressing `r` preempts that catch-up, fetches both repositories immediately, publishes the same quick newest-first slice, and then resumes from durable checkpoints. Older installed-package history starts only after that catch-up and continues as resumable, low-priority enrichment. Exhaustive searches remember packages and event kinds that have no older match, and custom-tap or wrong-repository packages are excluded. The header shows active synchronization and retains the latest failed-attempt status; failures continue to fall back to cached rows. Installed versions and upgrade availability come from `brew info --json=v2 --installed`.
 
 When selection settles for 250 ms, Cicerone loads and refreshes package information, README, repository tags, and changelog content independently. Each inspector field shows its own loading or refreshing indicator, while cached content remains usable. Visible cached descriptions are prefetched while navigating. URL work is deduplicated in a bounded priority queue and throttled per host, and the fixed status line reports active and queued detail jobs. README and changelog Markdown is rendered for the current inspector width and terminal color mode.
+
+If no repository README is available, the README tab loads the package's homepage and becomes Homepage. HTML pages are converted to readable text with headings, emphasis, lists, links, code blocks, and tables. Cicerone prefers the page's main content when it has one, tries reader mode on longer pages without it, and keeps the result in the same offline cache. It doesn't run JavaScript or load styles and images. Pages that depend on scripts show their available static content, or their title and description when the body is empty, with a link to open the original in a browser.
 
 When GitHub Releases supplies a changelog, the selected release renders first and the next 10 releases are appended in the background. If more releases are available, the end of the changelog offers another 10-release page.
 

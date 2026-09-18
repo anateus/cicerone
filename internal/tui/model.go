@@ -9,9 +9,9 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
 )
 
 const (
@@ -114,6 +114,7 @@ type Model struct {
 	filter                                                            domain.FeedFilter
 	detailOpen                                                        bool
 	loading, stale                                                    bool
+	feedRefreshPending                                                bool
 	err                                                               error
 	notification                                                      string
 	light                                                             bool
@@ -133,6 +134,7 @@ type Model struct {
 	repositoryTagsErr                                                 error
 	packageInfoLoading, readmeLoading, repositoryTagsLoading          bool
 	packageInfoRefreshing, readmeRefreshing, repositoryTagsRefreshing bool
+	packageInfoRefreshID, readmeRefreshID, repositoryTagsRefreshID    uint64
 	detailSpinnerFrame                                                int
 	detailSpinnerRunning                                              bool
 	changelogErr                                                      error
@@ -147,6 +149,7 @@ type Model struct {
 	documentExplicit                                                  bool
 	feedViewport, inspectorViewport                                   viewport.Model
 	refreshAnchors                                                    map[uint64]domain.Anchor
+	refreshSelectionIDs                                               map[uint64]uint64
 	detailCancel                                                      context.CancelFunc
 	initialRefreshRunning                                             bool
 	manualRefreshRunning                                              bool
@@ -179,7 +182,7 @@ func NewModel(deps Dependencies) Model {
 			Now: deps.Now(), Kinds: map[domain.EventKind]bool{}, Types: map[domain.PackageType]bool{domain.PackageFormula: true},
 			Search: domain.SearchNames,
 		},
-		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor),
+		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor), refreshSelectionIDs: make(map[uint64]uint64),
 		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool),
 		packageDescriptions: make(map[domain.PackageID]string), descriptionRequests: make(map[domain.PackageID]bool),
 		sessionNew: make(map[domain.EventID]bool), seenBoundaryIndex: -1}
@@ -227,12 +230,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.cancelSearchQuery()
-		previousPackage := m.selectedEvent().PackageID
+		previousEvent := m.selectedEvent()
 		anchor, captured := m.refreshAnchors[msg.RequestID]
+		selectionAtStart, generationCaptured := m.refreshSelectionIDs[msg.RequestID]
 		if !captured {
 			anchor = m.anchor()
 		}
+		// A user interaction after a refresh started must win over the old
+		// request anchor. Restoring that anchor unconditionally makes the list
+		// jump back to the package that was selected before the interaction.
+		if captured && generationCaptured && selectionAtStart != m.selectionID {
+			anchor = m.anchor()
+		}
 		delete(m.refreshAnchors, msg.RequestID)
+		delete(m.refreshSelectionIDs, msg.RequestID)
 		m.loading, m.stale, m.err = false, false, msg.Err
 		if msg.Err == nil {
 			for _, group := range msg.Groups {
@@ -247,37 +258,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			restored := domain.RestoreSelection(anchor, m.groups)
 			m.selected, m.viewportOffset = restored.FallbackIndex, restored.ViewportOffset
 			m.clampSelection()
-			if m.selectedEvent().PackageID != previousPackage {
+			currentEvent := m.selectedEvent()
+			if !sameDetailSelection(previousEvent, currentEvent) {
+				// The feed can replace the selected event for the same package
+				// during a refresh. Treat that as a new detail selection because
+				// changelog and README results are event-specific.
+				m.selectionID++
 				m.resetDetails()
 			}
 			m.syncViewports()
 		}
-		m.startCachedDetailLoads()
-		cmds := []tea.Cmd{m.debounceChangelog(), m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
-			m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
-			m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.markFeedSeen(msg.Groups), m.startDetailSpinner()}
+		cmds := []tea.Cmd{m.markFeedSeen(msg.Groups)}
+		if !sameDetailSelection(previousEvent, m.selectedEvent()) {
+			cmds = append(cmds, m.detailLoadCommands()...)
+		}
 		cmds = append(cmds, m.loadVisiblePackageDescriptions()...)
+		if m.feedRefreshPending {
+			m.feedRefreshPending = false
+			next, command := m.refreshDataset()
+			m = next
+			cmds = append(cmds, command)
+		}
 		return m, tea.Batch(cmds...)
 	case DatasetChanged:
-		m.stale, m.loading = true, true
-		m.feedRequestID++
-		m.freshnessRequestID++
-		m.refreshAnchors[m.feedRequestID] = m.anchor()
-		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
+		return m.refreshDataset()
 	case InitialRefreshDone:
 		m.initialRefreshRunning = false
-		m.stale, m.loading = true, true
-		m.feedRequestID++
-		m.freshnessRequestID++
-		m.refreshAnchors[m.feedRequestID] = m.anchor()
-		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
+		return m.refreshDataset()
 	case RefreshDone:
 		m.manualRefreshRunning = false
-		m.stale, m.loading = true, true
-		m.feedRequestID++
-		m.freshnessRequestID++
-		m.refreshAnchors[m.feedRequestID] = m.anchor()
-		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
+		return m.refreshDataset()
 	case FreshnessLoaded:
 		if msg.RequestID != m.freshnessRequestID {
 			return m, nil
@@ -332,6 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.Filter.Search = domain.SearchNames
 			}
 			m.filter = msg.Filter
+			m.loading = true
 			m.feedRequestID++
 			return m, m.queryFeed(m.feedRequestID)
 		}
@@ -451,7 +462,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.packageInfoErr = msg.Err
 	case READMELoaded:
 		e := m.selectedEvent()
-		if e.PackageID != msg.PackageID ||
+		if e.PackageID != msg.PackageID || (msg.EventID != "" && e.ID != msg.EventID) ||
 			(msg.RequestID != 0 && (msg.RequestID != m.detailRequestID || msg.SelectionID != m.selectionID)) {
 			return m, nil
 		}
@@ -479,10 +490,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Field {
 		case DetailPackageInfo:
+			if msg.Loading && msg.RequestID != 0 && msg.RequestID < m.packageInfoRefreshID {
+				return m, nil
+			}
+			if !msg.Loading && msg.RequestID != 0 && msg.RequestID != m.packageInfoRefreshID {
+				return m, nil
+			}
+			if msg.RequestID != 0 {
+				m.packageInfoRefreshID = msg.RequestID
+			}
 			m.packageInfoRefreshing = msg.Loading
 		case DetailREADME:
+			if msg.Loading && msg.RequestID != 0 && msg.RequestID < m.readmeRefreshID {
+				return m, nil
+			}
+			if !msg.Loading && msg.RequestID != 0 && msg.RequestID != m.readmeRefreshID {
+				return m, nil
+			}
+			if msg.RequestID != 0 {
+				m.readmeRefreshID = msg.RequestID
+			}
 			m.readmeRefreshing = msg.Loading
 		case DetailRepositoryTags:
+			if msg.Loading && msg.RequestID != 0 && msg.RequestID < m.repositoryTagsRefreshID {
+				return m, nil
+			}
+			if !msg.Loading && msg.RequestID != 0 && msg.RequestID != m.repositoryTagsRefreshID {
+				return m, nil
+			}
+			if msg.RequestID != 0 {
+				m.repositoryTagsRefreshID = msg.RequestID
+			}
 			m.repositoryTagsRefreshing = msg.Loading
 		}
 		if msg.Loading {
@@ -548,7 +586,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.stale, m.loading = true, true
 		m.feedRequestID++
-		m.refreshAnchors[m.feedRequestID] = m.actionAnchor
+		m.captureRefreshAnchor(m.feedRequestID, m.actionAnchor)
 		return m, m.queryFeed(m.feedRequestID)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -644,7 +682,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "r":
-		if m.deps.Refresh == nil || m.initialRefreshRunning || m.manualRefreshRunning {
+		if m.deps.Refresh == nil || m.manualRefreshRunning {
 			return m, nil
 		}
 		m.manualRefreshRunning = true
@@ -764,6 +802,7 @@ func (m Model) handleSearchKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) searchChanged() (tea.Model, tea.Cmd) {
 	m.cancelSearchQuery()
+	m.loading = true
 	m.feedRequestID++
 	id := m.feedRequestID
 	return m, tea.Tick(searchDebounce, func(time.Time) tea.Msg {
@@ -824,9 +863,7 @@ func (m Model) selectionChanged() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.loadVisiblePackageDescriptions()...)
 	}
 	m.keepSelectionVisible()
-	commands := []tea.Cmd{m.loadCachedPackageInfo(m.selectionID, m.selectedEvent()),
-		m.loadCachedREADME(m.selectionID, m.selectedEvent()), m.loadCachedChangelog(m.selectionID, m.selectedEvent()),
-		m.loadCachedRepositoryTags(m.selectionID, m.selectedEvent()), m.debounceChangelog(), m.startDetailSpinner()}
+	commands := m.detailLoadCommands()
 	commands = append(commands, m.loadVisiblePackageDescriptions()...)
 	return m, tea.Batch(commands...)
 }
@@ -844,6 +881,10 @@ func (m Model) moveSelection(direction int) (tea.Model, tea.Cmd) {
 	m.selectionID++
 	m.resetDetails()
 	m.keepSelectionVisible()
+	// Keyboard navigation can move through many rows in one burst. Keep the
+	// detail pane in a local loading state, but defer cache reads and remote
+	// admission until the selection debounce settles.
+	m.startCachedDetailLoads()
 	commands := []tea.Cmd{m.debounceChangelog()}
 	commands = append(commands, m.loadVisiblePackageDescriptions()...)
 	return m, tea.Batch(commands...)
@@ -869,8 +910,25 @@ func (m *Model) setPackageScope(formulae, casks bool) {
 
 func (m Model) filterChanged() (tea.Model, tea.Cmd) {
 	m.cancelSearchQuery()
+	m.loading = true
 	m.feedRequestID++
 	return m, tea.Batch(m.queryFeed(m.feedRequestID), m.savePreferences())
+}
+
+func (m Model) refreshDataset() (Model, tea.Cmd) {
+	m.stale = true
+	if m.loading {
+		// A newer commit does not make an in-flight query useless. Display its
+		// result, then query again once for all commits that arrived meanwhile.
+		// Invalidating every response can starve the view during steady indexing.
+		m.feedRefreshPending = true
+		return m, nil
+	}
+	m.loading = true
+	m.feedRequestID++
+	m.freshnessRequestID++
+	m.captureRefreshAnchor(m.feedRequestID, m.anchor())
+	return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
 }
 
 func (m Model) cycleSelectedPackageStatus() (tea.Model, tea.Cmd) {
@@ -894,6 +952,17 @@ func (m Model) anchor() domain.Anchor {
 	}
 	e := m.selectedEvent()
 	return domain.Anchor{GroupID: m.groups[m.selected].ID, ChildEventID: e.ID, FallbackIndex: m.selected, ViewportOffset: m.viewportOffset}
+}
+
+func (m *Model) captureRefreshAnchor(requestID uint64, anchor domain.Anchor) {
+	if m.refreshAnchors == nil {
+		m.refreshAnchors = make(map[uint64]domain.Anchor)
+	}
+	if m.refreshSelectionIDs == nil {
+		m.refreshSelectionIDs = make(map[uint64]uint64)
+	}
+	m.refreshAnchors[requestID] = anchor
+	m.refreshSelectionIDs[requestID] = m.selectionID
 }
 
 func (m *Model) clampSelection() {
@@ -954,7 +1023,10 @@ func (m *Model) resetDetails() {
 	m.repositoryTagsExpanded = false
 	m.changelog = nil
 	m.changelogErr = nil
-	m.startCachedDetailLoads()
+	m.packageInfoLoading = false
+	m.readmeLoading = false
+	m.repositoryTagsLoading = false
+	m.changelogLoading = false
 	m.packageInfoRefreshing = false
 	m.readmeRefreshing = false
 	m.repositoryTagsRefreshing = false
@@ -974,6 +1046,30 @@ func (m *Model) resetDetails() {
 	m.err = nil
 	m.documentExplicit = false
 	m.inspectorViewport.SetYOffset(0)
+}
+
+func sameDetailSelection(a, b domain.UpdateEvent) bool {
+	return a.PackageID != "" && a.PackageID == b.PackageID && a.ID == b.ID
+}
+
+// detailLoadCommands starts the cached-first pipeline for the current
+// selection exactly once per selection change. Feed refreshes that leave the
+// selected package/event intact deliberately do not call this method.
+func (m *Model) detailLoadCommands() []tea.Cmd {
+	if !m.hasSelection() {
+		return nil
+	}
+	m.startCachedDetailLoads()
+	e := m.selectedEvent()
+	commands := []tea.Cmd{
+		m.loadCachedPackageInfo(m.selectionID, e),
+		m.loadCachedREADME(m.selectionID, e),
+		m.loadCachedChangelog(m.selectionID, e),
+		m.loadCachedRepositoryTags(m.selectionID, e),
+		m.debounceChangelog(),
+		m.startDetailSpinner(),
+	}
+	return commands
 }
 
 func (m *Model) startCachedDetailLoads() {
@@ -1289,7 +1385,7 @@ func (m Model) loadCachedREADME(selection uint64, e domain.UpdateEvent) tea.Cmd 
 			return nil
 		}
 		document, _, err := source.LoadCachedREADME(m.deps.Context, e.PackageID)
-		return READMELoaded{SelectionID: selection, PackageID: e.PackageID, Document: document, Err: err}
+		return READMELoaded{SelectionID: selection, PackageID: e.PackageID, EventID: e.ID, Document: document, Err: err}
 	}
 }
 
@@ -1324,6 +1420,6 @@ func (m Model) loadREADME(ctx context.Context, request, selection uint64, e doma
 		if m.deps.README != nil {
 			document, err = m.deps.README.LoadREADME(ctx, e.PackageID, e.ID)
 		}
-		return READMELoaded{RequestID: request, SelectionID: selection, PackageID: e.PackageID, Document: document, Err: err}
+		return READMELoaded{RequestID: request, SelectionID: selection, PackageID: e.PackageID, EventID: e.ID, Document: document, Err: err}
 	}
 }

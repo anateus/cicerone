@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/store"
 	"github.com/charmbracelet/x/ansi"
 )
 

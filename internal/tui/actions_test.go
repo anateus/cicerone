@@ -10,8 +10,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/homebrew"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -178,6 +178,36 @@ func TestFooterActionHintRemainsClickable(t *testing.T) {
 	_, msg := updateAndRunCommand(t, m, tea.MouseClickMsg{X: actionX, Y: m.height - 1, Button: tea.MouseLeft})
 	if _, ok := msg.(ActionRequested); !ok {
 		t.Fatalf("footer action click emitted %T, want ActionRequested", msg)
+	}
+}
+
+func TestActionConfirmationUsesCenteredModalAndYesButton(t *testing.T) {
+	runner := &fakeActions{}
+	m := NewModel(Dependencies{Actions: runner})
+	m.width, m.height = 80, 24
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("pkg-a")})
+	m = update(t, m, ActionRequested{Action: action()})
+
+	view := strings.Split(ansi.Strip(m.render()), "\n")
+	confirmRow := -1
+	for row, line := range view {
+		if strings.Contains(line, "Confirm upgrade pkg-b?") {
+			confirmRow = row
+			break
+		}
+	}
+	if confirmRow <= 1 || confirmRow >= m.height-4 {
+		t.Fatalf("confirmation was not rendered as a centered modal: row %d", confirmRow)
+	}
+	if !strings.Contains(strings.Join(view, "\n"), "Yes") || !strings.Contains(strings.Join(view, "\n"), "No") {
+		t.Fatal("confirmation modal omitted its buttons")
+	}
+
+	_, bounds := m.actionModalView(m.width, m.height-statusHeight)
+	next, cmd := m.Update(tea.MouseClickMsg{X: bounds.yesX, Y: bounds.buttonY, Button: tea.MouseLeft})
+	updated := next.(Model)
+	if cmd == nil || !updated.actionRunning || updated.pendingAction != nil {
+		t.Fatal("clicking Yes did not confirm the action")
 	}
 }
 

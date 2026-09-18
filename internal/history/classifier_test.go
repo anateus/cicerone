@@ -1,7 +1,7 @@
 package history
 
 import (
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 	"testing"
 )
 

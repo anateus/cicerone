@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/store"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -13,6 +13,27 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	mouse := msg.Mouse()
+	if m.pendingAction != nil || m.actionRunning || m.actionResult != nil {
+		width, height := m.width, m.height
+		if width <= 0 {
+			width = 80
+		}
+		if height <= 0 {
+			height = 24
+		}
+		if m.pendingAction != nil {
+			yes, no := m.actionModalHit(mouse.X, mouse.Y, width, height-statusHeight)
+			if yes {
+				return m.Update(ActionConfirmed{})
+			}
+			if no {
+				m.pendingAction = nil
+			}
+		}
+		// A running or failed action owns the screen until it is complete or
+		// dismissed. Do not let clicks fall through to the feed beneath it.
+		return m, nil
+	}
 	if mouse.Y == m.height-1 {
 		hints := m.footerHints(m.width, m.statusText())
 		x := m.width - footerHintsWidth(hints)

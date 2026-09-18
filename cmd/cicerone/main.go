@@ -12,18 +12,26 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/changelog"
-	"cicerone/internal/domain"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/history"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
-	"cicerone/internal/syncer"
-	"cicerone/internal/tui"
-	"cicerone/internal/upstream"
+	"github.com/anateus/cicerone/internal/changelog"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/history"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/syncer"
+	"github.com/anateus/cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/upstream"
 )
 
 type syncStore struct{ *store.Store }
+
+func (s syncStore) SyncStartedRun(ctx context.Context, source string, at time.Time) (int64, error) {
+	return s.Store.SyncStartedRun(ctx, source, at)
+}
+
+func (s syncStore) SyncFinishedRun(ctx context.Context, runID int64, source string, at time.Time, result syncer.Result, err error) error {
+	return s.Store.SyncFinishedRun(ctx, runID, source, at, store.SyncResult{Cursor: result.Cursor, Events: result.Events, Diagnostics: result.Diagnostics}, err)
+}
 
 var openStore = openStorePreservingFailures
 var renameFile = os.Rename

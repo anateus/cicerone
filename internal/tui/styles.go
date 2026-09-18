@@ -12,7 +12,7 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -31,6 +31,7 @@ func (m Model) render() string {
 	}
 	status := m.statusText()
 	var body string
+	maxBody := h - statusHeight
 	p := m.palette()
 	deemphasizeCore := w >= narrowBreakpoint && m.focus == inspectorPane
 	if w < narrowBreakpoint {
@@ -49,11 +50,10 @@ func (m Model) render() string {
 		inspector = paintBackground(inspector, right, p.inspectorBG)
 		body = joinColumns(feed, inspector, left, right, lipgloss.NewStyle().Background(p.inspectorBG).Render(" "))
 	}
-	if modal := m.renderActionModal(); modal != "" {
-		body = modal + "\n" + body
+	if modal, bounds := m.actionModalView(w, maxBody); modal != "" {
+		body = m.overlayActionModal(body, modal, bounds, w, maxBody)
 	}
 	lines := strings.Split(body, "\n")
-	maxBody := h - statusHeight
 	if len(lines) > maxBody {
 		lines = lines[:maxBody]
 	}
@@ -65,6 +65,25 @@ func (m Model) render() string {
 		statusLine = deemphasizeANSI(statusLine, m.light)
 	}
 	return strings.Join(lines, "\n") + "\n" + statusLine
+}
+
+func (m Model) overlayActionModal(body, modal string, bounds actionModalBounds, width, height int) string {
+	lines := strings.Split(body, "\n")
+	for len(lines) < height {
+		lines = append(lines, m.surfaceLine("", width, m.palette().canvasBG))
+	}
+	panelLines := strings.Split(modal, "\n")
+	for row, panelLine := range panelLines {
+		y := bounds.y + row
+		if y < 0 || y >= len(lines) {
+			continue
+		}
+		base := fitANSI(lines[y], width)
+		left := ansi.Cut(base, 0, bounds.x)
+		right := ansi.Cut(base, bounds.x+bounds.width, width)
+		lines[y] = left + fitANSI(panelLine, bounds.width) + right
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) statusText() string {

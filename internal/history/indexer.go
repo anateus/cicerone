@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/store"
 )
 
 type Request struct {
@@ -24,6 +24,7 @@ type Request struct {
 type Progress struct{ Commits, Events, Diagnostics, Batches int }
 
 const (
+	historyScanFormatVersion   = "mainline-merges-v1"
 	historyInitialBatchCommits = 10
 	historyBatchCommits        = 100
 	historyProgressCommits     = 10
@@ -339,6 +340,7 @@ func historyScanKey(label string, since, until time.Time, req Request, includeIn
 	}
 	sort.Strings(kinds)
 	identity := strings.Join([]string{
+		historyScanFormatVersion,
 		label,
 		since.UTC().Format(time.RFC3339Nano),
 		until.UTC().Format(time.RFC3339Nano),

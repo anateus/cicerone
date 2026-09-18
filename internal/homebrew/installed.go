@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 var packageNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@+._-]*(/[A-Za-z0-9][A-Za-z0-9@+._-]*)*$`)

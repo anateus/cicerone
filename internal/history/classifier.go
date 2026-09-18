@@ -1,6 +1,6 @@
 package history
 
-import "cicerone/internal/domain"
+import "github.com/anateus/cicerone/internal/domain"
 
 type Classification struct {
 	Kind       domain.EventKind

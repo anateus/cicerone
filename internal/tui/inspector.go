@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/store"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -99,12 +99,16 @@ func (m Model) renderInspector(width int) string {
 	if m.document == store.DocumentChangelog {
 		activeDocument = 1
 	}
-	documentTabs := m.tabStrip([]string{"README", "CHANGELOG"}, activeDocument, max(1, width-2), p.tabBG, "")
+	readmeTitle := "README"
+	if m.readme.ExtractionStatus == "homepage" {
+		readmeTitle = "Homepage"
+	}
+	documentTabs := m.tabStrip([]string{strings.ToUpper(readmeTitle), "CHANGELOG"}, activeDocument, max(1, width-2), p.tabBG, "")
 	for _, row := range documentTabs {
 		b.WriteString(m.surfaceLine("│"+row+"│", width, p.tabBG))
 		b.WriteByte('\n')
 	}
-	documentTitle := "README"
+	documentTitle := readmeTitle
 	if m.document == store.DocumentChangelog {
 		documentTitle = "Changelog"
 	}
@@ -124,7 +128,7 @@ func (m Model) renderInspector(width int) string {
 			}
 		} else {
 			if m.readmeErr != nil {
-				documentLines = append(documentLines, "README stale: "+m.readmeErr.Error())
+				documentLines = append(documentLines, readmeTitle+" stale: "+m.readmeErr.Error())
 			}
 			if m.readme.SourceURL != "" {
 				documentLines = append(documentLines, "Source: "+m.readme.SourceURL)

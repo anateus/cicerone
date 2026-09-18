@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/execx"
 )
 
 type Source struct {

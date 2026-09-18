@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/execx"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/store"
 )
 
 type PackageRef struct {

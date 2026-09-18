@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 type HistoryState struct {

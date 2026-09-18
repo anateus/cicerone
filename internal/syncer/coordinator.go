@@ -8,9 +8,7 @@ import (
 	"sync"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 const (
@@ -26,6 +24,14 @@ type Store interface {
 	SetInstalled(context.Context, []domain.InstalledPackage) error
 	SyncStarted(context.Context, string, time.Time) error
 	SyncFinished(context.Context, string, time.Time, Result, error) error
+}
+
+// RunStore preserves the identity of each synchronization attempt. It is
+// optional so small test stores and older integrations can keep using Store;
+// production stores should implement it whenever source work may overlap.
+type RunStore interface {
+	SyncStartedRun(context.Context, string, time.Time) (int64, error)
+	SyncFinishedRun(context.Context, int64, string, time.Time, Result, error) error
 }
 type Request struct {
 	Since              time.Time
@@ -51,9 +57,11 @@ type Dependencies struct {
 	Store        Store
 	Sources      []Source
 	LoadSources  func(context.Context) ([]Source, error)
-	Notify       func(tea.Msg)
+	Notify       func(Event)
 	Now          func() time.Time
 	InitialSince time.Time
+	// RefreshInterval enables cancellable background repository refreshes when positive.
+	RefreshInterval time.Duration
 }
 type SyncStarted struct {
 	Source string
@@ -74,6 +82,21 @@ type SyncFailed struct {
 	At     time.Time
 	Err    error
 }
+
+// Event reports a state change produced by the coordinator.
+// Consumers adapt these events to their own presentation model.
+type Event interface{ syncEvent() }
+
+func (SyncStarted) syncEvent()   {}
+func (SyncCommitted) syncEvent() {}
+func (SyncProgress) syncEvent()  {}
+func (SyncFailed) syncEvent()    {}
+
+// DatasetChanged reports that persisted sync data is ready to be read again.
+type DatasetChanged struct{}
+
+func (DatasetChanged) syncEvent() {}
+
 type operation struct {
 	source  string
 	req     Request
@@ -203,7 +226,28 @@ func (c *Coordinator) startLocked(root context.Context) {
 			c.scheduleOperationLocked(root, op)
 		}
 		c.mu.Unlock()
+		if c.deps.RefreshInterval > 0 {
+			go c.refreshLoop(root, c.deps.RefreshInterval)
+		}
 	}()
+}
+
+func (c *Coordinator) refreshLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			ready := !c.closed && c.sourcesReady && c.initialActive == 0 && c.active == 0
+			c.mu.Unlock()
+			if ready {
+				c.Refresh(ctx)
+			}
+		}
+	}
 }
 
 func (c *Coordinator) refreshInstalled(ctx context.Context) error {
@@ -302,8 +346,16 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 		return
 	}
 	started := c.deps.Now()
+	runStore, hasRunIdentity := c.deps.Store.(RunStore)
+	var runID int64
 	if c.deps.Store != nil {
-		if err := c.deps.Store.SyncStarted(ctx, source.Name(), started); err != nil {
+		var err error
+		if hasRunIdentity {
+			runID, err = runStore.SyncStartedRun(ctx, source.Name(), started)
+		} else {
+			err = c.deps.Store.SyncStarted(ctx, source.Name(), started)
+		}
+		if err != nil {
 			c.notify(SyncFailed{Source: source.Name(), At: c.deps.Now(), Err: bounded(err)})
 			return
 		}
@@ -316,7 +368,7 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 		c.notify(SyncProgress{Source: source.Name(), At: c.deps.Now(), Progress: progress})
 		if progress.Batches > lastPublishedBatch {
 			lastPublishedBatch = progress.Batches
-			c.notify(tui.DatasetChanged{})
+			c.notify(DatasetChanged{})
 			initialReady()
 		}
 	}
@@ -331,7 +383,12 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 	err = bounded(err)
 	if c.deps.Store != nil {
 		persistenceCtx, cancelPersistence := syncPersistenceContext(ctx)
-		statusErr := c.deps.Store.SyncFinished(persistenceCtx, source.Name(), ended, result, err)
+		var statusErr error
+		if hasRunIdentity {
+			statusErr = runStore.SyncFinishedRun(persistenceCtx, runID, source.Name(), ended, result, err)
+		} else {
+			statusErr = c.deps.Store.SyncFinished(persistenceCtx, source.Name(), ended, result, err)
+		}
 		cancelPersistence()
 		if err == nil && statusErr != nil {
 			err = bounded(statusErr)
@@ -344,7 +401,7 @@ func (c *Coordinator) run(ctx context.Context, source Source, req Request, refre
 		return
 	}
 	c.notify(SyncCommitted{Source: source.Name(), At: ended, Result: result})
-	c.notify(tui.DatasetChanged{})
+	c.notify(DatasetChanged{})
 	c.scheduleHistoricalFallback(source)
 }
 
@@ -373,11 +430,11 @@ func (c *Coordinator) runHistoricalFallback(ctx context.Context, source Source, 
 	req.Progress = func(progress Progress) {
 		if progress.Batches > lastPublishedBatch {
 			lastPublishedBatch = progress.Batches
-			c.notify(tui.DatasetChanged{})
+			c.notify(DatasetChanged{})
 		}
 	}
 	if _, err := source.Index(ctx, req); err == nil {
-		c.notify(tui.DatasetChanged{})
+		c.notify(DatasetChanged{})
 	}
 }
 
@@ -442,9 +499,9 @@ func (c *Coordinator) EnsureRange(ctx context.Context, since time.Time) {
 	}
 	c.scheduleOperationLocked(root, op)
 }
-func (c *Coordinator) notify(msg tea.Msg) {
+func (c *Coordinator) notify(event Event) {
 	if c.deps.Notify != nil {
-		c.deps.Notify(msg)
+		c.deps.Notify(event)
 	}
 }
 func (c *Coordinator) Wait() {

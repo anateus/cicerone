@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 // UpsertEvents atomically stores immutable update events and their packages.

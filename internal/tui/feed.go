@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 func (m Model) renderFeed(width int) string {

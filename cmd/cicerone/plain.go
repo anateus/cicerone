@@ -10,8 +10,8 @@ import (
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/syncer"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/syncer"
 )
 
 type plainRuntime interface {

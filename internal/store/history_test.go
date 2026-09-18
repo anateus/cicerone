@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 func TestApplyHistoryBatchPublishesRowsBeforeFinalize(t *testing.T) {

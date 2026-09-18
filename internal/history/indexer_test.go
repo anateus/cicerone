@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/execx"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/store"
-	"cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/testutil"
 )
 
 func TestIndexerPersistsRangeAndIsIdempotent(t *testing.T) {

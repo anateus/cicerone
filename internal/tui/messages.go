@@ -1,9 +1,9 @@
 package tui
 
 import (
-	"cicerone/internal/domain"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
 )
 
 type FeedLoaded struct {
@@ -57,6 +57,7 @@ type PackageInfoLoaded struct {
 type READMELoaded struct {
 	RequestID, SelectionID uint64
 	PackageID              domain.PackageID
+	EventID                domain.EventID
 	Document               store.PackageDocument
 	Err                    error
 }
@@ -78,6 +79,7 @@ const (
 
 type DetailFieldLoading struct {
 	PackageID domain.PackageID
+	RequestID uint64
 	Field     DetailField
 	Loading   bool
 }

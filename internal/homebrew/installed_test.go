@@ -7,10 +7,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"cicerone/internal/domain"
-	"cicerone/internal/execx"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/testutil"
 )
 
 func TestInstalled(t *testing.T) {

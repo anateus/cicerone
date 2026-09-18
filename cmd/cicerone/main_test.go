@@ -14,16 +14,16 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/app"
-	"cicerone/internal/changelog"
-	"cicerone/internal/domain"
-	"cicerone/internal/download"
-	"cicerone/internal/execx"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
-	"cicerone/internal/syncer"
-	"cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/app"
+	"github.com/anateus/cicerone/internal/changelog"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/download"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/syncer"
+	"github.com/anateus/cicerone/internal/testutil"
 )
 
 type fakeInstalledClient struct {

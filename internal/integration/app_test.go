@@ -18,16 +18,16 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/changelog"
-	"cicerone/internal/domain"
-	"cicerone/internal/execx"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/history"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
-	"cicerone/internal/syncer"
-	"cicerone/internal/testutil"
-	"cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/changelog"
+	"github.com/anateus/cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/history"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/syncer"
+	"github.com/anateus/cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/tui"
 )
 
 type fixtureRunner struct {
@@ -205,32 +205,32 @@ func TestCachedRestartNeedsNoHTTPOrGitAndReturnsSameFeed(t *testing.T) {
 		coordinator.Wait()
 		return tui.InitialRefreshDone{}
 	}})
-	var refreshed tui.InitialRefreshDone
-	if batch, ok := model.Init()().(tea.BatchMsg); ok {
-		for _, cmd := range batch {
-			if msg := cmd(); msg != nil {
-				if event, ok := msg.(tui.InitialRefreshDone); ok {
-					refreshed = event
-				}
+	// Deliver every command result, including the initial cached query. A
+	// refresh can wait for that query and issue one follow-up after it arrives.
+	var execute func(tea.Cmd)
+	execute = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		switch msg := cmd().(type) {
+		case nil:
+			return
+		case tea.BatchMsg:
+			for _, child := range msg {
+				execute(child)
 			}
+		default:
+			updated, followup := model.Update(msg)
+			model = updated.(tui.Model)
+			execute(followup)
 		}
 	}
+	execute(model.Init())
 	if offlineGit.calls.Load() == 0 {
 		t.Fatal("initial refresh did not attempt Git discovery before rendering the feed")
 	}
-	updated, queryCmd := model.Update(refreshed)
-	model = updated.(tui.Model)
-	var loaded tui.FeedLoaded
-	if batch, ok := queryCmd().(tea.BatchMsg); ok {
-		for _, cmd := range batch {
-			if msg, ok := cmd().(tui.FeedLoaded); ok {
-				loaded = msg
-			}
-		}
-	}
-	updated, _ = model.Update(loaded)
-	if !strings.Contains(updated.View().Content, "fixture") {
-		t.Fatalf("cached feed was not rendered after the failed refresh:\n%s", updated.View().Content)
+	if !strings.Contains(model.View().Content, "fixture") {
+		t.Fatalf("cached feed was not rendered after the failed refresh:\n%s", model.View().Content)
 	}
 	offlineResolver := changelog.NewResolver(restarted, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("offline restart made an HTTP request")

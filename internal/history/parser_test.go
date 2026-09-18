@@ -3,7 +3,7 @@ package history
 import (
 	"testing"
 
-	"cicerone/internal/domain"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 func TestParseDefinitionExtractsAnchoredFormulaTokens(t *testing.T) {

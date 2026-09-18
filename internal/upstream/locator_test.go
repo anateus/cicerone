@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/store"
 )
 
 func TestLocatorDiscoversAndCachesHomepageRepository(t *testing.T) {

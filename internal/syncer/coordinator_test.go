@@ -10,9 +10,7 @@ import (
 	"testing"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/domain"
-	"cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 type fakeCache struct{ called chan struct{} }
@@ -41,6 +39,8 @@ type fakeDestination struct {
 	mu                  sync.Mutex
 	installed           bool
 	starts, finishes    []string
+	startedRuns         atomic.Int64
+	finishedRuns        []int64
 	startErr, finishErr error
 	finishContextErr    error
 }
@@ -57,12 +57,22 @@ func (f *fakeDestination) SyncStarted(_ context.Context, source string, _ time.T
 	f.starts = append(f.starts, source)
 	return f.startErr
 }
+func (f *fakeDestination) SyncStartedRun(ctx context.Context, source string, at time.Time) (int64, error) {
+	runID := f.startedRuns.Add(1)
+	return runID, f.SyncStarted(ctx, source, at)
+}
 func (f *fakeDestination) SyncFinished(ctx context.Context, source string, _ time.Time, _ Result, _ error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finishes = append(f.finishes, source)
 	f.finishContextErr = ctx.Err()
 	return f.finishErr
+}
+func (f *fakeDestination) SyncFinishedRun(ctx context.Context, runID int64, source string, at time.Time, result Result, syncErr error) error {
+	f.mu.Lock()
+	f.finishedRuns = append(f.finishedRuns, runID)
+	f.mu.Unlock()
+	return f.SyncFinished(ctx, source, at, result, syncErr)
 }
 
 func TestRetryAndEnsureRangeQueueDuringDiscovery(t *testing.T) {
@@ -129,7 +139,7 @@ func TestRetryRestartsFailedDiscoveryAndDrainsPendingOperationsOnce(t *testing.T
 			}
 			return []Source{job}, nil
 		},
-		Notify: func(msg tea.Msg) {
+		Notify: func(msg Event) {
 			if event, ok := msg.(SyncFailed); ok && event.Source == "repositories" {
 				c.Retry(context.Background(), "core")
 			}
@@ -187,10 +197,10 @@ func TestCloseDuringDiscoveryAndCallsAfterCloseDoNoWork(t *testing.T) {
 func TestSyncStartedPersistenceFailureSkipsSourceWorkAndCommit(t *testing.T) {
 	destination := &fakeDestination{installed: true, startErr: errors.New("start write failed")}
 	var indexed atomic.Int32
-	var messages []tea.Msg
+	var messages []Event
 	var mu sync.Mutex
 	job := fakeJob{name: "core", destination: destination, index: func(context.Context, Request) (Result, error) { indexed.Add(1); return Result{}, nil }}
-	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) { mu.Lock(); messages = append(messages, msg); mu.Unlock() }})
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg Event) { mu.Lock(); messages = append(messages, msg); mu.Unlock() }})
 	c.Start(context.Background())
 	c.Wait()
 	if indexed.Load() != 0 {
@@ -205,7 +215,7 @@ func TestSyncStartedPersistenceFailureSkipsSourceWorkAndCommit(t *testing.T) {
 			failed++
 		case SyncCommitted:
 			committed++
-		case tui.DatasetChanged:
+		case DatasetChanged:
 			changed++
 		}
 	}
@@ -387,7 +397,7 @@ func TestRefreshFetchesBeforeIndexingRepository(t *testing.T) {
 	var committed Result
 	c := New(Dependencies{
 		Store: destination, Sources: []Source{job},
-		Notify: func(msg tea.Msg) {
+		Notify: func(msg Event) {
 			if event, ok := msg.(SyncProgress); ok {
 				progress = append(progress, event.Progress)
 			}
@@ -419,7 +429,7 @@ func TestRefreshPreemptsActiveCatchupAndPublishesANewInitialBatch(t *testing.T) 
 	secondStarted := make(chan struct{})
 	var calls atomic.Int32
 	var messagesMu sync.Mutex
-	var messages []tea.Msg
+	var messages []Event
 	job := fakeJob{
 		name:        "core",
 		destination: destination,
@@ -440,7 +450,7 @@ func TestRefreshPreemptsActiveCatchupAndPublishesANewInitialBatch(t *testing.T) 
 			}
 		},
 	}
-	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) {
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg Event) {
 		messagesMu.Lock()
 		messages = append(messages, msg)
 		messagesMu.Unlock()
@@ -457,6 +467,12 @@ func TestRefreshPreemptsActiveCatchupAndPublishesANewInitialBatch(t *testing.T) 
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("index calls = %d, want initial catch-up and forced refresh", got)
+	}
+	destination.mu.Lock()
+	finishedRuns := append([]int64(nil), destination.finishedRuns...)
+	destination.mu.Unlock()
+	if len(finishedRuns) != 2 || finishedRuns[0] == finishedRuns[1] {
+		t.Fatalf("finished run IDs = %v, want distinct IDs for both attempts", finishedRuns)
 	}
 	messagesMu.Lock()
 	defer messagesMu.Unlock()
@@ -491,8 +507,8 @@ func TestCoordinatorPublishesDurableBatchProgress(t *testing.T) {
 		req.Progress(Progress{Commits: 150, Events: 12, Batches: 2})
 		return Result{Events: 12}, nil
 	}}
-	var messages []tea.Msg
-	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) { messages = append(messages, msg) }})
+	var messages []Event
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg Event) { messages = append(messages, msg) }})
 	c.Start(context.Background())
 	c.Wait()
 	var sequence []string
@@ -502,7 +518,7 @@ func TestCoordinatorPublishesDurableBatchProgress(t *testing.T) {
 			sequence = append(sequence, "started")
 		case SyncProgress:
 			sequence = append(sequence, fmt.Sprintf("progress-%d", event.Progress.Batches))
-		case tui.DatasetChanged:
+		case DatasetChanged:
 			sequence = append(sequence, "changed")
 		case SyncCommitted:
 			sequence = append(sequence, "committed")
@@ -514,6 +530,32 @@ func TestCoordinatorPublishesDurableBatchProgress(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRefreshesSourcesAtConfiguredInterval(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	var refreshes atomic.Int32
+	secondRefresh := make(chan struct{}, 1)
+	job := fakeJob{
+		name:        "core",
+		destination: destination,
+		refresh: func(context.Context) error {
+			if refreshes.Add(1) == 2 {
+				secondRefresh <- struct{}{}
+			}
+			return nil
+		},
+		index: func(context.Context, Request) (Result, error) { return Result{}, nil },
+	}
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, RefreshInterval: 5 * time.Millisecond})
+	c.Start(context.Background())
+	defer c.Close()
+
+	select {
+	case <-secondRefresh:
+	case <-time.After(time.Second):
+		t.Fatalf("background refreshes = %d, want at least two", refreshes.Load())
+	}
+}
+
 func TestCoordinatorPublishesScanHeartbeatsWithoutReloadingUndurableData(t *testing.T) {
 	destination := &fakeDestination{installed: true}
 	job := fakeJob{name: "core", destination: destination, index: func(_ context.Context, req Request) (Result, error) {
@@ -521,8 +563,8 @@ func TestCoordinatorPublishesScanHeartbeatsWithoutReloadingUndurableData(t *test
 		req.Progress(Progress{Commits: 18_248, Events: 12_760, Batches: 1})
 		return Result{Events: 12_760}, nil
 	}}
-	var messages []tea.Msg
-	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg tea.Msg) { messages = append(messages, msg) }})
+	var messages []Event
+	c := New(Dependencies{Store: destination, Sources: []Source{job}, Notify: func(msg Event) { messages = append(messages, msg) }})
 	c.Start(context.Background())
 	c.Wait()
 	heartbeats, changed := 0, 0
@@ -530,7 +572,7 @@ func TestCoordinatorPublishesScanHeartbeatsWithoutReloadingUndurableData(t *test
 		switch message.(type) {
 		case SyncProgress:
 			heartbeats++
-		case tui.DatasetChanged:
+		case DatasetChanged:
 			changed++
 		}
 	}
@@ -569,8 +611,8 @@ func TestRepositoryConcurrencyIsTwoAndFailuresAreIsolated(t *testing.T) {
 		}}
 	}
 	var mu sync.Mutex
-	var messages []tea.Msg
-	c := New(Dependencies{Installed: fakeInstalled{called: make(chan struct{})}, Store: destination, Sources: jobs, Notify: func(msg tea.Msg) { mu.Lock(); messages = append(messages, msg); mu.Unlock() }})
+	var messages []Event
+	c := New(Dependencies{Installed: fakeInstalled{called: make(chan struct{})}, Store: destination, Sources: jobs, Notify: func(msg Event) { mu.Lock(); messages = append(messages, msg); mu.Unlock() }})
 	c.Start(context.Background())
 	<-started
 	<-started
@@ -593,7 +635,7 @@ func TestRepositoryConcurrencyIsTwoAndFailuresAreIsolated(t *testing.T) {
 			committed++
 		case SyncFailed:
 			failed++
-		case tui.DatasetChanged:
+		case DatasetChanged:
 			changed++
 		}
 	}

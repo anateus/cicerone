@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"cicerone/internal/execx"
-	"cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/homebrew"
 )
 
 // TestRealHomebrewReadOnly only reads installed metadata. It never invokes an

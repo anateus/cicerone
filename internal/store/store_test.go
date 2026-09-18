@@ -333,6 +333,32 @@ func TestSyncRunRetainsCountsCursorSuccessAndBoundedError(t *testing.T) {
 	}
 }
 
+func TestSyncFinishedRunUpdatesTheAttemptThatStarted(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	first, err := s.SyncStartedRun(ctx, "core", time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.SyncStartedRun(ctx, "core", time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncFinishedRun(ctx, first, "core", time.Unix(3, 0).UTC(), SyncResult{Cursor: "first"}, context.Canceled); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncFinishedRun(ctx, second, "core", time.Unix(4, 0).UTC(), SyncResult{Cursor: "second"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	status, ok, err := s.SyncStatus(ctx, "core")
+	if err != nil || !ok {
+		t.Fatalf("SyncStatus = %+v, %v, %v", status, ok, err)
+	}
+	if status.Cursor != "second" || status.Error != "" || !status.LastSuccess.Equal(time.Unix(4, 0).UTC()) {
+		t.Fatalf("latest attempt status = %+v", status)
+	}
+}
+
 func TestSyncFinishedRejectsMissingRun(t *testing.T) {
 	s := openTestStore(t)
 	err := s.SyncFinished(context.Background(), "missing", time.Now(), SyncResult{}, nil)

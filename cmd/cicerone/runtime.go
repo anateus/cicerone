@@ -9,18 +9,20 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"cicerone/internal/app"
-	"cicerone/internal/changelog"
-	"cicerone/internal/download"
-	"cicerone/internal/execx"
-	"cicerone/internal/gitrepo"
-	"cicerone/internal/history"
-	"cicerone/internal/homebrew"
-	"cicerone/internal/store"
-	"cicerone/internal/syncer"
-	"cicerone/internal/tui"
-	"cicerone/internal/upstream"
+	"github.com/anateus/cicerone/internal/app"
+	"github.com/anateus/cicerone/internal/changelog"
+	"github.com/anateus/cicerone/internal/download"
+	"github.com/anateus/cicerone/internal/execx"
+	"github.com/anateus/cicerone/internal/gitrepo"
+	"github.com/anateus/cicerone/internal/history"
+	"github.com/anateus/cicerone/internal/homebrew"
+	"github.com/anateus/cicerone/internal/store"
+	"github.com/anateus/cicerone/internal/syncer"
+	"github.com/anateus/cicerone/internal/tui"
+	"github.com/anateus/cicerone/internal/upstream"
 )
+
+const backgroundRefreshInterval = 5 * time.Minute
 
 var newExecRunner = execx.NewRunner
 var runtimePaths = app.DefaultPaths
@@ -77,11 +79,11 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 	}
 	coordinator := syncer.New(syncer.Dependencies{
 		Installed: brew, Store: syncStore{destination}, LoadSources: loadSources,
-		InitialSince: time.Now().Add(-30 * 24 * time.Hour), Notify: func(msg tea.Msg) {
+		InitialSince: time.Now().Add(-30 * 24 * time.Hour), RefreshInterval: backgroundRefreshInterval, Notify: func(event syncer.Event) {
 			if notify == nil {
 				return
 			}
-			switch event := msg.(type) {
+			switch event := event.(type) {
 			case syncer.SyncStarted:
 				notify(tui.SyncStarted{Source: event.Source})
 				notify(tui.Notify{Text: "Synchronizing " + event.Source + "…"})
@@ -93,8 +95,10 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 			case syncer.SyncFailed:
 				notify(tui.SyncDone{Source: event.Source})
 				notify(tui.Notify{Text: event.Source + " synchronization failed", Err: event.Err})
+			case syncer.DatasetChanged:
+				notify(tui.DatasetChanged{})
 			}
-			notify(msg)
+			notify(event)
 		},
 	})
 	fetcher := &changelog.Fetcher{}
