@@ -169,6 +169,31 @@ func TestRetryRestartsFailedDiscoveryAndDrainsPendingOperationsOnce(t *testing.T
 	}
 }
 
+func TestPeriodicRefreshRetriesFailedDiscovery(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	var loads atomic.Int32
+	refreshed := make(chan struct{})
+	var once sync.Once
+	job := fakeJob{name: "core", destination: destination, refresh: func(context.Context) error {
+		once.Do(func() { close(refreshed) })
+		return nil
+	}}
+	c := New(Dependencies{Store: destination, RefreshInterval: 10 * time.Millisecond,
+		LoadSources: func(context.Context) ([]Source, error) {
+			if loads.Add(1) == 1 {
+				return nil, errors.New("temporary discovery failure")
+			}
+			return []Source{job}, nil
+		},
+	})
+	c.Start(context.Background())
+	defer c.Close()
+	waitClosed(t, refreshed, "automatic discovery retry")
+	if got := loads.Load(); got != 2 {
+		t.Fatalf("source discovery attempts = %d, want 2", got)
+	}
+}
+
 func TestCloseDuringDiscoveryAndCallsAfterCloseDoNoWork(t *testing.T) {
 	discoveryStarted := make(chan struct{})
 	loaderStopped := make(chan struct{})
@@ -554,6 +579,39 @@ func TestCoordinatorRefreshesSourcesAtConfiguredInterval(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("background refreshes = %d, want at least two", refreshes.Load())
 	}
+}
+
+func TestCoordinatorRefreshesWhileHistoricalFallbackIsActive(t *testing.T) {
+	destination := &fakeDestination{installed: true}
+	var refreshes atomic.Int32
+	fallbackStarted := make(chan struct{})
+	secondRefresh := make(chan struct{})
+	job := fakeJob{
+		name: "core", destination: destination,
+		refresh: func(context.Context) error {
+			if refreshes.Add(1) == 2 {
+				close(secondRefresh)
+			}
+			return nil
+		},
+		index: func(ctx context.Context, req Request) (Result, error) {
+			if !req.HistoricalFallback {
+				return Result{}, nil
+			}
+			select {
+			case <-fallbackStarted:
+			default:
+				close(fallbackStarted)
+			}
+			<-ctx.Done()
+			return Result{}, ctx.Err()
+		},
+	}
+	c := New(Dependencies{Store: destination, Installed: fakeInstalled{called: make(chan struct{}), packages: []domain.InstalledPackage{{PackageID: "pkg"}}}, Sources: []Source{job}, RefreshInterval: 10 * time.Millisecond})
+	c.Start(context.Background())
+	defer c.Close()
+	waitClosed(t, fallbackStarted, "historical fallback")
+	waitClosed(t, secondRefresh, "periodic refresh during historical fallback")
 }
 
 func TestCoordinatorPublishesScanHeartbeatsWithoutReloadingUndurableData(t *testing.T) {

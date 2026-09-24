@@ -129,6 +129,7 @@ type Coordinator struct {
 	deps                          Dependencies
 	mu                            sync.Mutex
 	cond                          *sync.Cond
+	refreshLoopOnce               sync.Once
 	root                          context.Context
 	cancel                        context.CancelFunc
 	sem                           chan struct{}
@@ -181,6 +182,9 @@ func (c *Coordinator) Start(ctx context.Context) {
 
 func (c *Coordinator) startLocked(root context.Context) {
 	c.started = true
+	if c.deps.RefreshInterval > 0 {
+		c.refreshLoopOnce.Do(func() { go c.refreshLoop(root, c.deps.RefreshInterval) })
+	}
 	c.active++
 	c.initialActive++
 	ticket := &initialTicket{coordinator: c}
@@ -226,9 +230,6 @@ func (c *Coordinator) startLocked(root context.Context) {
 			c.scheduleOperationLocked(root, op)
 		}
 		c.mu.Unlock()
-		if c.deps.RefreshInterval > 0 {
-			go c.refreshLoop(root, c.deps.RefreshInterval)
-		}
 	}()
 }
 
@@ -241,9 +242,15 @@ func (c *Coordinator) refreshLoop(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			c.mu.Lock()
-			ready := !c.closed && c.sourcesReady && c.initialActive == 0 && c.active == 0
+			retryDiscovery := !c.closed && !c.started && !c.sourcesReady
+			// Historical fallback can run for hours on filtered mirrors. It
+			// must not suppress every periodic fetch until it completes. Wait
+			// for the newest initial slice, then preempt the resumable work.
+			ready := !c.closed && c.sourcesReady && c.initialActive == 0
 			c.mu.Unlock()
-			if ready {
+			if retryDiscovery {
+				c.Start(ctx)
+			} else if ready {
 				c.Refresh(ctx)
 			}
 		}

@@ -25,7 +25,7 @@ type Progress struct{ Commits, Events, Diagnostics, Batches int }
 
 const (
 	historyScanFormatVersion   = "mainline-merges-v1"
-	historyInitialBatchCommits = 10
+	historyInitialBatchCommits = 1
 	historyBatchCommits        = 100
 	historyProgressCommits     = 10
 	historyCancelFlushWindow   = 500 * time.Millisecond

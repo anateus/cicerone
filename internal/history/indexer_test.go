@@ -117,11 +117,11 @@ func TestIndexerPublishesBatchesBeforeCompletion(t *testing.T) {
 		done <- indexErr
 	}()
 	progress := <-firstBatch
-	if progress.Commits != 10 || progress.Events != 10 {
+	if progress.Commits != historyInitialBatchCommits || progress.Events != historyInitialBatchCommits {
 		t.Fatalf("first progress=%#v", progress)
 	}
 	groups, err := s.QueryFeed(ctx, domain.FeedFilter{})
-	if err != nil || countEvents(groups) != 10 {
+	if err != nil || countEvents(groups) != historyInitialBatchCommits {
 		t.Fatalf("visible events=%d err=%v", countEvents(groups), err)
 	}
 	if state, ok, err := s.HistoryState(ctx, "core"); err != nil || ok {
@@ -173,10 +173,10 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 		t.Fatalf("cancelled state=%#v ok=%v err=%v", state, ok, err)
 	}
 	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{})
-	if err != nil || countEvents(groups) != 10 {
+	if err != nil || countEvents(groups) != historyInitialBatchCommits {
 		t.Fatalf("partial events=%d err=%v", countEvents(groups), err)
 	}
-	checkpointed := append([]string(nil), commits[len(commits)-10:]...)
+	checkpointed := append([]string(nil), commits[len(commits)-historyInitialBatchCommits:]...)
 	repo.Commit("Formula/foo.rb", formula("101"), "version 101", now)
 	runner.revisions = nil
 	var resumedProgress []Progress
@@ -192,7 +192,7 @@ func TestIndexerCancellationRetriesWithoutDuplicates(t *testing.T) {
 		}
 	}
 	if !foundStartupBatch {
-		t.Fatalf("resume progress = %#v, want the next 10 commits durable as the startup batch", resumedProgress)
+		t.Fatalf("resume progress = %#v, want the next %d commits durable as the startup batch", resumedProgress, historyInitialBatchCommits)
 	}
 	processed := map[string]bool{}
 	for _, commit := range checkpointed {
@@ -227,7 +227,7 @@ func TestIndexerCancellationCheckpointsPartialBatch(t *testing.T) {
 	source := gitrepo.Source{Name: "core", Path: repo.Path}
 	ctx, cancel := context.WithCancel(context.Background())
 	request := Request{Since: now.Add(-time.Hour), Progress: func(progress Progress) {
-		if progress.Commits == 20 {
+		if progress.Commits == 21 {
 			cancel()
 		}
 	}}
@@ -239,8 +239,8 @@ func TestIndexerCancellationCheckpointsPartialBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(progress) != 20 {
-		t.Fatalf("checkpointed commits=%d, want first batch plus 10-commit partial batch", len(progress))
+	if len(progress) != 21 {
+		t.Fatalf("checkpointed commits=%d, want first batch plus a partial batch", len(progress))
 	}
 }
 
