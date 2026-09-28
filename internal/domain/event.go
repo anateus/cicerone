@@ -12,6 +12,8 @@ const (
 	EventVersion  EventKind = "version"
 	EventRevision EventKind = "revision"
 	EventMetadata EventKind = "metadata"
+	// EventCatalog is a transient search result, never a persisted update.
+	EventCatalog EventKind = "catalog"
 )
 
 // UpdateCadence describes the observed interval between a package's version updates.
@@ -56,23 +58,24 @@ func NewEventID(repository, commit string, packageID PackageID, kind EventKind) 
 
 // UpdateEvent records an immutable change to a package definition.
 type UpdateEvent struct {
-	ID             EventID
-	PackageID      PackageID
-	Name           string
-	Type           PackageType
-	Status         PackageStatus
-	Kind           EventKind
-	OldVersion     string
-	NewVersion     string
-	OldRevision    string
-	NewRevision    string
-	Repository     string
-	DefinitionPath string
-	Commit         string
-	Time           time.Time
-	Diagnostic     string
-	Installed      bool
-	Seen           bool
-	Cadence        UpdateCadence
-	UpdateInterval time.Duration
+	ID                 EventID
+	PackageID          PackageID
+	Name               string
+	Type               PackageType
+	Status             PackageStatus
+	Kind               EventKind
+	OldVersion         string
+	NewVersion         string
+	OldRevision        string
+	NewRevision        string
+	Repository         string
+	DefinitionPath     string
+	Commit             string
+	Time               time.Time
+	Diagnostic         string
+	CatalogDescription string
+	Installed          bool
+	Seen               bool
+	Cadence            UpdateCadence
+	UpdateInterval     time.Duration
 }

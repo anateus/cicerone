@@ -5,7 +5,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/anateus/cicerone/internal/domain"
 	"github.com/anateus/cicerone/internal/execx"
 	"github.com/anateus/cicerone/internal/testutil"
 )
@@ -62,28 +61,5 @@ func TestInfoAcceptsCaskDisplayNameArray(t *testing.T) {
 	}
 	if !got.Cask || got.Name != "Widget App" || got.FullName != "acme/tap/widget" {
 		t.Fatalf("Info = %#v", got)
-	}
-}
-
-func TestSearchDescriptionsReturnsFormulaeAndCasks(t *testing.T) {
-	runner := &testutil.Runner{RunResult: execx.Result{Stdout: []byte(`==> Formulae
-cbc: Mixed integer linear programming solver
-acme/tap/custom-solver: Custom solver
-
-==> Casks
-flow5: Potential flow solver
-`)}}
-
-	got, err := NewClient(runner).SearchDescriptions(context.Background(), "solver")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []domain.PackageID{"cbc", "acme/tap/custom-solver", "flow5"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("SearchDescriptions = %v, want %v", got, want)
-	}
-	if len(runner.RunCalls) != 1 || runner.RunCalls[0].Name != "brew" ||
-		!slices.Equal(runner.RunCalls[0].Args, []string{"search", "--desc", "solver"}) {
-		t.Fatalf("runner calls = %#v", runner.RunCalls)
 	}
 }

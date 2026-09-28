@@ -248,7 +248,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			for _, group := range msg.Groups {
 				for _, event := range group.Events {
-					if !event.Seen {
+					if !event.Seen && event.Kind != domain.EventCatalog {
 						m.sessionNew[event.ID] = true
 					}
 				}
@@ -1059,8 +1059,13 @@ func (m *Model) detailLoadCommands() []tea.Cmd {
 	if !m.hasSelection() {
 		return nil
 	}
-	m.startCachedDetailLoads()
 	e := m.selectedEvent()
+	if e.Kind == domain.EventCatalog {
+		m.packageInfoLoading = m.deps.PackageInfo != nil
+		m.detailRequestID++
+		return []tea.Cmd{m.loadPackageInfo(m.deps.Context, m.detailRequestID, m.selectionID, e), m.startDetailSpinner()}
+	}
+	m.startCachedDetailLoads()
 	commands := []tea.Cmd{
 		m.loadCachedPackageInfo(m.selectionID, e),
 		m.loadCachedREADME(m.selectionID, e),
@@ -1138,7 +1143,9 @@ func (m Model) markFeedSeen(groups []domain.FeedGroup) tea.Cmd {
 	ids := make([]domain.EventID, 0)
 	for _, group := range groups {
 		for _, event := range group.Events {
-			ids = append(ids, event.ID)
+			if event.Kind != domain.EventCatalog {
+				ids = append(ids, event.ID)
+			}
 		}
 	}
 	if len(ids) == 0 {
@@ -1152,20 +1159,32 @@ func (m Model) markFeedSeen(groups []domain.FeedGroup) tea.Cmd {
 func (m Model) partitionSeenGroups(groups []domain.FeedGroup) []domain.FeedGroup {
 	partitioned := make([]domain.FeedGroup, 0, len(groups))
 	for _, group := range groups {
-		if !m.groupPreviouslySeen(group) {
+		if !catalogGroup(group) && !m.groupPreviouslySeen(group) {
 			partitioned = append(partitioned, group)
 		}
 	}
 	for _, group := range groups {
-		if m.groupPreviouslySeen(group) {
+		if !catalogGroup(group) && m.groupPreviouslySeen(group) {
+			partitioned = append(partitioned, group)
+		}
+	}
+	for _, group := range groups {
+		if catalogGroup(group) {
 			partitioned = append(partitioned, group)
 		}
 	}
 	return partitioned
 }
 
+func catalogGroup(group domain.FeedGroup) bool {
+	return len(group.Events) > 0 && group.Events[0].Kind == domain.EventCatalog
+}
+
 func (m Model) groupPreviouslySeen(group domain.FeedGroup) bool {
 	if len(group.Events) == 0 {
+		return false
+	}
+	if catalogGroup(group) {
 		return false
 	}
 	for _, event := range group.Events {

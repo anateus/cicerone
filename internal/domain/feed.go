@@ -26,6 +26,14 @@ type FeedFilter struct {
 	Search          SearchScope
 	RollUp          bool
 	ExternalMatches []PackageID
+	CatalogPackages []CatalogPackage
+}
+
+// CatalogPackage is a Homebrew search hit without a recorded update event.
+type CatalogPackage struct {
+	ID          PackageID
+	Type        PackageType
+	Description string
 }
 
 // FeedGroup is one feed row. Events contains the newest event first.

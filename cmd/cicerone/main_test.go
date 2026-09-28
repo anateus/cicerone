@@ -32,13 +32,15 @@ type fakeInstalledClient struct {
 }
 
 type fakeDescriptionSearcher struct {
-	matches []domain.PackageID
-	query   string
+	matches      []domain.CatalogPackage
+	query        string
+	descriptions bool
+	err          error
 }
 
-func (f *fakeDescriptionSearcher) SearchDescriptions(_ context.Context, query string) ([]domain.PackageID, error) {
-	f.query = query
-	return f.matches, nil
+func (f *fakeDescriptionSearcher) SearchCatalog(_ context.Context, query string, descriptions bool) ([]domain.CatalogPackage, error) {
+	f.query, f.descriptions = query, descriptions
+	return f.matches, f.err
 }
 
 type fakeRuntimeRunner struct{}
@@ -667,13 +669,78 @@ func TestSearchableFeedDataAddsHomebrewDescriptionMatches(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	searcher := &fakeDescriptionSearcher{matches: []domain.PackageID{"cbc"}}
-	data := searchableFeedData{Store: destination, descriptions: searcher}
+	searcher := &fakeDescriptionSearcher{matches: []domain.CatalogPackage{{ID: "cbc", Type: domain.PackageFormula, Description: "Mixed integer solver"}}}
+	data := searchableFeedData{Store: destination, catalog: searcher}
 	groups, err := data.QueryFeed(context.Background(), domain.FeedFilter{Query: "solver", Search: domain.SearchDescriptions})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if searcher.query != "solver" || len(groups) != 1 || groups[0].Events[0].PackageID != "cbc" {
+	if searcher.query != "solver" || !searcher.descriptions || len(groups) != 1 || groups[0].Events[0].PackageID != "cbc" {
 		t.Fatalf("query=%q groups=%#v", searcher.query, groups)
+	}
+}
+
+func TestSearchableFeedDataDisplaysCatalogWithoutIndexedEvents(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	searcher := &fakeDescriptionSearcher{matches: []domain.CatalogPackage{
+		{ID: "ripgrep", Type: domain.PackageFormula},
+		{ID: "iterm2", Type: domain.PackageCask, Description: "Terminal emulator"},
+	}}
+	data := searchableFeedData{Store: destination, catalog: searcher}
+	filter := domain.FeedFilter{Now: time.Now().UTC(), Horizon: 30 * 24 * time.Hour,
+		Query: "term", Search: domain.SearchNames,
+		Types: map[domain.PackageType]bool{domain.PackageFormula: true}}
+	groups, err := data.QueryFeed(ctx, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searcher.descriptions || len(groups) != 1 || groups[0].Events[0].PackageID != "ripgrep" ||
+		groups[0].Events[0].Kind != domain.EventCatalog || !groups[0].Events[0].Time.IsZero() {
+		t.Fatalf("name search: descriptions=%v groups=%#v", searcher.descriptions, groups)
+	}
+	filter.Types = map[domain.PackageType]bool{domain.PackageCask: true}
+	filter.Search = domain.SearchDescriptions
+	groups, err = data.QueryFeed(ctx, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !searcher.descriptions || len(groups) != 1 || groups[0].Events[0].PackageID != "iterm2" ||
+		groups[0].Events[0].CatalogDescription != "Terminal emulator" {
+		t.Fatalf("description search: descriptions=%v groups=%#v", searcher.descriptions, groups)
+	}
+	if err := destination.SetPackageStatus(ctx, "iterm2", domain.PackageStatusStarred); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = data.QueryFeed(ctx, filter)
+	if err != nil || len(groups) != 1 || groups[0].Events[0].Status != domain.PackageStatusStarred {
+		t.Fatalf("status after search: groups=%#v err=%v", groups, err)
+	}
+	if _, ok, err := destination.PackageInfo(ctx, "iterm2"); err != nil || ok {
+		t.Fatalf("package info before selection: found=%v err=%v", ok, err)
+	}
+}
+
+func TestSearchableFeedDataKeepsLocalResultsWhenHomebrewUnavailable(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	if err := destination.UpsertEvents(ctx, []domain.UpdateEvent{{
+		ID: "event", PackageID: "ripgrep", Name: "ripgrep", Type: domain.PackageFormula,
+		Kind: domain.EventVersion, Time: time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	data := searchableFeedData{Store: destination, catalog: &fakeDescriptionSearcher{err: errors.New("brew unavailable")}}
+	groups, err := data.QueryFeed(ctx, domain.FeedFilter{Query: "ripgrep", Search: domain.SearchNames})
+	if err != nil || len(groups) != 1 || groups[0].Events[0].Kind != domain.EventVersion {
+		t.Fatalf("local search fallback: groups=%#v err=%v", groups, err)
 	}
 }

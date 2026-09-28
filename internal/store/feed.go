@@ -58,6 +58,23 @@ func (s *Store) SetInstalled(ctx context.Context, packages []domain.InstalledPac
 	})
 }
 
+// UpsertCatalogPackages makes Homebrew search hits available to the existing
+// package-info cache without inventing history events or replacing user status.
+func (s *Store) UpsertCatalogPackages(ctx context.Context, packages []domain.CatalogPackage) error {
+	if len(packages) == 0 {
+		return nil
+	}
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		for _, pkg := range packages {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO packages(id, name, type) VALUES (?, ?, ?)
+				ON CONFLICT(id) DO NOTHING`, pkg.ID, pkg.ID, pkg.Type); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // SetPackageStatus persists the user-assigned status for a package.
 func (s *Store) SetPackageStatus(ctx context.Context, packageID domain.PackageID, status domain.PackageStatus) error {
 	if status == "" {
@@ -188,7 +205,52 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		return nil, err
 	}
 	filter.Query = ""
-	return domain.BuildFeed(events, installed, filter), nil
+	groups := domain.BuildFeed(events, installed, filter)
+	if len(filter.CatalogPackages) == 0 {
+		return groups, nil
+	}
+	// Catalog rows have no revision or metadata event to display. Keep them out
+	// when the version-update feed has been explicitly switched off.
+	if len(filter.Kinds) > 0 && !filter.Kinds[domain.EventVersion] {
+		return groups, nil
+	}
+	// Show catalog hits without history after real updates. Query the packages
+	// table for persisted status and installed state, rather than fabricating an
+	// update timestamp, version or an installed flag.
+	shown := make(map[domain.PackageID]bool)
+	for _, group := range groups {
+		for _, event := range group.Events {
+			shown[event.PackageID] = true
+		}
+	}
+	for _, pkg := range filter.CatalogPackages {
+		if shown[pkg.ID] || len(filter.Types) > 0 && !filter.Types[pkg.Type] {
+			continue
+		}
+		var name string
+		var kind domain.PackageType
+		var status domain.PackageStatus
+		var isInstalled bool
+		err := s.db.QueryRowContext(ctx, `SELECT p.name, p.type, p.status, i.package_id IS NOT NULL
+			FROM packages p LEFT JOIN installed_packages i ON i.package_id=p.id WHERE p.id=?`, pkg.ID).
+			Scan(&name, &kind, &status, &isInstalled)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(filter.Types) > 0 && !filter.Types[kind] {
+			continue
+		}
+		shown[pkg.ID] = true
+		id := domain.EventID("catalog:" + string(pkg.ID))
+		groups = append(groups, domain.FeedGroup{ID: id, Events: []domain.UpdateEvent{{
+			ID: id, PackageID: pkg.ID, Name: name, Type: kind, Status: status,
+			Kind: domain.EventCatalog, CatalogDescription: pkg.Description, Installed: isInstalled, Seen: true,
+		}}})
+	}
+	return groups, nil
 }
 
 // MarkEventsSeen records that event rows have appeared in a feed session.

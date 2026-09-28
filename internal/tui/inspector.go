@@ -30,12 +30,34 @@ func (m Model) renderInspector(width int) string {
 	b.WriteByte('\n')
 	b.WriteString(m.inspectorLine(name+infoSpinner, width, p.raisedBG))
 	b.WriteByte('\n')
-	for _, line := range []string{m.packageInfo.Description} {
+	description := m.packageInfo.Description
+	if description == "" {
+		description = e.CatalogDescription
+	}
+	for _, line := range []string{description} {
 		if line == "" {
 			continue
 		}
 		b.WriteString(m.inspectorLine(line+infoSpinner, width, p.raisedBG))
 		b.WriteByte('\n')
+	}
+	if e.Kind == domain.EventCatalog {
+		b.WriteString(m.inspectorLine("Homebrew catalog match (no indexed update)", width, p.raisedBG))
+		b.WriteByte('\n')
+		if m.packageInfo.StableVersion != "" {
+			b.WriteString(m.inspectorLine("Latest     "+m.packageInfo.StableVersion+infoSpinner, width, p.raisedBG))
+			b.WriteByte('\n')
+		}
+		if m.packageInfo.Homepage != "" {
+			b.WriteString(m.inspectorLine("Homepage   "+m.packageInfo.Homepage, width, p.raisedBG))
+			b.WriteByte('\n')
+		}
+		if m.packageInfoErr != nil {
+			b.WriteString(m.inspectorLine("Package info unavailable: "+m.packageInfoErr.Error(), width, p.raisedBG))
+			b.WriteByte('\n')
+		}
+		b.WriteString(m.inspectorRule("╰", "", "╯", width, p.raisedBG))
+		return b.String()
 	}
 	b.WriteString(m.inspectorLine(eventKindTitle(e.Kind)+" update", width, p.raisedBG))
 	b.WriteByte('\n')

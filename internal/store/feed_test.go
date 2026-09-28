@@ -316,6 +316,24 @@ func TestQueryFeedIncludesExternalDescriptionMatches(t *testing.T) {
 	}, []domain.PackageID{"cbc"})
 }
 
+func TestQueryFeedCatalogResultsHonorUpdateKindAndTypeFilters(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	packages := []domain.CatalogPackage{{ID: "solver", Type: domain.PackageFormula, Description: "Solver"},
+		{ID: "visual-solver", Type: domain.PackageCask, Description: "Visual solver"}}
+	if err := s.UpsertCatalogPackages(ctx, packages); err != nil {
+		t.Fatal(err)
+	}
+	filter := domain.FeedFilter{Query: "solver", Search: domain.SearchDescriptions,
+		Kinds: map[domain.EventKind]bool{domain.EventRevision: true},
+		Types: map[domain.PackageType]bool{domain.PackageFormula: true}, CatalogPackages: packages}
+	assertSearchPackages(t, s, filter, []domain.PackageID{})
+	filter.Kinds[domain.EventVersion] = true
+	assertSearchPackages(t, s, filter, []domain.PackageID{"solver"})
+	filter.Types = map[domain.PackageType]bool{domain.PackageCask: true}
+	assertSearchPackages(t, s, filter, []domain.PackageID{"visual-solver"})
+}
+
 func assertSearchPackages(t *testing.T, s *Store, filter domain.FeedFilter, want []domain.PackageID) {
 	t.Helper()
 	groups, err := s.QueryFeed(context.Background(), filter)

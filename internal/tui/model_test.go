@@ -145,6 +145,61 @@ func event(id, pkg string) domain.UpdateEvent {
 	return domain.UpdateEvent{ID: domain.EventID(id), PackageID: domain.PackageID(pkg), Name: pkg, Type: domain.PackageFormula, Kind: domain.EventVersion, OldVersion: "1", NewVersion: "2"}
 }
 
+func TestCatalogSearchResultShowsPackageInfoWithoutInventingHistory(t *testing.T) {
+	info := &fakeCachedInfo{values: map[domain.PackageID]homebrew.PackageInfo{
+		"iterm2": {Name: "iTerm2", Description: "Terminal emulator", StableVersion: "3.5", Homepage: "https://iterm2.com"},
+	}}
+	m := NewModel(Dependencies{PackageInfo: info, Now: time.Now})
+	m.width, m.height = 120, 40
+	m.feedViewport.SetWidth(70)
+	m.feedViewport.SetHeight(30)
+	e := domain.UpdateEvent{ID: "catalog:iterm2", PackageID: "iterm2", Name: "iterm2", Type: domain.PackageCask,
+		Kind: domain.EventCatalog, CatalogDescription: "Terminal emulator", Seen: true}
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: []domain.FeedGroup{{ID: e.ID, Events: []domain.UpdateEvent{e}}}})
+	if m.markFeedSeen(m.groups) != nil {
+		t.Fatal("catalog-only rows must not be marked as update events")
+	}
+	if row := ansi.Strip(m.renderFeedRows(70)); !strings.Contains(row, "iterm2") ||
+		!strings.Contains(row, "[catalog]") || strings.Contains(row, "last update unknown") {
+		t.Fatalf("catalog row = %q", row)
+	}
+	commands := m.detailLoadCommands()
+	if len(commands) != 2 || !m.packageInfoLoading || m.changelogLoading || m.readmeLoading {
+		t.Fatalf("catalog detail commands = %d, loading = %#v", len(commands), m)
+	}
+	m = update(t, m, commands[0]())
+	if len(info.loads) != 1 || info.loads[0] != "iterm2" || m.packageInfoLoading {
+		t.Fatalf("catalog info loads = %v, loading = %v", info.loads, m.packageInfoLoading)
+	}
+	inspector := ansi.Strip(m.renderInspector(80))
+	if !strings.Contains(inspector, "Homebrew catalog match") || !strings.Contains(inspector, "3.5") ||
+		strings.Contains(inspector, "Version update") || strings.Contains(inspector, "DOCUMENTS") {
+		t.Fatalf("catalog inspector = %q", inspector)
+	}
+}
+
+func TestCatalogMatchesRemainAfterPreviouslySeenHistory(t *testing.T) {
+	m := NewModel(Dependencies{})
+	newEvent := event("new", "fresh")
+	seenEvent := event("old", "previous")
+	seenEvent.Seen = true
+	catalogEvent := domain.UpdateEvent{ID: "catalog:found", PackageID: "found", Name: "found", Kind: domain.EventCatalog, Seen: true}
+	input := []domain.FeedGroup{
+		{ID: newEvent.ID, Events: []domain.UpdateEvent{newEvent}},
+		{ID: seenEvent.ID, Events: []domain.UpdateEvent{seenEvent}},
+		{ID: catalogEvent.ID, Events: []domain.UpdateEvent{catalogEvent}},
+	}
+	result := m.partitionSeenGroups(input)
+	for index, want := range input {
+		if result[index].ID != want.ID {
+			t.Fatalf("catalog ordering = %#v", result)
+		}
+	}
+	if boundary := m.findSeenBoundary(result); boundary != 1 {
+		t.Fatalf("seen boundary = %d, want 1", boundary)
+	}
+}
+
 func groups(ids ...string) []domain.FeedGroup {
 	result := make([]domain.FeedGroup, len(ids))
 	for i, id := range ids {

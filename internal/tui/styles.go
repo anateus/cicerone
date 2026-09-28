@@ -525,7 +525,10 @@ func (m Model) tabStrip(labels []string, active, width int, background color.Col
 }
 
 func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []string {
-	cadence := m.updateCadenceLabel(e)
+	cadence := ""
+	if e.Kind != domain.EventCatalog {
+		cadence = m.updateCadenceLabel(e)
+	}
 	transition := eventKindBadge(e.Kind) + m.versionTransition(e)
 	nameWidth := ansi.StringWidth(packageNameWithStatus(e))
 	cadenceWidth := ansi.StringWidth(cadence)
@@ -563,6 +566,9 @@ func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []s
 	}
 	if width >= 52 {
 		description := m.packageDescriptions[e.PackageID]
+		if description == "" {
+			description = e.CatalogDescription
+		}
 		if description != "" {
 			description = lipgloss.NewStyle().Faint(true).Foreground(m.palette().primary).
 				Render(fit(description, max(0, width-2)))
@@ -743,6 +749,8 @@ func (m Model) feedChildRow(e domain.UpdateEvent, width int) string {
 
 func eventKindBadge(kind domain.EventKind) string {
 	switch kind {
+	case domain.EventCatalog:
+		return "[catalog] "
 	case domain.EventRevision:
 		return "[revision] "
 	case domain.EventMetadata:
@@ -753,6 +761,9 @@ func eventKindBadge(kind domain.EventKind) string {
 }
 
 func (m Model) versionTransition(e domain.UpdateEvent) string {
+	if e.Kind == domain.EventCatalog {
+		return ""
+	}
 	oldVersion := domain.CleanVersion(e.OldVersion)
 	newVersion := domain.CleanVersion(e.NewVersion)
 	if oldVersion == "" {

@@ -41,22 +41,29 @@ type installedReader interface {
 	Installed(context.Context) ([]domain.InstalledPackage, error)
 }
 
-type descriptionSearcher interface {
-	SearchDescriptions(context.Context, string) ([]domain.PackageID, error)
+type catalogSearcher interface {
+	SearchCatalog(context.Context, string, bool) ([]domain.CatalogPackage, error)
 }
 
 type searchableFeedData struct {
 	*store.Store
-	descriptions descriptionSearcher
+	catalog catalogSearcher
 }
 
 func (d searchableFeedData) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
-	if d.descriptions != nil && strings.TrimSpace(filter.Query) != "" && searchScopeIncludesDescriptions(filter.Search) {
-		matches, err := d.descriptions.SearchDescriptions(ctx, filter.Query)
-		if err != nil {
-			return nil, err
+	if d.catalog != nil && strings.TrimSpace(filter.Query) != "" {
+		matches, err := d.catalog.SearchCatalog(ctx, filter.Query, searchScopeIncludesDescriptions(filter.Search))
+		if err == nil {
+			if err := d.Store.UpsertCatalogPackages(ctx, matches); err != nil {
+				return nil, err
+			}
+			filter.CatalogPackages = matches
+			for _, match := range matches {
+				filter.ExternalMatches = append(filter.ExternalMatches, match.ID)
+			}
+		} else if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		filter.ExternalMatches = matches
 	}
 	return d.Store.QueryFeed(ctx, filter)
 }
@@ -290,7 +297,7 @@ func run() (runErr error) {
 
 func tuiDependencies(destination *store.Store, changelogs tui.ChangelogSource, ctx context.Context, onReady tea.Cmd, brew *homebrew.Client, send func(tea.Msg)) tui.Dependencies {
 	return tui.Dependencies{
-		Data: searchableFeedData{Store: destination, descriptions: brew}, Changelog: changelogs, Context: ctx, OnReady: onReady,
+		Data: searchableFeedData{Store: destination, catalog: brew}, Changelog: changelogs, Context: ctx, OnReady: onReady,
 		Actions: brew, Installed: installedRefresher{client: brew, store: destination}, Send: send,
 	}
 }
