@@ -58,6 +58,8 @@ func (i *Indexer) IndexPackage(ctx context.Context, source gitrepo.Source, packa
 	if err != nil {
 		return false, err
 	}
+	var selected *domain.UpdateEvent
+scan:
 	for _, commit := range commits {
 		for _, change := range commit.Changes {
 			// A rename into or out of this path is not evidence of this
@@ -101,11 +103,20 @@ func (i *Indexer) IndexPackage(ctx context.Context, source gitrepo.Source, packa
 			if before != nil {
 				event.OldVersion, event.OldRevision = before.Version, before.Revision
 			}
-			if err := i.store.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
-				return false, err
+			if classification.Kind == domain.EventVersion {
+				selected = &event
+				break scan
 			}
-			return true, nil
+			if selected == nil {
+				selected = &event // Fall back to the newest revision if no version is found.
+			}
 		}
 	}
-	return false, nil
+	if selected == nil {
+		return false, nil
+	}
+	if err := i.store.UpsertEvents(ctx, []domain.UpdateEvent{*selected}); err != nil {
+		return false, err
+	}
+	return true, nil
 }

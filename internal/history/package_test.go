@@ -61,8 +61,9 @@ func TestIndexPackageCaskRevisionAndAmbiguousHead(t *testing.T) {
 	ctx := context.Background()
 	repo := testutil.NewGitRepo(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	base := "cask \"foo\" do\n  version \"1\"\nend\n"
+	base := "cask \"foo\" do\n  version computed_version\nend\n"
 	repo.Commit("Casks/f/foo.rb", base, "initial", now.Add(-3*time.Hour))
+	repo.Commit("Casks/f/foo.rb", "cask \"foo\" do\n  version \"1\"\nend\n", "literal version", now.Add(-150*time.Minute))
 	revision := repo.Commit("Casks/f/foo.rb", "cask \"foo\" do\n  version \"1\"\n  revision 1\nend\n", "revision", now.Add(-2*time.Hour))
 	repo.Commit("Casks/f/foo.rb", "cask \"foo\" do\n  version computed_version\nend\n", "computed", now.Add(-time.Hour))
 	source := gitrepo.Source{Kind: "cask", Name: "homebrew-cask", Path: repo.Path}
@@ -74,6 +75,24 @@ func TestIndexPackageCaskRevisionAndAmbiguousHead(t *testing.T) {
 	groups, err := s.QueryFeed(ctx, domain.FeedFilter{Now: now, Horizon: 24 * time.Hour})
 	if err != nil || countEvents(groups) != 1 || groups[0].Events[0].Commit != revision || groups[0].Events[0].Kind != domain.EventRevision {
 		t.Fatalf("feed=%#v err=%v", groups, err)
+	}
+}
+
+func TestIndexPackageFindsVersionBehindNewerRevision(t *testing.T) {
+	ctx := context.Background()
+	repo := testutil.NewGitRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	repo.Commit("Formula/foo.rb", formula("1"), "initial", now.Add(-4*time.Hour))
+	version := repo.Commit("Formula/foo.rb", formula("2"), "release", now.Add(-3*time.Hour))
+	repo.Commit("Formula/foo.rb", formulaWith("2", "1", "https://example.test"), "revision", now.Add(-2*time.Hour))
+	source := gitrepo.Source{Kind: "formula", Name: "core", Path: repo.Path}
+	indexer, s := packageIndexer(t, source)
+	if found, err := indexer.IndexPackage(ctx, source, "foo", "Formula/foo.rb"); err != nil || !found {
+		t.Fatalf("version lookup found=%v err=%v", found, err)
+	}
+	groups, err := s.QueryFeed(ctx, domain.FeedFilter{Now: now, Horizon: 24 * time.Hour, Kinds: map[domain.EventKind]bool{domain.EventVersion: true}})
+	if err != nil || countEvents(groups) != 1 || groups[0].Events[0].Commit != version || groups[0].Events[0].NewVersion != "2" {
+		t.Fatalf("version-only feed=%#v err=%v", groups, err)
 	}
 }
 
