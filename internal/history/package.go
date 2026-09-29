@@ -54,62 +54,73 @@ func (i *Indexer) IndexPackage(ctx context.Context, source gitrepo.Source, packa
 	} else if found && storedType != packageType {
 		return false, fmt.Errorf("package %q has type %q, not %q", packageID, storedType, packageType)
 	}
-	commits, err := i.repository.PathCommits(ctx, definitionPath, packageHistoryCommitLimit)
-	if err != nil {
-		return false, err
-	}
 	var selected *domain.UpdateEvent
+	seenChanges := make(map[string]bool)
 scan:
-	for _, commit := range commits {
-		for _, change := range commit.Changes {
-			// A rename into or out of this path is not evidence of this
-			// package's update. Never attribute the other path's history.
-			if change.Path != definitionPath || change.OldPath != "" ||
-				(change.Status != "A" && change.Status != "M") {
-				continue
-			}
-			if change.Status == "A" {
-				ambiguous, err := i.repository.AmbiguousAddition(ctx, commit.Hash, definitionPath)
+	for _, limit := range []int{8, 16, 32, packageHistoryCommitLimit} {
+		commits, err := i.repository.PathCommits(ctx, definitionPath, limit)
+		if err != nil {
+			return false, err
+		}
+		for _, commit := range commits {
+			for _, change := range commit.Changes {
+				key := commit.Hash + "\x00" + change.Status + "\x00" + change.OldPath + "\x00" + change.Path
+				if seenChanges[key] {
+					continue
+				}
+				seenChanges[key] = true
+				// A rename into or out of this path is not evidence of this
+				// package's update. Never attribute the other path's history.
+				if change.Path != definitionPath || change.OldPath != "" ||
+					(change.Status != "A" && change.Status != "M") {
+					continue
+				}
+				if change.Status == "A" {
+					ambiguous, err := i.repository.AmbiguousAddition(ctx, commit.Hash, definitionPath)
+					if err != nil {
+						return false, err
+					}
+					if ambiguous {
+						continue
+					}
+				}
+				before, _, err := i.definition(ctx, commit.Hash+"^", definitionPath, change.Status == "A")
 				if err != nil {
 					return false, err
 				}
-				if ambiguous {
+				after, diagnostics, err := i.definition(ctx, commit.Hash, definitionPath, false)
+				if err != nil {
+					return false, err
+				}
+				if after == nil || after.Name != name || after.Type != packageType || after.FullName != name ||
+					(before != nil && (before.Name != name || before.FullName != name || before.Type != packageType)) {
 					continue
 				}
+				classification := Classify(before, after)
+				if classification.Ambiguous || (classification.Kind != domain.EventVersion && classification.Kind != domain.EventRevision) {
+					continue
+				}
+				event := domain.UpdateEvent{
+					ID:        domain.NewEventID(source.Name, commit.Hash, packageID, classification.Kind),
+					PackageID: packageID, Name: name, Type: packageType, Kind: classification.Kind,
+					Repository: source.Name, DefinitionPath: definitionPath, Commit: commit.Hash,
+					Time: commit.AuthorTime, Diagnostic: strings.Join(diagnostics, "; "),
+					NewVersion: after.Version, NewRevision: after.Revision,
+				}
+				if before != nil {
+					event.OldVersion, event.OldRevision = before.Version, before.Revision
+				}
+				if classification.Kind == domain.EventVersion {
+					selected = &event
+					break scan
+				}
+				if selected == nil {
+					selected = &event // Fall back to the newest revision if no version is found.
+				}
 			}
-			before, _, err := i.definition(ctx, commit.Hash+"^", definitionPath, change.Status == "A")
-			if err != nil {
-				return false, err
-			}
-			after, diagnostics, err := i.definition(ctx, commit.Hash, definitionPath, false)
-			if err != nil {
-				return false, err
-			}
-			if after == nil || after.Name != name || after.Type != packageType || after.FullName != name ||
-				(before != nil && (before.Name != name || before.FullName != name || before.Type != packageType)) {
-				continue
-			}
-			classification := Classify(before, after)
-			if classification.Ambiguous || (classification.Kind != domain.EventVersion && classification.Kind != domain.EventRevision) {
-				continue
-			}
-			event := domain.UpdateEvent{
-				ID:        domain.NewEventID(source.Name, commit.Hash, packageID, classification.Kind),
-				PackageID: packageID, Name: name, Type: packageType, Kind: classification.Kind,
-				Repository: source.Name, DefinitionPath: definitionPath, Commit: commit.Hash,
-				Time: commit.AuthorTime, Diagnostic: strings.Join(diagnostics, "; "),
-				NewVersion: after.Version, NewRevision: after.Revision,
-			}
-			if before != nil {
-				event.OldVersion, event.OldRevision = before.Version, before.Revision
-			}
-			if classification.Kind == domain.EventVersion {
-				selected = &event
-				break scan
-			}
-			if selected == nil {
-				selected = &event // Fall back to the newest revision if no version is found.
-			}
+		}
+		if len(commits) < limit {
+			break // The path's entire history was already inspected.
 		}
 	}
 	if selected == nil {

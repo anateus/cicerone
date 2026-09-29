@@ -72,8 +72,9 @@ func (r Repository) WalkCommits(ctx context.Context, requested Range, yield func
 	return r.walkCommitArgs(ctx, commitArgs(r.source.Path, requested), yield)
 }
 
-// PathCommits reads at most limit mainline commits affecting one repository-relative
-// definition. It does not follow renames into other paths or walk the whole tree.
+// PathCommits returns up to limit mainline commits changing one definition.
+// The limit bounds returned matches, not how much history Git traverses when
+// fewer matches exist. It does not follow renames into other paths.
 func (r Repository) PathCommits(ctx context.Context, definitionPath string, limit int) ([]Commit, error) {
 	if definitionPath == "" || path.IsAbs(definitionPath) || path.Clean(definitionPath) != definitionPath ||
 		strings.ContainsAny(definitionPath, "\\:\x00") || strings.HasPrefix(definitionPath, "../") || definitionPath == ".." ||

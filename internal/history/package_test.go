@@ -96,6 +96,28 @@ func TestIndexPackageFindsVersionBehindNewerRevision(t *testing.T) {
 	}
 }
 
+func TestIndexPackageDeepensPastRecentMetadataForVersion(t *testing.T) {
+	ctx := context.Background()
+	repo := testutil.NewGitRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	repo.Commit("Formula/foo.rb", formula("1"), "initial", now.Add(-14*time.Minute))
+	version := repo.Commit("Formula/foo.rb", formula("2"), "release", now.Add(-13*time.Minute))
+	for n := 0; n < 12; n++ {
+		repo.Commit("Formula/foo.rb", formulaWith("2", "", "https://example.test/"+strings.Repeat("x", n+1)),
+			"metadata", now.Add(time.Duration(n-12)*time.Minute))
+	}
+	source := gitrepo.Source{Kind: "formula", Name: "core", Path: repo.Path}
+	indexer, s := packageIndexer(t, source)
+	if found, err := indexer.IndexPackage(ctx, source, "foo", "Formula/foo.rb"); err != nil || !found {
+		t.Fatalf("version after metadata: found=%v err=%v", found, err)
+	}
+	groups, err := s.QueryFeed(ctx, domain.FeedFilter{Now: now, Horizon: 24 * time.Hour,
+		Kinds: map[domain.EventKind]bool{domain.EventVersion: true}})
+	if err != nil || countEvents(groups) != 1 || groups[0].Events[0].Commit != version {
+		t.Fatalf("deepened version feed=%#v err=%v", groups, err)
+	}
+}
+
 func TestIndexPackageInitialAdditionAndMissingPath(t *testing.T) {
 	ctx := context.Background()
 	repo := testutil.NewGitRepo(t)
