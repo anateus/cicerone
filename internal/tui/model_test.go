@@ -213,6 +213,20 @@ func TestCatalogMatchesRemainAfterPreviouslySeenHistory(t *testing.T) {
 	}
 }
 
+func TestThirdPartyCatalogResultExplainsMetadataOnly(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height = 100, 30
+	e := domain.UpdateEvent{ID: "catalog:tomobar", PackageID: "tomobar", Name: "tomobar", Kind: domain.EventCatalog}
+	m.groups = []domain.FeedGroup{{ID: e.ID, Events: []domain.UpdateEvent{e}}}
+	m.catalogAttempted[e.PackageID] = true
+	m.packageInfo = homebrew.PackageInfo{Name: "TomoBar", Tap: "artemyurov/tomobar", StableVersion: "4.1.3"}
+	inspector := ansi.Strip(m.renderInspector(80))
+	if !strings.Contains(inspector, "this tap's history is not indexed") || !strings.Contains(inspector, "artemyurov/tomobar") ||
+		!strings.Contains(ansi.Strip(m.renderFeedRows(80)), "ready") {
+		t.Fatalf("third-party catalog state: inspector=%q", inspector)
+	}
+}
+
 func TestVisibleCatalogHydrationWaitsAndSkipsRowsThatLeaveViewport(t *testing.T) {
 	hydrator := &fakeCatalogHydrator{}
 	m := NewModel(Dependencies{Catalog: hydrator})
@@ -230,6 +244,9 @@ func TestVisibleCatalogHydrationWaitsAndSkipsRowsThatLeaveViewport(t *testing.T)
 	commands := m.scheduleVisibleCatalogHydrations()
 	if len(commands) != 1 || m.catalogPending["pomatez"] == 0 || m.catalogPending["tomatobar"] != 0 {
 		t.Fatalf("scheduled visible catalog: pending=%v commands=%d", m.catalogPending, len(commands))
+	}
+	if inspector := ansi.Strip(m.renderInspector(70)); !strings.Contains(inspector, "History lookup starts after this row stays visible") {
+		t.Fatalf("queued catalog inspector = %q", inspector)
 	}
 	start := time.Now()
 	due := commands[0]().(CatalogHydrationDue)
@@ -255,12 +272,21 @@ func TestVisibleCatalogHydrationWaitsAndSkipsRowsThatLeaveViewport(t *testing.T)
 	}
 	next, command = m.Update(newDue)
 	m = next.(Model)
-	if command == nil || len(hydrator.calls) != 0 {
+	if command == nil || len(hydrator.calls) != 0 || !m.catalogLoading["pomatez"] ||
+		!strings.Contains(ansi.Strip(m.renderFeedRows(70)), "enriching") ||
+		!strings.Contains(m.statusText(), "catalog: 1 enriching") ||
+		!strings.Contains(ansi.Strip(m.renderInspector(70)), "Enriching package history") {
 		t.Fatal("hydrate was not async")
 	}
-	completed := command().(CatalogHydrated)
+	batch := command().(tea.BatchMsg)
+	completed := batch[0]().(CatalogHydrated)
 	if completed.PackageID != "pomatez" || len(hydrator.calls) != 1 || hydrator.calls[0] != "pomatez" {
 		t.Fatalf("hydration result=%#v calls=%v", completed, hydrator.calls)
+	}
+	m = update(t, m, completed)
+	if m.catalogLoading["pomatez"] || !strings.Contains(ansi.Strip(m.renderFeedRows(70)), "ready") ||
+		strings.Contains(m.statusText(), "catalog: 1 enriching") {
+		t.Fatal("completed catalog still appears active")
 	}
 	if more := m.scheduleVisibleCatalogHydrations(); len(more) != 0 {
 		t.Fatal("already hydrated catalog row was scheduled again")
@@ -286,7 +312,8 @@ func TestCatalogHydrationRefreshesFeedAndPreservesSelectedPackage(t *testing.T) 
 	if command == nil || len(hydrator.calls) != 0 {
 		t.Fatal("catalog hydration did not run asynchronously")
 	}
-	next, _ = m.Update(command())
+	batch := command().(tea.BatchMsg)
+	next, _ = m.Update(batch[0]())
 	m = next.(Model)
 	if !m.loading {
 		t.Fatal("catalog hydration did not request a feed refresh")
@@ -309,7 +336,8 @@ func TestCatalogHydrationFailureRetriesVisibleRowAfterBackoff(t *testing.T) {
 	m.catalogAttempted[e.PackageID] = true
 	m = update(t, m, CatalogHydrated{PackageID: e.PackageID, Err: errors.New("mirror not ready")})
 	if m.catalogAttempted[e.PackageID] || m.catalogRetryUntil[e.PackageID].IsZero() ||
-		len(m.scheduleVisibleCatalogHydrations()) != 0 {
+		len(m.scheduleVisibleCatalogHydrations()) != 0 ||
+		!strings.Contains(ansi.Strip(m.renderFeedRows(80)), "retrying") {
 		t.Fatal("failed package retried before backoff")
 	}
 	m.catalogRetryUntil[e.PackageID] = time.Now().Add(-time.Millisecond)

@@ -24,7 +24,7 @@ func (m Model) renderInspector(width int) string {
 	if m.packageInfo.Name != "" {
 		name = m.packageInfo.Name
 	}
-	infoSpinner := m.detailSpinner(m.packageInfoLoading || m.packageInfoRefreshing)
+	infoSpinner := m.detailSpinner(m.packageInfoLoading || m.packageInfoRefreshing || m.catalogLoading[e.PackageID])
 	p := m.palette()
 	b.WriteString(m.inspectorRule("╭", "PACKAGE · "+packageTypeLabel(e.Type), "╮", width, p.raisedBG))
 	b.WriteByte('\n')
@@ -42,8 +42,26 @@ func (m Model) renderInspector(width int) string {
 		b.WriteByte('\n')
 	}
 	if e.Kind == domain.EventCatalog {
-		b.WriteString(m.inspectorLine("Homebrew catalog match (no indexed update)", width, p.raisedBG))
+		state := "Homebrew catalog match (no indexed update)"
+		switch {
+		case m.catalogLoading[e.PackageID]:
+			state = "Enriching package history…"
+		case m.deps.Now().Before(m.catalogRetryUntil[e.PackageID]):
+			state = "History lookup unavailable; retrying shortly"
+		case m.catalogAttempted[e.PackageID]:
+			state = "Package info loaded; no indexed update available"
+			if m.packageInfo.Tap != "" && m.packageInfo.Tap != "homebrew/core" && m.packageInfo.Tap != "homebrew/cask" {
+				state = "Package info loaded; this tap's history is not indexed"
+			}
+		case m.catalogPending[e.PackageID] != 0:
+			state = "History lookup starts after this row stays visible"
+		}
+		b.WriteString(m.inspectorLine(state, width, p.raisedBG))
 		b.WriteByte('\n')
+		if m.packageInfo.Tap != "" {
+			b.WriteString(m.inspectorLine("Tap        "+m.packageInfo.Tap, width, p.raisedBG))
+			b.WriteByte('\n')
+		}
 		if m.packageInfo.StableVersion != "" {
 			b.WriteString(m.inspectorLine("Latest     "+m.packageInfo.StableVersion+infoSpinner, width, p.raisedBG))
 			b.WriteByte('\n')

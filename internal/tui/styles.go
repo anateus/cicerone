@@ -105,6 +105,14 @@ func (m Model) statusText() string {
 			status += " · " + detail
 		}
 	}
+	if count := len(m.catalogLoading); count > 0 {
+		label := fmt.Sprintf("catalog: %d enriching", count)
+		if status == "Ready" {
+			status = label
+		} else {
+			status += " · " + label
+		}
+	}
 	return status
 }
 
@@ -529,7 +537,18 @@ func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []s
 	if e.Kind != domain.EventCatalog {
 		cadence = m.updateCadenceLabel(e)
 	}
-	transition := eventKindBadge(e.Kind) + m.versionTransition(e)
+	transition := eventKindBadge(e.Kind)
+	if e.Kind == domain.EventCatalog {
+		switch {
+		case m.catalogLoading[e.PackageID]:
+			transition += "enriching… "
+		case m.deps.Now().Before(m.catalogRetryUntil[e.PackageID]):
+			transition += "retrying… "
+		case m.catalogAttempted[e.PackageID]:
+			transition += "info ready "
+		}
+	}
+	transition += m.versionTransition(e)
 	nameWidth := ansi.StringWidth(packageNameWithStatus(e))
 	cadenceWidth := ansi.StringWidth(cadence)
 	versionWidth := ansi.StringWidth(transition)

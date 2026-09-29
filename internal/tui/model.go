@@ -131,6 +131,7 @@ type Model struct {
 	packageDescriptions                                               map[domain.PackageID]string
 	descriptionRequests                                               map[domain.PackageID]bool
 	catalogPending                                                    map[domain.PackageID]uint64
+	catalogLoading                                                    map[domain.PackageID]bool
 	catalogAttempted                                                  map[domain.PackageID]bool
 	catalogRetryUntil                                                 map[domain.PackageID]time.Time
 	catalogTimerID                                                    uint64
@@ -194,7 +195,8 @@ func NewModel(deps Dependencies) Model {
 		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor), refreshSelectionIDs: make(map[uint64]uint64),
 		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool),
 		packageDescriptions: make(map[domain.PackageID]string), descriptionRequests: make(map[domain.PackageID]bool),
-		catalogPending: make(map[domain.PackageID]uint64), catalogAttempted: make(map[domain.PackageID]bool),
+		catalogPending: make(map[domain.PackageID]uint64), catalogLoading: make(map[domain.PackageID]bool),
+		catalogAttempted:  make(map[domain.PackageID]bool),
 		catalogRetryUntil: make(map[domain.PackageID]time.Time),
 		sessionNew:        make(map[domain.EventID]bool), seenBoundaryIndex: -1}
 }
@@ -392,11 +394,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		delete(m.catalogPending, msg.PackageID)
 		m.catalogAttempted[msg.PackageID] = true
-		return m, func() tea.Msg {
+		m.catalogLoading[msg.PackageID] = true
+		work := func() tea.Msg {
 			err := m.deps.Catalog.HydrateCatalog(m.deps.Context, msg.PackageID)
 			return CatalogHydrated{PackageID: msg.PackageID, Err: err}
 		}
+		return m, tea.Batch(work, m.startDetailSpinner())
 	case CatalogHydrated:
+		delete(m.catalogLoading, msg.PackageID)
 		if msg.Err == nil {
 			return m.refreshDataset()
 		}
@@ -1273,7 +1278,8 @@ func (m Model) detailFieldsLoading() bool {
 	return m.packageInfoLoading || m.packageInfoRefreshing ||
 		m.readmeLoading || m.readmeRefreshing ||
 		m.repositoryTagsLoading || m.repositoryTagsRefreshing ||
-		m.changelogLoading || m.changelogMoreLoading
+		m.changelogLoading || m.changelogMoreLoading ||
+		m.catalogLoading[m.selectedEvent().PackageID]
 }
 
 func (m *Model) startDetailSpinner() tea.Cmd {
