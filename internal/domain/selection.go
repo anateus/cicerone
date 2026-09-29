@@ -4,6 +4,7 @@ package domain
 type Anchor struct {
 	GroupID        EventID
 	ChildEventID   EventID
+	PackageID      PackageID
 	ViewportOffset int
 	FallbackIndex  int
 }
@@ -35,6 +36,14 @@ func RestoreSelection(old Anchor, groups []FeedGroup) Anchor {
 				GroupID:        group.ID,
 				ViewportOffset: old.ViewportOffset,
 				FallbackIndex:  index,
+			}
+		}
+	}
+	if old.PackageID != "" {
+		for index, group := range groups {
+			if len(group.Events) > 0 && group.Events[0].PackageID == old.PackageID {
+				return Anchor{GroupID: group.ID, PackageID: old.PackageID,
+					ViewportOffset: old.ViewportOffset, FallbackIndex: index}
 			}
 		}
 	}

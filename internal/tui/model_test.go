@@ -84,6 +84,19 @@ type fakeCachedInfo struct {
 	cachedLoads []domain.PackageID
 }
 
+type fakeCatalogHydrator struct {
+	calls     []domain.PackageID
+	onHydrate func()
+}
+
+func (f *fakeCatalogHydrator) HydrateCatalog(_ context.Context, id domain.PackageID) error {
+	f.calls = append(f.calls, id)
+	if f.onHydrate != nil {
+		f.onHydrate()
+	}
+	return nil
+}
+
 type blockingDetailSource struct {
 	started  chan string
 	canceled chan string
@@ -197,6 +210,113 @@ func TestCatalogMatchesRemainAfterPreviouslySeenHistory(t *testing.T) {
 	}
 	if boundary := m.findSeenBoundary(result); boundary != 1 {
 		t.Fatalf("seen boundary = %d, want 1", boundary)
+	}
+}
+
+func TestVisibleCatalogHydrationWaitsAndSkipsRowsThatLeaveViewport(t *testing.T) {
+	hydrator := &fakeCatalogHydrator{}
+	m := NewModel(Dependencies{Catalog: hydrator})
+	m.loading = false
+	m.width, m.height = 80, 10
+	visible := domain.UpdateEvent{ID: "catalog:pomatez", PackageID: "pomatez", Name: "pomatez", Kind: domain.EventCatalog}
+	hidden := domain.UpdateEvent{ID: "catalog:tomatobar", PackageID: "tomatobar", Name: "tomatobar", Kind: domain.EventCatalog}
+	m.groups = []domain.FeedGroup{{ID: visible.ID, Events: []domain.UpdateEvent{visible}}}
+	for i := 0; i < 10; i++ {
+		e := event(fmt.Sprintf("history-%d", i), fmt.Sprintf("history-%d", i))
+		m.groups = append(m.groups, domain.FeedGroup{ID: e.ID, Events: []domain.UpdateEvent{e}})
+	}
+	m.groups = append(m.groups, domain.FeedGroup{ID: hidden.ID, Events: []domain.UpdateEvent{hidden}})
+	m.syncViewports()
+	commands := m.scheduleVisibleCatalogHydrations()
+	if len(commands) != 1 || m.catalogPending["pomatez"] == 0 || m.catalogPending["tomatobar"] != 0 {
+		t.Fatalf("scheduled visible catalog: pending=%v commands=%d", m.catalogPending, len(commands))
+	}
+	start := time.Now()
+	due := commands[0]().(CatalogHydrationDue)
+	if time.Since(start) < 900*time.Millisecond {
+		t.Fatal("catalog hydration was scheduled before one second")
+	}
+	m.groups = nil
+	m.syncViewports()
+	next, command := m.Update(due)
+	m = next.(Model)
+	if command != nil || len(hydrator.calls) != 0 {
+		t.Fatalf("invisible catalog hydrated: calls=%v", hydrator.calls)
+	}
+	m.groups = []domain.FeedGroup{{ID: visible.ID, Events: []domain.UpdateEvent{visible}}}
+	m.syncViewports()
+	commands = m.scheduleVisibleCatalogHydrations()
+	if len(commands) != 1 {
+		t.Fatalf("rescheduled visible catalog: %d commands", len(commands))
+	}
+	newDue := CatalogHydrationDue{PackageID: "pomatez", TimerID: m.catalogPending["pomatez"]}
+	if next, staleCommand := m.Update(due); staleCommand != nil || next.(Model).catalogPending["pomatez"] != newDue.TimerID {
+		t.Fatal("stale timer replaced newer hydration schedule")
+	}
+	next, command = m.Update(newDue)
+	m = next.(Model)
+	if command == nil || len(hydrator.calls) != 0 {
+		t.Fatal("hydrate was not async")
+	}
+	completed := command().(CatalogHydrated)
+	if completed.PackageID != "pomatez" || len(hydrator.calls) != 1 || hydrator.calls[0] != "pomatez" {
+		t.Fatalf("hydration result=%#v calls=%v", completed, hydrator.calls)
+	}
+	if more := m.scheduleVisibleCatalogHydrations(); len(more) != 0 {
+		t.Fatal("already hydrated catalog row was scheduled again")
+	}
+}
+
+func TestCatalogHydrationRefreshesFeedAndPreservesSelectedPackage(t *testing.T) {
+	catalog := domain.UpdateEvent{ID: "catalog:pomatez", PackageID: "pomatez", Name: "pomatez", Kind: domain.EventCatalog}
+	updateEvent := domain.UpdateEvent{ID: "history:pomatez", PackageID: "pomatez", Name: "pomatez",
+		Kind: domain.EventVersion, NewVersion: "1.11.0", Type: domain.PackageCask}
+	data := &fakeData{groups: []domain.FeedGroup{{ID: catalog.ID, Events: []domain.UpdateEvent{catalog}}}}
+	hydrator := &fakeCatalogHydrator{onHydrate: func() {
+		data.groups = []domain.FeedGroup{{ID: updateEvent.ID, Events: []domain.UpdateEvent{updateEvent}}}
+	}}
+	m := NewModel(Dependencies{Data: data, Catalog: hydrator})
+	m.width, m.height = 80, 24
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: data.groups})
+	if m.catalogPending["pomatez"] == 0 {
+		t.Fatal("visible catalog row was not scheduled for hydration")
+	}
+	next, command := m.Update(CatalogHydrationDue{PackageID: "pomatez", TimerID: m.catalogPending["pomatez"]})
+	m = next.(Model)
+	if command == nil || len(hydrator.calls) != 0 {
+		t.Fatal("catalog hydration did not run asynchronously")
+	}
+	next, _ = m.Update(command())
+	m = next.(Model)
+	if !m.loading {
+		t.Fatal("catalog hydration did not request a feed refresh")
+	}
+	m = update(t, m, m.queryFeed(m.feedRequestID)())
+	if m.selectedEvent().PackageID != "pomatez" || m.selectedEvent().Kind != domain.EventVersion ||
+		strings.Contains(ansi.Strip(m.renderFeedRows(80)), "[catalog]") {
+		t.Fatalf("promoted feed did not retain selected package: %#v", m.groups)
+	}
+}
+
+func TestCatalogHydrationFailureRetriesVisibleRowAfterBackoff(t *testing.T) {
+	hydrator := &fakeCatalogHydrator{}
+	m := NewModel(Dependencies{Catalog: hydrator})
+	m.width, m.height = 80, 24
+	m.loading = false
+	e := domain.UpdateEvent{ID: "catalog:pomatez", PackageID: "pomatez", Name: "pomatez", Kind: domain.EventCatalog}
+	m.groups = []domain.FeedGroup{{ID: e.ID, Events: []domain.UpdateEvent{e}}}
+	m.syncViewports()
+	m.catalogAttempted[e.PackageID] = true
+	m = update(t, m, CatalogHydrated{PackageID: e.PackageID, Err: errors.New("mirror not ready")})
+	if m.catalogAttempted[e.PackageID] || m.catalogRetryUntil[e.PackageID].IsZero() ||
+		len(m.scheduleVisibleCatalogHydrations()) != 0 {
+		t.Fatal("failed package retried before backoff")
+	}
+	m.catalogRetryUntil[e.PackageID] = time.Now().Add(-time.Millisecond)
+	next, command := m.Update(catalogRetryDue{packageID: e.PackageID})
+	m = next.(Model)
+	if command == nil || m.catalogPending[e.PackageID] == 0 {
+		t.Fatal("visible catalog result did not retry after backoff")
 	}
 }
 

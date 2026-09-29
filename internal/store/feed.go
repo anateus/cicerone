@@ -91,8 +91,15 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 	where := []string{"1=1"}
 	args := make([]any, 0, 8)
 	if filter.Horizon > 0 {
-		where = append(where, `(e.event_time >= ? OR i.package_id IS NOT NULL)`)
+		horizon := `(e.event_time >= ? OR i.package_id IS NOT NULL`
 		args = append(args, filter.Now.Add(-filter.Horizon).UnixNano())
+		if strings.TrimSpace(filter.Query) != "" && len(filter.ExternalMatches) > 0 {
+			horizon += ` OR p.id IN (` + placeholders(len(filter.ExternalMatches)) + `)`
+			for _, id := range filter.ExternalMatches {
+				args = append(args, id)
+			}
+		}
+		where = append(where, horizon+`)`)
 	}
 	if len(filter.Kinds) > 0 {
 		values := trueMapValues(filter.Kinds)
@@ -204,6 +211,12 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(filter.Query) != "" && len(filter.ExternalMatches) > 0 {
+		filter.HorizonExempt = make(map[domain.PackageID]bool, len(filter.ExternalMatches))
+		for _, id := range filter.ExternalMatches {
+			filter.HorizonExempt[id] = true
+		}
+	}
 	filter.Query = ""
 	groups := domain.BuildFeed(events, installed, filter)
 	if len(filter.CatalogPackages) == 0 {
@@ -231,9 +244,13 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		var kind domain.PackageType
 		var status domain.PackageStatus
 		var isInstalled bool
-		err := s.db.QueryRowContext(ctx, `SELECT p.name, p.type, p.status, i.package_id IS NOT NULL
-			FROM packages p LEFT JOIN installed_packages i ON i.package_id=p.id WHERE p.id=?`, pkg.ID).
-			Scan(&name, &kind, &status, &isInstalled)
+		var version, description string
+		err := s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(json_extract(pi.normalized_json, '$.Name'), ''), p.name),
+			p.type, p.status, i.package_id IS NOT NULL,
+			COALESCE(json_extract(pi.normalized_json, '$.StableVersion'), ''), COALESCE(pi.description, '')
+			FROM packages p LEFT JOIN installed_packages i ON i.package_id=p.id
+			LEFT JOIN package_info pi ON pi.package_id=p.id WHERE p.id=?`, pkg.ID).
+			Scan(&name, &kind, &status, &isInstalled, &version, &description)
 		if err == sql.ErrNoRows {
 			continue
 		}
@@ -244,10 +261,13 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 			continue
 		}
 		shown[pkg.ID] = true
+		if description == "" {
+			description = pkg.Description
+		}
 		id := domain.EventID("catalog:" + string(pkg.ID))
 		groups = append(groups, domain.FeedGroup{ID: id, Events: []domain.UpdateEvent{{
 			ID: id, PackageID: pkg.ID, Name: name, Type: kind, Status: status,
-			Kind: domain.EventCatalog, CatalogDescription: pkg.Description, Installed: isInstalled, Seen: true,
+			Kind: domain.EventCatalog, CatalogDescription: description, CatalogVersion: version, Installed: isInstalled, Seen: true,
 		}}})
 	}
 	return groups, nil

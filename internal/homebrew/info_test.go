@@ -12,7 +12,7 @@ import (
 func TestInfoReturnsStructuredFormulaMetadata(t *testing.T) {
 	runner := &testutil.Runner{RunResult: execx.Result{Stdout: []byte(`{
 		"formulae":[{
-			"name":"widget","full_name":"acme/tap/widget","desc":"Useful widget",
+			"name":"widget","full_name":"acme/tap/widget","tap":"acme/tap","ruby_source_path":"Formula/w/widget.rb","desc":"Useful widget",
 			"homepage":"https://example.test/widget","license":"MIT",
 			"versions":{"stable":"2.0.0","head":"HEAD","bottle":true},
 			"installed":[{"version":"1.9.0"}],
@@ -27,6 +27,7 @@ func TestInfoReturnsStructuredFormulaMetadata(t *testing.T) {
 	}
 	if got.Name != "widget" || got.FullName != "acme/tap/widget" || got.Description != "Useful widget" ||
 		got.Homepage != "https://example.test/widget" || got.License != "MIT" || got.StableVersion != "2.0.0" ||
+		got.Tap != "acme/tap" || got.SourcePath != "Formula/w/widget.rb" ||
 		got.InstalledVersion != "1.9.0" || got.Caveats != "Restart your shell." ||
 		!slices.Equal(got.Dependencies, []string{"libfoo"}) || len(raw) == 0 {
 		t.Fatalf("Info = %#v, raw=%q", got, raw)
@@ -51,7 +52,7 @@ func TestInfoRejectsMalformedPackageBeforeRunningBrew(t *testing.T) {
 func TestInfoAcceptsCaskDisplayNameArray(t *testing.T) {
 	runner := &testutil.Runner{RunResult: execx.Result{Stdout: []byte(`{
 		"formulae":[],"casks":[{
-			"token":"widget","full_token":"acme/tap/widget","name":["Widget App"],
+			"token":"widget","full_token":"acme/tap/widget","tap":"acme/tap","ruby_source_path":"Casks/widget.rb","name":["Widget App"],
 			"desc":"GUI widget","homepage":"https://example.test","version":"2.0","installed":"1.0"
 		}]
 	}`)}}
@@ -59,7 +60,8 @@ func TestInfoAcceptsCaskDisplayNameArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Cask || got.Name != "Widget App" || got.FullName != "acme/tap/widget" {
+	if !got.Cask || got.Name != "Widget App" || got.FullName != "acme/tap/widget" ||
+		got.Tap != "acme/tap" || got.SourcePath != "Casks/widget.rb" {
 		t.Fatalf("Info = %#v", got)
 	}
 }

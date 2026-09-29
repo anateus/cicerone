@@ -10,6 +10,7 @@ import (
 
 type PackageInfo struct {
 	Name, FullName, Description, Homepage, License string
+	Tap, SourcePath                                string
 	StableVersion, InstalledVersion, Caveats       string
 	Dependencies, BuildDependencies                []string
 	Cask                                           bool
@@ -19,6 +20,8 @@ type packageInfoResponse struct {
 	Formulae []struct {
 		Name                             string
 		FullName                         string `json:"full_name"`
+		Tap                              string
+		SourcePath                       string `json:"ruby_source_path"`
 		Desc, Homepage, License, Caveats string
 		Versions                         struct {
 			Stable string `json:"stable"`
@@ -32,6 +35,8 @@ type packageInfoResponse struct {
 	Casks []struct {
 		Token                       string
 		FullToken                   string `json:"full_token"`
+		Tap                         string
+		SourcePath                  string `json:"ruby_source_path"`
 		Name                        stringList
 		Desc, Homepage              string
 		Version, Installed, Caveats string
@@ -73,6 +78,7 @@ func (c *Client) Info(ctx context.Context, packageName string) (PackageInfo, []b
 		formula := response.Formulae[0]
 		info := PackageInfo{
 			Name: formula.Name, FullName: formula.FullName, Description: formula.Desc,
+			Tap: formula.Tap, SourcePath: formula.SourcePath,
 			Homepage: formula.Homepage, License: formula.License, StableVersion: formula.Versions.Stable,
 			Caveats: formula.Caveats, Dependencies: formula.Dependencies, BuildDependencies: formula.BuildDependencies,
 		}
@@ -90,6 +96,7 @@ func (c *Client) Info(ctx context.Context, packageName string) (PackageInfo, []b
 			name = cask.Name[0]
 		}
 		return PackageInfo{Name: name, FullName: cask.FullToken, Description: cask.Desc, Homepage: cask.Homepage,
+				Tap: cask.Tap, SourcePath: cask.SourcePath,
 				StableVersion: cask.Version, InstalledVersion: cask.Installed, Caveats: cask.Caveats, Cask: true},
 			append([]byte(nil), result.Stdout...), nil
 	}

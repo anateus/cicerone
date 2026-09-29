@@ -762,7 +762,7 @@ func eventKindBadge(kind domain.EventKind) string {
 
 func (m Model) versionTransition(e domain.UpdateEvent) string {
 	if e.Kind == domain.EventCatalog {
-		return ""
+		return e.CatalogVersion
 	}
 	oldVersion := domain.CleanVersion(e.OldVersion)
 	newVersion := domain.CleanVersion(e.NewVersion)

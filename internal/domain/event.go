@@ -74,6 +74,7 @@ type UpdateEvent struct {
 	Time               time.Time
 	Diagnostic         string
 	CatalogDescription string
+	CatalogVersion     string
 	Installed          bool
 	Seen               bool
 	Cadence            UpdateCadence

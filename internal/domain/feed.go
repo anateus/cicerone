@@ -27,6 +27,7 @@ type FeedFilter struct {
 	RollUp          bool
 	ExternalMatches []PackageID
 	CatalogPackages []CatalogPackage
+	HorizonExempt   map[PackageID]bool
 }
 
 // CatalogPackage is a Homebrew search hit without a recorded update event.
@@ -122,7 +123,7 @@ func matchesFeedFilter(event UpdateEvent, f FeedFilter) bool {
 }
 
 func beforeHorizon(event UpdateEvent, f FeedFilter) bool {
-	return f.Horizon > 0 && event.Time.Before(f.Now.Add(-f.Horizon))
+	return f.Horizon > 0 && !f.HorizonExempt[event.PackageID] && event.Time.Before(f.Now.Add(-f.Horizon))
 }
 
 func eventLess(a, b UpdateEvent) bool {

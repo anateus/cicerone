@@ -110,6 +110,15 @@ type preferencesSaved struct{ Err error }
 type eventsSeen struct{ Err error }
 type ChangelogDebounced struct{ SelectionID uint64 }
 type SearchDebounced struct{ RequestID uint64 }
+type CatalogHydrationDue struct {
+	PackageID domain.PackageID
+	TimerID   uint64
+}
+type CatalogHydrated struct {
+	PackageID domain.PackageID
+	Err       error
+}
+type catalogRetryDue struct{ packageID domain.PackageID }
 type detailSpinnerTick struct{ SelectionID uint64 }
 type ToggleFilter struct{ Kind domain.EventKind }
 type ToggleTypeFilter struct{ Type domain.PackageType }

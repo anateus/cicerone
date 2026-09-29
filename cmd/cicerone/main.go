@@ -287,6 +287,8 @@ func run() (runErr error) {
 		return tui.RefreshDone{}
 	}
 	dependencies.PackageInfo = runtime.details
+	dependencies.Catalog = catalogHydrator{details: runtime.details, store: runtime.store,
+		repository: runtime.changelogs.repository, slots: make(chan struct{}, 2)}
 	dependencies.README = runtime.details
 	dependencies.Tags = runtime.details
 	model := tui.New(dependencies)

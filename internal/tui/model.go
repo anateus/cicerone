@@ -60,6 +60,10 @@ type CachedPackageInfoSource interface {
 	LoadCachedPackageInfo(context.Context, domain.PackageID) (homebrew.PackageInfo, bool, error)
 }
 
+type CatalogHydrator interface {
+	HydrateCatalog(context.Context, domain.PackageID) error
+}
+
 type READMESource interface {
 	LoadREADME(context.Context, domain.PackageID, domain.EventID) (store.PackageDocument, error)
 }
@@ -84,6 +88,7 @@ type Dependencies struct {
 	Data        DataSource
 	Changelog   ChangelogSource
 	PackageInfo PackageInfoSource
+	Catalog     CatalogHydrator
 	README      READMESource
 	Tags        CachedRepositoryTagsSource
 	Context     context.Context
@@ -125,6 +130,10 @@ type Model struct {
 	packageInfo                                                       homebrew.PackageInfo
 	packageDescriptions                                               map[domain.PackageID]string
 	descriptionRequests                                               map[domain.PackageID]bool
+	catalogPending                                                    map[domain.PackageID]uint64
+	catalogAttempted                                                  map[domain.PackageID]bool
+	catalogRetryUntil                                                 map[domain.PackageID]time.Time
+	catalogTimerID                                                    uint64
 	sessionNew                                                        map[domain.EventID]bool
 	seenBoundaryIndex                                                 int
 	readme                                                            store.PackageDocument
@@ -185,7 +194,9 @@ func NewModel(deps Dependencies) Model {
 		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor), refreshSelectionIDs: make(map[uint64]uint64),
 		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool),
 		packageDescriptions: make(map[domain.PackageID]string), descriptionRequests: make(map[domain.PackageID]bool),
-		sessionNew: make(map[domain.EventID]bool), seenBoundaryIndex: -1}
+		catalogPending: make(map[domain.PackageID]uint64), catalogAttempted: make(map[domain.PackageID]bool),
+		catalogRetryUntil: make(map[domain.PackageID]time.Time),
+		sessionNew:        make(map[domain.EventID]bool), seenBoundaryIndex: -1}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -368,6 +379,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		searchContext, cancel := context.WithCancel(m.deps.Context)
 		m.searchQueryCancel = cancel
 		return m, tea.Batch(m.queryFeedContext(searchContext, msg.RequestID), m.savePreferences())
+	case CatalogHydrationDue:
+		if m.deps.Catalog == nil {
+			return m, nil
+		}
+		if m.catalogPending[msg.PackageID] != msg.TimerID {
+			return m, nil
+		}
+		if m.loading || !m.visibleCatalogPackages()[msg.PackageID] {
+			delete(m.catalogPending, msg.PackageID)
+			return m, nil
+		}
+		delete(m.catalogPending, msg.PackageID)
+		m.catalogAttempted[msg.PackageID] = true
+		return m, func() tea.Msg {
+			err := m.deps.Catalog.HydrateCatalog(m.deps.Context, msg.PackageID)
+			return CatalogHydrated{PackageID: msg.PackageID, Err: err}
+		}
+	case CatalogHydrated:
+		if msg.Err == nil {
+			return m.refreshDataset()
+		}
+		delete(m.catalogAttempted, msg.PackageID)
+		m.catalogRetryUntil[msg.PackageID] = m.deps.Now().Add(30 * time.Second)
+		return m, tea.Tick(30*time.Second, func(time.Time) tea.Msg {
+			return catalogRetryDue{packageID: msg.PackageID}
+		})
+	case catalogRetryDue:
+		if remaining := m.catalogRetryUntil[msg.packageID].Sub(m.deps.Now()); remaining > 0 {
+			return m, tea.Tick(remaining, func(time.Time) tea.Msg {
+				return catalogRetryDue{packageID: msg.packageID}
+			})
+		}
+		delete(m.catalogRetryUntil, msg.packageID)
+		return m, tea.Batch(m.scheduleVisibleCatalogHydrations()...)
 	case ToggleRollUp:
 		m.filter.RollUp = !m.filter.RollUp
 		return m.filterChanged()
@@ -951,7 +996,8 @@ func (m Model) anchor() domain.Anchor {
 		return domain.Anchor{FallbackIndex: m.selected, ViewportOffset: m.viewportOffset}
 	}
 	e := m.selectedEvent()
-	return domain.Anchor{GroupID: m.groups[m.selected].ID, ChildEventID: e.ID, FallbackIndex: m.selected, ViewportOffset: m.viewportOffset}
+	return domain.Anchor{GroupID: m.groups[m.selected].ID, ChildEventID: e.ID, PackageID: e.PackageID,
+		FallbackIndex: m.selected, ViewportOffset: m.viewportOffset}
 }
 
 func (m *Model) captureRefreshAnchor(requestID uint64, anchor domain.Anchor) {
@@ -1363,15 +1409,15 @@ func (m Model) loadCachedPackageInfo(selection uint64, e domain.UpdateEvent) tea
 }
 
 func (m *Model) loadVisiblePackageDescriptions() []tea.Cmd {
+	commands := m.scheduleVisibleCatalogHydrations()
 	if _, ok := m.deps.PackageInfo.(CachedPackageInfoSource); !ok || len(m.groups) == 0 {
-		return nil
+		return commands
 	}
 	top := m.viewportOffset
 	bottom := top + max(1, m.feedViewport.Height())
 	selected := m.selectedEvent().PackageID
 	line := 0
 	boundary := m.seenBoundary()
-	var commands []tea.Cmd
 	for index, group := range m.groups {
 		if m.hasSeenSeparator() && index == boundary {
 			line++
@@ -1390,6 +1436,52 @@ func (m *Model) loadVisiblePackageDescriptions() []tea.Cmd {
 		if line >= bottom {
 			break
 		}
+	}
+	return commands
+}
+
+func (m Model) visibleCatalogPackages() map[domain.PackageID]bool {
+	visible := make(map[domain.PackageID]bool)
+	top, bottom := m.viewportOffset, m.viewportOffset+max(1, m.feedViewport.Height())
+	line := 0
+	boundary := m.seenBoundary()
+	for index, group := range m.groups {
+		if m.hasSeenSeparator() && index == boundary {
+			line++
+		}
+		height := m.feedGroupHeight(group, m.feedViewport.Width())
+		if line < bottom && line+height > top && catalogGroup(group) && !m.snoozedGroupCollapsed(group) {
+			visible[group.Events[0].PackageID] = true
+		}
+		line += height
+		if line >= bottom {
+			break
+		}
+	}
+	return visible
+}
+
+func (m *Model) scheduleVisibleCatalogHydrations() []tea.Cmd {
+	if m.deps.Catalog == nil || m.width <= 0 || m.height <= 0 {
+		return nil
+	}
+	visible := m.visibleCatalogPackages()
+	for id := range m.catalogPending {
+		if !visible[id] {
+			delete(m.catalogPending, id)
+		}
+	}
+	var commands []tea.Cmd
+	for id := range visible {
+		if m.catalogPending[id] != 0 || m.catalogAttempted[id] || m.deps.Now().Before(m.catalogRetryUntil[id]) {
+			continue
+		}
+		m.catalogTimerID++
+		m.catalogPending[id] = m.catalogTimerID
+		packageID, timerID := id, m.catalogTimerID
+		commands = append(commands, tea.Tick(time.Second, func(time.Time) tea.Msg {
+			return CatalogHydrationDue{PackageID: packageID, TimerID: timerID}
+		}))
 	}
 	return commands
 }

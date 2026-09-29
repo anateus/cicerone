@@ -334,6 +334,46 @@ func TestQueryFeedCatalogResultsHonorUpdateKindAndTypeFilters(t *testing.T) {
 	assertSearchPackages(t, s, filter, []domain.PackageID{"visual-solver"})
 }
 
+func TestQueryFeedCatalogHydrationUsesInfoAndPromotesOldHistory(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	match := domain.CatalogPackage{ID: "pomatez", Type: domain.PackageCask, Description: "Pomodoro timer"}
+	if err := s.UpsertCatalogPackages(ctx, []domain.CatalogPackage{match}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	filter := domain.FeedFilter{Now: now, Horizon: 30 * 24 * time.Hour, Query: "pomodoro",
+		Search: domain.SearchDescriptions, Types: map[domain.PackageType]bool{domain.PackageCask: true},
+		Kinds:           map[domain.EventKind]bool{domain.EventVersion: true},
+		CatalogPackages: []domain.CatalogPackage{match}, ExternalMatches: []domain.PackageID{match.ID}}
+	groups, err := s.QueryFeed(ctx, filter)
+	if err != nil || len(groups) != 1 || groups[0].Events[0].CatalogVersion != "" {
+		t.Fatalf("initial catalog=%#v err=%v", groups, err)
+	}
+	if err := s.SavePackageInfo(ctx, PackageInfoRecord{PackageID: "pomatez", FetchedAt: now,
+		Normalized: []byte(`{"StableVersion":"1.11.0","Description":"A focused timer"}`), Raw: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = s.QueryFeed(ctx, filter)
+	if err != nil || len(groups) != 1 || groups[0].Events[0].CatalogVersion != "1.11.0" ||
+		groups[0].Events[0].CatalogDescription != "A focused timer" {
+		t.Fatalf("hydrated catalog=%#v err=%v", groups, err)
+	}
+	event := testEvent("older-pomatez", "pomatez", domain.EventVersion, now.Add(-90*24*time.Hour))
+	event.Type = domain.PackageCask
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = s.QueryFeed(ctx, filter)
+	if err != nil || len(groups) != 1 || groups[0].Events[0].ID != event.ID {
+		t.Fatalf("search after indexing old update=%#v err=%v", groups, err)
+	}
+	filter.Query = ""
+	filter.ExternalMatches = nil
+	filter.CatalogPackages = nil
+	assertSearchPackages(t, s, filter, []domain.PackageID{})
+}
+
 func assertSearchPackages(t *testing.T, s *Store, filter domain.FeedFilter, want []domain.PackageID) {
 	t.Helper()
 	groups, err := s.QueryFeed(context.Background(), filter)

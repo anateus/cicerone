@@ -43,6 +43,15 @@ func TestRestoreSelection(t *testing.T) {
 			want: Anchor{GroupID: "new-group", ChildEventID: "child", ViewportOffset: 3, FallbackIndex: 1},
 		},
 		{
+			name: "keeps package selected when its catalog row becomes history",
+			old:  Anchor{GroupID: "catalog:pomatez", ChildEventID: "catalog:pomatez", PackageID: "pomatez", ViewportOffset: 2, FallbackIndex: 3},
+			groups: []FeedGroup{
+				group("other", "other"),
+				{ID: "history-pomatez", Events: []UpdateEvent{{ID: "history-pomatez", PackageID: "pomatez"}}},
+			},
+			want: Anchor{GroupID: "history-pomatez", PackageID: "pomatez", ViewportOffset: 2, FallbackIndex: 1},
+		},
+		{
 			name:   "returns no anchor for empty results",
 			old:    Anchor{GroupID: "selected", ChildEventID: "child", ViewportOffset: 2, FallbackIndex: 4},
 			groups: nil,
