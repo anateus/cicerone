@@ -29,6 +29,8 @@ func New(source Source, runner execx.Runner) Repository {
 	return Repository{source: source, runner: runner}
 }
 
+func (r Repository) Source() Source { return r.source }
+
 // Cached reports whether an owned repository cache is ready to read without
 // cloning or fetching it. User-owned repositories are already validated during
 // discovery and are not considered Cicerone cache entries.

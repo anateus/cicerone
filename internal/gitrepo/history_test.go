@@ -94,6 +94,28 @@ func TestWalkCommitsRequestsMainlineMergeDiffs(t *testing.T) {
 	}
 }
 
+func TestPathCommitsUsesBoundedExactPathspec(t *testing.T) {
+	hash := strings.Repeat("a", 40)
+	runner := &historyRecordingRunner{reader: io.NopCloser(strings.NewReader(hash + "\x002026-01-01T00:00:00Z\x00release\x00\nM\x00Formula/f/foo.rb\x00"))}
+	repository := gitrepo.New(gitrepo.Source{Path: "/repo"}, runner)
+	commits, err := repository.PathCommits(context.Background(), "Formula/f/foo.rb", 100)
+	if err != nil || len(commits) != 1 || commits[0].Hash != hash {
+		t.Fatalf("commits=%#v err=%v", commits, err)
+	}
+	if !slices.Contains(runner.args, "--first-parent") || !slices.Contains(runner.args, "-m") ||
+		!slices.Contains(runner.args, "--max-count=100") || !slices.Equal(runner.args[len(runner.args)-3:], []string{"HEAD", "--", "Formula/f/foo.rb"}) {
+		t.Fatalf("unbounded or untargeted git log: %v", runner.args)
+	}
+	for _, invalid := range []string{"../foo.rb", "/foo.rb", "Formula/../foo.rb", ":(glob)*", "Formula\\foo.rb"} {
+		if _, err := repository.PathCommits(context.Background(), invalid, 100); err == nil {
+			t.Errorf("accepted unsafe path %q", invalid)
+		}
+	}
+	if _, err := repository.PathCommits(context.Background(), "Formula/foo.rb", 101); err == nil {
+		t.Fatal("accepted unbounded commit limit")
+	}
+}
+
 func TestOwnedMirrorLifecycleAndLocalFetchGuard(t *testing.T) {
 	runner := &testutil.Runner{}
 	path := filepath.Join(t.TempDir(), "mirrors", "core.git")

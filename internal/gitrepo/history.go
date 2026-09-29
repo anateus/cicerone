@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,10 +69,77 @@ func commitArgs(path string, requested Range) []string {
 }
 
 func (r Repository) WalkCommits(ctx context.Context, requested Range, yield func(Commit) error) (err error) {
+	return r.walkCommitArgs(ctx, commitArgs(r.source.Path, requested), yield)
+}
+
+// PathCommits reads at most limit mainline commits affecting one repository-relative
+// definition. It does not follow renames into other paths or walk the whole tree.
+func (r Repository) PathCommits(ctx context.Context, definitionPath string, limit int) ([]Commit, error) {
+	if definitionPath == "" || path.IsAbs(definitionPath) || path.Clean(definitionPath) != definitionPath ||
+		strings.ContainsAny(definitionPath, "\\:\x00") || strings.HasPrefix(definitionPath, "../") || definitionPath == ".." ||
+		strings.HasPrefix(definitionPath, "-") || limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("invalid definition path or commit limit")
+	}
+	args := commitArgs(r.source.Path, Range{})
+	// The pathspec follows the separator, after the revision.
+	args = append(args[:len(args)-2], "--max-count="+strconv.Itoa(limit), "HEAD", "--", definitionPath)
+	var commits []Commit
+	err := r.walkCommitArgs(ctx, args, func(commit Commit) error {
+		commits = append(commits, commit)
+		return nil
+	})
+	return commits, err
+}
+
+// AmbiguousAddition checks a single commit's changed-path metadata when a
+// path-limited log describes a change as an addition. Git's pathspec can hide
+// the old side of a rename, so do not infer a new package from such a record.
+func (r Repository) AmbiguousAddition(ctx context.Context, hash, definitionPath string) (bool, error) {
+	if !isObjectID(hash) {
+		return false, fmt.Errorf("invalid commit hash")
+	}
+	result, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "show", "--format=", "--name-status", "-z", "-M", hash, "--")
+	if err != nil {
+		return false, fmt.Errorf("inspect addition %s: %w", hash, err)
+	}
+	fields := strings.Split(string(result.Stdout), "\x00")
+	for index := 0; index < len(fields); index++ {
+		status := strings.TrimPrefix(fields[index], "\n")
+		if status == "" {
+			continue
+		}
+		switch status[0] {
+		case 'R', 'C':
+			if index+2 >= len(fields) {
+				return false, fmt.Errorf("malformed rename in %s", hash)
+			}
+			index += 2
+			if fields[index] == definitionPath {
+				return true, nil
+			}
+		case 'D':
+			if index+1 >= len(fields) {
+				return false, fmt.Errorf("malformed deletion in %s", hash)
+			}
+			index++
+			if path.Ext(fields[index]) == path.Ext(definitionPath) {
+				return true, nil
+			}
+		default:
+			if index+1 >= len(fields) {
+				return false, fmt.Errorf("malformed change in %s", hash)
+			}
+			index++
+		}
+	}
+	return false, nil
+}
+
+func (r Repository) walkCommitArgs(ctx context.Context, args []string, yield func(Commit) error) (err error) {
 	if yield == nil {
 		return errors.New("commit callback is nil")
 	}
-	stream, err := r.runner.Stream(ctx, "git", commitArgs(r.source.Path, requested)...)
+	stream, err := r.runner.Stream(ctx, "git", args...)
 	if err != nil {
 		return fmt.Errorf("read commits: %w", err)
 	}
