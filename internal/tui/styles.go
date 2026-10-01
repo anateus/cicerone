@@ -319,6 +319,7 @@ func (m Model) footerHints(width int, status string) []footerHint {
 			hints = append(hints, footerHint{"r", "refresh", 1})
 		}
 		hints = append(hints, footerHint{"↑↓", "move", 0}, footerHint{"enter", "details", 1}, footerHint{"space", "expand", 3})
+		hints = append(hints, footerHint{",/.", "groups", 3})
 		if m.deps.Actions != nil && m.hasSelection() {
 			label := "install"
 			if m.selectedEvent().Installed {
@@ -501,10 +502,14 @@ func (m Model) visibleGroupTabs(width int) ([]groupTab, int) {
 }
 
 // groupTabAt hit-tests a click against the rendered group strip. The strip
-// always sits on header row 4 (zero-based row 3) and shares its windowing
-// with the renderer, so click targets cannot drift from what is drawn.
+// is the second-to-last header row (list header sits below it), so its row is
+// derived from feedHeaderRows rather than hardcoded, and it shares its
+// windowing with the renderer so click targets cannot drift from what is
+// drawn.
 func (m Model) groupTabAt(y, x int) (bool, groupTab) {
-	if y != 3 {
+	// feedHeaderRows counts title (1) + tab strip (3) + strip (1) + list
+	// header (1); the strip itself is the second-to-last of those rows.
+	if y != m.feedHeaderRows()-2 {
 		return false, groupTab{}
 	}
 	tabs, offset := m.visibleGroupTabs(m.width)

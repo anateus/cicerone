@@ -301,26 +301,66 @@ func TestGroupStripMouseHitSelectsTab(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m.width, m.height, m.loading = 120, 24, false
 	m.userGroups = []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1}}
+	m.syncViewports()
 
-	hit, tab := m.groupTabAt(3, 1) // [All] starts after the leading space
+	stripRow := m.feedHeaderRows() - 2    // title(1)+tabs(3)+strip(1)+list header(1), minus the two rows below the strip
+	hit, tab := m.groupTabAt(stripRow, 1) // [All] starts after the leading space
 	if !hit || tab.scope != domain.GroupScopeAll {
 		t.Fatalf("hit at x=1 = %v/%#v, want All", hit, tab)
 	}
-	hit, tab = m.groupTabAt(3, 4) // inside "All]"
+	hit, tab = m.groupTabAt(stripRow, 4) // inside "All]"
 	if !hit || tab.scope != domain.GroupScopeAll {
 		t.Fatalf("hit at x=4 = %v/%#v, want All", hit, tab)
 	}
-	hit, tab = m.groupTabAt(3, 6) // the space between tabs
+	hit, tab = m.groupTabAt(stripRow, 6) // the space between tabs
 	if hit {
 		t.Fatalf("gap between tabs hit %#v, want miss", tab)
 	}
-	hit, tab = m.groupTabAt(3, 7) // "[Ungrouped]"
+	hit, tab = m.groupTabAt(stripRow, 7) // "[Ungrouped]"
 	if !hit || tab.scope != domain.GroupScopeUngrouped {
 		t.Fatalf("hit at x=8 = %v/%#v, want Ungrouped", hit, tab)
 	}
-	hit, tab = m.groupTabAt(2, 4) // wrong row
+	hit, tab = m.groupTabAt(stripRow-1, 4) // wrong row (type-tab bottom border)
 	if hit {
 		t.Fatalf("hit on tab row = %v, want miss", hit)
+	}
+}
+
+// TestGroupStripClickFiltersFeed drives the full mouse path: the click
+// coordinates come from the rendered view, so a strip-row regression (the
+// hit-test drifting from what is drawn) fails here even if groupTabAt and
+// the renderer agree with each other on the wrong row.
+func TestGroupStripClickFiltersFeed(t *testing.T) {
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1}}}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = data.groups
+	m.syncViewports()
+
+	// Find [Editors] in the rendered header and compute its exact cell.
+	header := strings.Split(ansi.Strip(m.renderFeedHeader(m.feedViewport.Width())), "\n")
+	row, col := -1, -1
+	for r, line := range header {
+		if c := strings.Index(line, "[Editors]"); c >= 0 {
+			row, col = r, ansi.StringWidth(line[:c])
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatalf("[Editors] not rendered in header:\n%s", strings.Join(header, "\n"))
+	}
+	m = update(t, m, tea.MouseClickMsg{X: col + 2, Y: row, Button: tea.MouseLeft})
+	if m.filter.GroupScope != domain.GroupScopeUser || m.filter.GroupTarget != 5 {
+		t.Fatalf("filter after click = %d/%d, want user group 5", m.filter.GroupScope, m.filter.GroupTarget)
+	}
+	if !m.loading {
+		t.Fatal("click on group tab did not trigger a feed query")
+	}
+
+	// A click on the type-tab row above the strip must not touch the filter.
+	m.filter = domain.FeedFilter{GroupScope: domain.GroupScopeAll}
+	m = update(t, m, tea.MouseClickMsg{X: col + 2, Y: row - 1, Button: tea.MouseLeft})
+	if m.filter.GroupScope != domain.GroupScopeAll {
+		t.Fatalf("click above the strip changed filter to %d, want unchanged", m.filter.GroupScope)
 	}
 }
 
