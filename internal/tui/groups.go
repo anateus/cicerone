@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -25,7 +26,10 @@ func groupTabs(groups []domain.PackageGroup) []groupTab {
 		{label: "All", scope: domain.GroupScopeAll},
 		{label: "Ungrouped", scope: domain.GroupScopeUngrouped},
 	}
-	for _, group := range groups {
+	ordered := make([]domain.PackageGroup, len(groups))
+	copy(ordered, groups)
+	sort.SliceStable(ordered, func(a, b int) bool { return ordered[a].Index < ordered[b].Index })
+	for _, group := range ordered {
 		tabs = append(tabs, groupTab{label: group.Name, scope: domain.GroupScopeUser, target: group.ID})
 	}
 	tabs = append(tabs,
