@@ -637,18 +637,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		packageID, groupID, newName, clear := msg.PackageID, msg.GroupID, msg.NewName, msg.Clear
 		return m, func() tea.Msg {
+			created := false
 			if newName != "" {
 				group, err := source.CreatePackageGroup(m.deps.Context, newName)
 				if err != nil {
 					return groupAssigned{PackageID: packageID, Err: err}
 				}
 				groupID = group.ID
+				created = true
 			}
 			if clear {
 				groupID = 0
 			}
 			err := source.SetPackageGroup(m.deps.Context, packageID, groupID)
-			return groupAssigned{PackageID: packageID, Group: domain.PackageGroup{ID: groupID}, Err: err}
+			return groupAssigned{PackageID: packageID, Group: domain.PackageGroup{ID: groupID, Name: newName}, Created: created, Err: err}
 		}
 	case groupAssigned:
 		if msg.Err != nil {
@@ -656,8 +658,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notification = "Error: assign group: " + msg.Err.Error()
 			return m, nil
 		}
-		if msg.Group.ID != 0 {
-			m.rememberGroup(domain.PackageGroup{ID: msg.Group.ID})
+		if msg.Created {
+			m.rememberGroup(msg.Group)
 		}
 		m.applyPackageGroup(msg.PackageID, msg.Group.ID)
 		m.stale, m.loading = true, true
@@ -1030,14 +1032,17 @@ func (m Model) loadGroups() tea.Cmd {
 	}
 }
 
-// rememberGroup registers a newly created group so the strip can show it
-// before the next full reload.
+// rememberGroup registers a newly created group so the strip can show it with
+// its name before the next full reload. The Index lands the new group before
+// the Starred and Hidden tabs, which the strip appends last anyway.
 func (m *Model) rememberGroup(group domain.PackageGroup) {
-	for _, existing := range m.userGroups {
+	for index, existing := range m.userGroups {
 		if existing.ID == group.ID {
+			m.userGroups[index] = group
 			return
 		}
 	}
+	group.Index = len(m.userGroups) + 1
 	m.userGroups = append(m.userGroups, group)
 }
 

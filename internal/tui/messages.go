@@ -144,6 +144,7 @@ type groupAssignRequested struct {
 type groupAssigned struct {
 	PackageID domain.PackageID
 	Group     domain.PackageGroup
+	Created   bool
 	Err       error
 }
 type groupDeleteRequested struct{ GroupID domain.PackageGroupID }

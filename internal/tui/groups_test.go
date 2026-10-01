@@ -323,6 +323,24 @@ func TestGroupAssignMessageUpdatesRowsAndRefetches(t *testing.T) {
 	if m.feedRequestID != before+1 {
 		t.Fatalf("feedRequestID = %d, want refetch", m.feedRequestID)
 	}
+	if len(m.userGroups) != 0 {
+		t.Fatalf("plain assignment added strip groups = %#v, want none", m.userGroups)
+	}
+}
+
+func TestGroupCreatedMessageShowsNamedGroupInStrip(t *testing.T) {
+	data := &fakeGroupData{}
+	m := groupTestModel(data, groups("a"))
+
+	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
+	strip := ansi.Strip(m.groupStrip(120))
+	if !strings.Contains(strip, "[CLI tools]") {
+		t.Fatalf("strip = %q, want named new group", strip)
+	}
+	// The created group sorts after any existing groups and before Starred.
+	if before, after := indexOf(strip, "[Ungrouped]"), indexOf(strip, "[Starred]"); !strings.Contains(strip[before:after], "[CLI tools]") {
+		t.Fatalf("strip = %q, want new group between Ungrouped and Starred", strip)
+	}
 }
 
 var _ tea.Msg = groupAssigned{}
