@@ -400,30 +400,7 @@ func TestInitialFeedQueryUsesCurrentTimeForHorizon(t *testing.T) {
 	}
 }
 
-func TestAltSCyclesSelectedPackageStatus(t *testing.T) {
-	data := &statusRecordingData{fakeData: &fakeData{groups: groups("a")}}
-	m := NewModel(Dependencies{Data: data})
-	m.showSnoozed = true
-	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: data.groups})
-
-	for _, want := range []domain.PackageStatus{domain.PackageStatusStarred, domain.PackageStatusSnoozed, domain.PackageStatusDefault} {
-		var message tea.Msg
-		m, message = updateAndRunCommand(t, m, altKey('s'))
-		m = update(t, m, message)
-		if got := m.selectedEvent().Status; got != want {
-			t.Fatalf("package status = %q, want %q", got, want)
-		}
-	}
-	if diff := cmp.Diff([]packageStatusUpdate{
-		{PackageID: "pkg-a", Status: domain.PackageStatusStarred},
-		{PackageID: "pkg-a", Status: domain.PackageStatusSnoozed},
-		{PackageID: "pkg-a", Status: domain.PackageStatusDefault},
-	}, data.updates); diff != "" {
-		t.Fatalf("stored status updates (-want +got):\n%s", diff)
-	}
-}
-
-func TestFeedRowsMarkStarredAndSnoozedPackages(t *testing.T) {
+func TestFeedRowsMarkStarredAndHiddenPackages(t *testing.T) {
 	m := NewModel(Dependencies{})
 	e := event("status", "package")
 	e.Status = domain.PackageStatusStarred
@@ -432,75 +409,13 @@ func TestFeedRowsMarkStarredAndSnoozedPackages(t *testing.T) {
 		t.Fatalf("starred row = %q, want star after package name", starred)
 	}
 
-	e.Status = domain.PackageStatusSnoozed
-	snoozed := m.feedGroupRows("› ", e, 72)[0]
-	if !strings.Contains(ansi.Strip(snoozed), "package 💤") {
-		t.Fatalf("snoozed row = %q, want sleep marker after package name", snoozed)
+	e.Status = domain.PackageStatusHidden
+	hidden := m.feedGroupRows("› ", e, 72)[0]
+	if !strings.Contains(ansi.Strip(hidden), "package ⃠") {
+		t.Fatalf("hidden row = %q, want hidden marker after package name", hidden)
 	}
-	if !strings.Contains(snoozed, "\x1b[2m") {
-		t.Fatalf("snoozed row = %q, want faint package name", snoozed)
-	}
-}
-
-func TestSnoozedRowsCollapseByDefaultAndAltShiftSTogglesThem(t *testing.T) {
-	m := NewModel(Dependencies{})
-	m.width, m.height, m.loading = 72, 20, false
-	m.groups = groups("a", "b", "c")
-	m.groups[1].Events[0].Status = domain.PackageStatusSnoozed
-	m.syncViewports()
-
-	if got, want := m.feedLineCount(72), 5; got != want {
-		t.Fatalf("collapsed feed lines = %d, want %d", got, want)
-	}
-	if rows := ansi.Strip(m.renderFeedRows(72)); strings.Contains(rows, "pkg-b") {
-		t.Fatalf("collapsed feed rendered snoozed package: %q", rows)
-	}
-	collapsed := m.renderFeedGroup(1, m.groups[1], 72)[0]
-	if !strings.Contains(ansi.Strip(collapsed), "┄") {
-		t.Fatalf("collapsed row lacks a subtle rule: %q", collapsed)
-	}
-	if !strings.Contains(collapsed, "48;2;41;47;57") {
-		t.Fatalf("collapsed row does not use the alternate surface: %q", collapsed)
-	}
-	if !strings.Contains(collapsed, "38;2;124;124;124") {
-		t.Fatalf("collapsed row does not use a neutral gray foreground: %q", collapsed)
-	}
-	if got := m.feedGroupAtLine(2); got != -1 {
-		t.Fatalf("collapsed snoozed row selects group %d, want no selection", got)
-	}
-
-	m = update(t, m, key("j"))
-	if got, want := m.selected, 2; got != want {
-		t.Fatalf("selection after moving past collapsed row = %d, want %d", got, want)
-	}
-
-	m = update(t, m, altShiftKey('s'))
-	if got, want := m.feedLineCount(72), 6; got != want {
-		t.Fatalf("expanded feed lines = %d, want %d", got, want)
-	}
-	if rows := ansi.Strip(m.renderFeedRows(72)); !strings.Contains(rows, "pkg-b 💤") {
-		t.Fatalf("expanded feed did not render snoozed package: %q", rows)
-	}
-	if got, want := m.feedGroupAtLine(2), 1; got != want {
-		t.Fatalf("expanded snoozed row selects group %d, want %d", got, want)
-	}
-}
-
-func TestSnoozingTheOnlyPackageClearsSelection(t *testing.T) {
-	data := &statusRecordingData{fakeData: &fakeData{groups: groups("a")}}
-	m := NewModel(Dependencies{Data: data})
-	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: data.groups})
-
-	for range 2 { // default → starred → snoozed
-		var saved tea.Msg
-		m, saved = updateAndRunCommand(t, m, altKey('s'))
-		m = update(t, m, saved)
-	}
-	if m.hasSelection() || m.selected != -1 {
-		t.Fatalf("selection after snoozing only package = %d, want none", m.selected)
-	}
-	if got := m.feedGroupAtLine(0); got != -1 {
-		t.Fatalf("collapsed only row selects group %d, want no selection", got)
+	if !strings.Contains(hidden, "\x1b[2m") {
+		t.Fatalf("hidden row = %q, want faint package name", hidden)
 	}
 }
 
@@ -628,8 +543,8 @@ func TestSlashSearchModeCapturesTextInsteadOfGlobalKeys(t *testing.T) {
 	}
 	header := m.renderFeedHeader(m.width)
 	lines := strings.Split(ansi.Strip(header), "\n")
-	if len(lines) != 6 || !strings.Contains(lines[3], "─") || !strings.Contains(lines[4], "search names") ||
-		!strings.Contains(lines[5], "PACKAGE") {
+	if len(lines) != 7 || !strings.Contains(lines[3], "─") || !strings.Contains(lines[4], "search names") ||
+		!strings.Contains(lines[6], "PACKAGE") {
 		t.Fatalf("active search input is not below the tab separator and above the package list: %#v", lines)
 	}
 	if strings.Contains(ansi.Strip(header), "SEARCH NAMES") {
@@ -640,7 +555,7 @@ func TestSlashSearchModeCapturesTextInsteadOfGlobalKeys(t *testing.T) {
 		!strings.Contains(searchLine, "\x1b[1;") {
 		t.Fatal("active search input does not have distinct, restrained focus shading and emphasis")
 	}
-	if m.feedViewport.Height() != m.height-statusHeight-6 {
+	if m.feedViewport.Height() != m.height-statusHeight-7 {
 		t.Fatalf("search viewport height = %d, want %d", m.feedViewport.Height(), m.height-statusHeight-6)
 	}
 }
@@ -1163,15 +1078,16 @@ func TestExpandedInspectorDeemphasizesFeedAndStatusOnly(t *testing.T) {
 
 func TestFilterControlsAreClosedOnAContinuousShelf(t *testing.T) {
 	m := NewModel(Dependencies{})
-	rows := strings.Split(ansi.Strip(m.feedControls(72)), "\n")
-	if len(rows) != 3 {
-		t.Fatalf("control rows = %d, want 3", len(rows))
+	rows := m.tabStrip([]string{"FORMULAE", "CASKS", "ALL"}, 0, 72, m.palette().feedBG, "   Sync never")
+	lines := strings.Split(ansi.Strip(strings.Join(rows[:], "\n")), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("control rows = %d, want 3", len(lines))
 	}
-	if !strings.Contains(rows[0], "╮╭") || !strings.Contains(rows[1], "││") {
-		t.Fatalf("tabs are not adjacent like tui-studio's tab strip: %q / %q", rows[0], rows[1])
+	if !strings.Contains(lines[0], "╮╭") || !strings.Contains(lines[1], "││") {
+		t.Fatalf("tabs are not adjacent like tui-studio's tab strip: %q / %q", lines[0], lines[1])
 	}
-	if !strings.HasPrefix(rows[2], "╯          ╰┴───────┴┴─────┴") || strings.Trim(rows[2], "─╯╰┴ ") != "" {
-		t.Fatalf("tabs do not share a continuous baseline: %q", rows[2])
+	if !strings.HasPrefix(lines[2], "╯          ╰┴───────┴┴─────┴") || strings.Trim(lines[2], "─╯╰┴ ") != "" {
+		t.Fatalf("tabs do not share a continuous baseline: %q", lines[2])
 	}
 }
 
@@ -1180,11 +1096,13 @@ func TestFeedHeaderRemainsPinnedWhileRowsScroll(t *testing.T) {
 	m.width, m.height, m.loading = 72, 12, false
 	m.groups = groups("a", "b", "c", "d", "e", "f")
 	m.syncViewports()
-	m.feedViewport.SetYOffset(9)
-	m.viewportOffset = 9
+	total := m.feedLineCount(72)
+	listHeight := m.feedViewport.Height()
+	m.feedViewport.SetYOffset(total - listHeight)
+	m.viewportOffset = total - listHeight
 
 	view := ansi.Strip(m.render())
-	for _, want := range []string{"FORMULAE", "CASKS", "PACKAGE", "pkg-d"} {
+	for _, want := range []string{"FORMULAE", "CASKS", "PACKAGE", "pkg-f", "pkg-e"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("scrolled feed lost pinned header or visible rows (%q):\n%s", want, view)
 		}
