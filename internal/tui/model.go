@@ -656,7 +656,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.err = msg.Err
 			m.notification = "Error: assign group: " + msg.Err.Error()
+			// Leave the modal open and its typed name intact for a retry.
+			if m.groupAssign != nil {
+				m.groupAssign.pending = false
+			}
 			return m, nil
+		}
+		if m.groupAssign != nil {
+			// Any confirmed assignment closes the modal: the optimistic close
+			// moved here so a failed create cannot lose the typed name.
+			m.groupAssign = nil
 		}
 		if msg.Created {
 			m.rememberGroup(msg.Group)

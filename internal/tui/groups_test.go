@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"github.com/anateus/cicerone/internal/domain"
 	"github.com/charmbracelet/x/ansi"
 )
+
+var errDuplicateGroup = errors.New("UNIQUE constraint failed: package_groups.name")
 
 type fakeGroupData struct {
 	fakeData
@@ -89,8 +92,14 @@ func TestGroupModalAssignsSelectedGroupOnEnter(t *testing.T) {
 	if request.PackageID != "pkg-a" || request.GroupID != 3 {
 		t.Fatalf("request = %#v, want pkg-a into group 3", request)
 	}
+	if m.groupAssign == nil || !m.groupAssign.pending {
+		t.Fatalf("modal state after enter = %#v, want open with pending", m.groupAssign)
+	}
+
+	// Store confirms; only then does the modal close.
+	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 3}})
 	if m.groupAssign != nil {
-		t.Fatal("modal stayed open after assignment")
+		t.Fatalf("modal after confirm = %#v, want closed", *m.groupAssign)
 	}
 }
 
@@ -110,6 +119,27 @@ func TestGroupModalCreatesNewGroupFromName(t *testing.T) {
 	}
 	if request.NewName != "CLI tools" || request.GroupID != 0 {
 		t.Fatalf("request = %#v, want create CLI tools", request)
+	}
+	if m.groupAssign == nil || !m.groupAssign.pending {
+		t.Fatalf("modal after enter = %#v, want pending", m.groupAssign)
+	}
+
+	// A duplicate-name failure keeps the modal open and the name intact.
+	m = update(t, m, groupAssigned{PackageID: "pkg-a", Err: errDuplicateGroup})
+	if m.groupAssign == nil {
+		t.Fatal("modal closed on failed create, name lost")
+	}
+	if m.groupAssign.name != "CLI tools" || m.groupAssign.pending {
+		t.Fatalf("modal after failure = %#v, want name kept and not pending", *m.groupAssign)
+	}
+
+	// A retry that succeeds closes the modal and names the strip tab.
+	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
+	if m.groupAssign != nil {
+		t.Fatal("modal stayed open after successful retry")
+	}
+	if !strings.Contains(ansi.Strip(m.groupStrip(120)), "[CLI tools]") {
+		t.Fatalf("strip = %q, want created group", ansi.Strip(m.groupStrip(120)))
 	}
 }
 

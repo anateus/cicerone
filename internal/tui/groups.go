@@ -57,6 +57,7 @@ type groupModal struct {
 	name       string
 	assignedTo domain.PackageGroupID
 	removeHot  bool
+	pending    bool
 }
 
 func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID) groupModal {
@@ -268,7 +269,10 @@ func (m Model) handleGroupModalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if event := m.selectedEvent(); event.PackageID != "" {
 			if request, ok := modal.assignRequest(event.PackageID); ok {
-				m.groupAssign = nil
+				// Keep the modal open until the store confirms; a failed create
+				// (duplicate name) must not lose the typed name.
+				modal.pending = true
+				m.groupAssign = &modal
 				return m, func() tea.Msg { return request }
 			}
 		}
