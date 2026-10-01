@@ -451,17 +451,20 @@ func (m Model) feedControls(width int) string {
 }
 
 // groupStrip renders the scrollable group tab row shared by every type tab.
+// When tabs overflow the width, the window keeps the active tab visible.
 func (m Model) groupStrip(width int) string {
-	tabs := groupTabs(m.userGroups)
-	active := activeGroupTab(m.userGroups, m.filter)
+	tabs, offset := m.visibleGroupTabs(width)
 	p := m.palette()
 	var b strings.Builder
+	if offset > 0 {
+		b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(p.primary).Background(p.feedBG).Render("‹"))
+	}
 	for index, tab := range tabs {
-		if index > 0 {
+		if index > 0 || offset > 0 {
 			b.WriteString(" ")
 		}
 		style := lipgloss.NewStyle().Foreground(p.primary).Background(p.feedBG)
-		if index == active {
+		if tab.scope == m.filter.GroupScope && tab.target == m.filter.GroupTarget {
 			style = style.Bold(true).Foreground(p.selectedFG).Background(p.tabBG)
 		}
 		b.WriteString(style.Render("[" + tab.label + "]"))
@@ -469,14 +472,45 @@ func (m Model) groupStrip(width int) string {
 	return m.surfaceLine(fit(" "+b.String(), width), width, p.feedBG)
 }
 
+// visibleGroupTabs returns the tabs that fit in the width, keeping the active
+// tab in view, and the index of the first returned tab in the full list.
+func (m Model) visibleGroupTabs(width int) ([]groupTab, int) {
+	all := groupTabs(m.userGroups)
+	active := activeGroupTab(m.userGroups, m.filter)
+	// Measure forward from the active tab, then extend backwards.
+	end := active + 1
+	used := ansi.StringWidth("[" + all[active].label + "]")
+	for end < len(all) {
+		w := ansi.StringWidth("["+all[end].label+"]") + 1
+		if used+w+1 > width-2 { // reserve for the leading space and overflow marker
+			break
+		}
+		used += w
+		end++
+	}
+	start := active
+	for start > 0 {
+		w := ansi.StringWidth("["+all[start-1].label+"]") + 1
+		if used+w+1 > width-2 {
+			break
+		}
+		used += w
+		start--
+	}
+	return all[start:end], start
+}
+
 // groupTabAt hit-tests a click against the rendered group strip. The strip
-// always sits on header row 4 (zero-based row 3).
+// always sits on header row 4 (zero-based row 3) and shares its windowing
+// with the renderer, so click targets cannot drift from what is drawn.
 func (m Model) groupTabAt(y, x int) (bool, groupTab) {
 	if y != 3 {
 		return false, groupTab{}
 	}
-	tabs := groupTabs(m.userGroups)
-	cursor := 1 // leading space
+	tabs, offset := m.visibleGroupTabs(m.width)
+	// The leading space, plus the overflow marker and its trailing space when
+	// the window starts past the first tab.
+	cursor := 1 + offset
 	for _, tab := range tabs {
 		labelWidth := ansi.StringWidth("[" + tab.label + "]")
 		if x >= cursor && x < cursor+labelWidth {

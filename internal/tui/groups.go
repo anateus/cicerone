@@ -74,6 +74,21 @@ func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID)
 
 func (m groupModal) rowCount() int { return len(m.groups) + 1 }
 
+// groupModalMaxRows bounds the group list height so the modal stays on screen
+// when the user has accumulated many groups.
+const groupModalMaxRows = 8
+
+// visibleWindow returns the slice of group rows shown in the modal, keeping
+// the cursor inside it.
+func (m groupModal) visibleWindow() (start, end int) {
+	total := m.rowCount()
+	if total <= groupModalMaxRows {
+		return 0, total
+	}
+	start = min(max(0, m.cursor-groupModalMaxRows/2), total-groupModalMaxRows)
+	return start, start + groupModalMaxRows
+}
+
 func (m groupModal) selectedGroup() (domain.PackageGroup, bool) {
 	if m.cursor <= 0 || m.cursor > len(m.groups) {
 		return domain.PackageGroup{}, false
@@ -126,35 +141,47 @@ func (m Model) renderGroupModal() string {
 		}
 		return "( )"
 	}
-	for index, group := range modal.groups {
-		row := modal.cursor == index+1 && !modal.nameFocused()
+	rowStart, rowEnd := modal.visibleWindow()
+	if rowStart > 0 {
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(fit(fmt.Sprintf("   … %d more above", rowStart), 44)))
+		b.WriteByte('\n')
+	}
+	for index := rowStart; index < rowEnd; index++ {
+		if index == 0 {
+			// The new-group row leads the list.
+			label := "New group"
+			if modal.nameFocused() {
+				label = "New group: " + modal.name + "█"
+			}
+			style := lipgloss.NewStyle().Foreground(p.primary)
+			if modal.cursor == 0 {
+				style = style.Bold(true)
+			}
+			b.WriteString(style.Render(fit(fmt.Sprintf(" %s %s", radio(modal.cursor == 0), label), 44)))
+			b.WriteByte('\n')
+			continue
+		}
+		group := modal.groups[index-1]
+		row := modal.cursor == index && !modal.nameFocused()
 		line := fmt.Sprintf(" %s %s", radio(row), group.Name)
 		if modal.assignedTo == group.ID {
-			if modal.cursor == index+1 {
+			if modal.cursor == index {
 				line += "  ← enter to remove"
 			} else {
 				line += "  ←"
 			}
 		}
 		style := lipgloss.NewStyle()
-		if modal.cursor == index+1 {
+		if modal.cursor == index {
 			style = style.Bold(true)
 		}
 		b.WriteString(style.Render(fit(line, 44)))
 		b.WriteByte('\n')
 	}
-	// The new-group row leads the list.
-	newRow := modal.cursor == 0
-	label := "New group"
-	if modal.nameFocused() {
-		label = "New group: " + modal.name + "█"
+	if rowEnd < modal.rowCount() {
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(fit(fmt.Sprintf("   … %d more below", modal.rowCount()-rowEnd), 44)))
+		b.WriteByte('\n')
 	}
-	newStyle := lipgloss.NewStyle().Foreground(p.primary)
-	if newRow {
-		newStyle = newStyle.Bold(true)
-	}
-	b.WriteString(newStyle.Render(fit(fmt.Sprintf(" %s %s", radio(modal.assignedTo == 0 && newRow), label), 44)))
-	b.WriteByte('\n')
 
 	b.WriteByte('\n')
 	confirmStyle := lipgloss.NewStyle().Bold(true).Foreground(p.selectedFG).Background(p.selectedBG)

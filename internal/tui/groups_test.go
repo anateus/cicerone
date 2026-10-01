@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -192,6 +193,77 @@ func TestGroupModalTypingShowsNameOnNewGroupRow(t *testing.T) {
 	view := ansi.Strip(m.renderGroupModal())
 	if !strings.Contains(view, "New group: tu█") {
 		t.Fatalf("modal = %q, want typed name with cursor", view)
+	}
+}
+
+func TestGroupModalWindowsLargeGroupLists(t *testing.T) {
+	data := &fakeGroupData{}
+	list := make([]domain.PackageGroup, 12)
+	for i := range list {
+		list[i] = domain.PackageGroup{ID: domain.PackageGroupID(i + 1), Name: fmt.Sprintf("Group%02d", i+1), Index: i + 1}
+	}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = list
+
+	m = update(t, m, key("g")) // cursor = 1, first group
+	view := ansi.Strip(m.renderGroupModal())
+	if strings.Contains(view, "Group01") && strings.Count(view, "( )")+strings.Count(view, "(●)") > 8 {
+		t.Fatalf("modal rendered more rows than the window: %q", view)
+	}
+	if !strings.Contains(view, "more below") {
+		t.Fatalf("modal = %q, want overflow marker below", view)
+	}
+
+	// Jump the cursor deep into the list; the window must follow.
+	for range 9 {
+		m = update(t, m, key("j"))
+	}
+	view = ansi.Strip(m.renderGroupModal())
+	if !strings.Contains(view, "Group10") || !strings.Contains(view, "more above") {
+		t.Fatalf("modal after scroll = %q, want window following cursor down", view)
+	}
+	if strings.Contains(view, "New group") && !strings.Contains(view, "New group:") {
+		t.Fatalf("modal after scroll = %q, want new-group row scrolled out", view)
+	}
+
+	// Cursor at the very bottom must show the last group.
+	for range 2 {
+		m = update(t, m, key("j"))
+	}
+	view = ansi.Strip(m.renderGroupModal())
+	if !strings.Contains(view, "Group12") {
+		t.Fatalf("modal at end = %q, want last group visible", view)
+	}
+}
+
+func TestGroupStripWindowsToActiveTabOnNarrowWidth(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 44, 24, false
+	var groups []domain.PackageGroup
+	for i := 1; i <= 6; i++ {
+		groups = append(groups, domain.PackageGroup{ID: domain.PackageGroupID(i), Name: fmt.Sprintf("GroupNumber%d", i), Index: i})
+	}
+	m.userGroups = groups
+
+	// Active tab defaults to All (index 0); narrow width must trim trailing tabs.
+	strip := ansi.Strip(m.groupStrip(44))
+	if !strings.Contains(strip, "[All]") || !strings.Contains(strip, "[GroupNumber") {
+		t.Fatalf("strip = %q, want window starting at All", strip)
+	}
+	if strings.Contains(strip, "[GroupNumber6]") {
+		t.Fatalf("strip = %q, want trailing tabs trimmed", strip)
+	}
+
+	// Cycle to the last tab; the window must slide to keep it visible.
+	for range 7 {
+		m = update(t, m, key("."))
+	}
+	strip = ansi.Strip(m.groupStrip(44))
+	if !strings.Contains(strip, "[Hidden]") {
+		t.Fatalf("strip after cycling to end = %q, want Hidden visible", strip)
+	}
+	if strings.Contains(strip, "[All]") {
+		t.Fatalf("strip after cycling to end = %q, want All scrolled out", strip)
 	}
 }
 
