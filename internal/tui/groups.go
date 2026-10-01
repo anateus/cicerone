@@ -149,7 +149,8 @@ func (m Model) renderGroupModal() string {
 	}
 	for index := rowStart; index < rowEnd; index++ {
 		if index == 0 {
-			// The new-group row leads the list.
+			// The new-group row leads the list. Its radio reads assigned only
+			// when the package is actually ungrouped, not merely cursored.
 			label := "New group"
 			if modal.nameFocused() {
 				label = "New group: " + modal.name + "█"
@@ -158,7 +159,7 @@ func (m Model) renderGroupModal() string {
 			if modal.cursor == 0 {
 				style = style.Bold(true)
 			}
-			b.WriteString(style.Render(fit(fmt.Sprintf(" %s %s", radio(modal.cursor == 0), label), 44)))
+			b.WriteString(style.Render(fit(fmt.Sprintf(" %s %s", radio(modal.assignedTo == 0), label), 44)))
 			b.WriteByte('\n')
 			continue
 		}
