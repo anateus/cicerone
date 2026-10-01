@@ -18,7 +18,7 @@ import (
 
 const narrowBreakpoint = 100
 const statusHeight = 1
-const feedHeaderHeight = 5
+const feedHeaderHeight = 6
 const freshnessWarningAfter = 24 * time.Hour
 
 func (m Model) render() string {
@@ -52,6 +52,9 @@ func (m Model) render() string {
 	}
 	if modal, bounds := m.actionModalView(w, maxBody); modal != "" {
 		body = m.overlayActionModal(body, modal, bounds, w, maxBody)
+	}
+	if modal := m.renderGroupModal(); modal != "" {
+		body = m.overlayGroupModal(body, modal, w, maxBody)
 	}
 	lines := strings.Split(body, "\n")
 	if len(lines) > maxBody {
@@ -442,9 +445,47 @@ func (m Model) feedControls(width int) string {
 	}
 	rows := m.tabStrip([]string{"FORMULAE", "CASKS", "ALL"}, active, width, m.palette().feedBG, controls)
 	if m.searching {
-		return strings.Join([]string{rows[0], rows[1], rows[2], m.searchInputLine(scope, width)}, "\n")
+		return strings.Join([]string{rows[0], rows[1], rows[2], m.searchInputLine(scope, width), m.groupStrip(width)}, "\n")
 	}
-	return strings.Join(rows[:], "\n")
+	return strings.Join(rows[:], "\n") + "\n" + m.groupStrip(width)
+}
+
+// groupStrip renders the scrollable group tab row shared by every type tab.
+func (m Model) groupStrip(width int) string {
+	tabs := groupTabs(m.userGroups)
+	active := activeGroupTab(m.userGroups, m.filter)
+	p := m.palette()
+	var b strings.Builder
+	for index, tab := range tabs {
+		if index > 0 {
+			b.WriteString(" ")
+		}
+		style := lipgloss.NewStyle().Foreground(p.primary).Background(p.feedBG)
+		if index == active {
+			style = style.Bold(true).Foreground(p.selectedFG).Background(p.tabBG)
+		}
+		b.WriteString(style.Render("[" + tab.label + "]"))
+	}
+	return m.surfaceLine(fit(" "+b.String(), width), width, p.feedBG)
+}
+
+// groupTabAt hit-tests a click against the rendered group strip. The strip
+// always sits on header row 4 (zero-based row 3).
+func (m Model) groupTabAt(y, x int) (bool, groupTab) {
+	if y != 3 {
+		return false, groupTab{}
+	}
+	tabs := groupTabs(m.userGroups)
+	cursor := 1 // leading space
+	for _, tab := range tabs {
+		start := cursor
+		width := ansi.StringWidth("["+tab.label+"]") + 1
+		cursor += width
+		if x >= start && x < cursor {
+			return true, tab
+		}
+	}
+	return false, groupTab{}
 }
 
 func (m Model) freshnessText() string {
@@ -623,8 +664,8 @@ func packageStatusSuffix(status domain.PackageStatus) string {
 	switch status {
 	case domain.PackageStatusStarred:
 		return " ★"
-	case domain.PackageStatusSnoozed:
-		return " 💤"
+	case domain.PackageStatusHidden:
+		return " ⃠"
 	default:
 		return ""
 	}
@@ -632,7 +673,7 @@ func packageStatusSuffix(status domain.PackageStatus) string {
 
 func stylePackageName(event domain.UpdateEvent, name string) string {
 	switch event.Status {
-	case domain.PackageStatusSnoozed:
+	case domain.PackageStatusHidden:
 		return lipgloss.NewStyle().Faint(true).Render(name)
 	default:
 		return name

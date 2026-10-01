@@ -13,6 +13,11 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	mouse := msg.Mouse()
+	if m.groupAssign != nil {
+		// Any click outside the modal dismisses it; the modal is keyboard-first.
+		m.groupAssign = nil
+		return m, nil
+	}
 	if m.pendingAction != nil || m.actionRunning || m.actionResult != nil {
 		width, height := m.width, m.height
 		if width <= 0 {
@@ -99,11 +104,12 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			return m.filterChanged()
 		}
 	}
-	headerRows := m.feedHeaderRows()
-	if mouse.Y < headerRows {
-		return m, nil
+	if hit, tab := m.groupTabAt(mouse.Y, mouse.X); hit {
+		m.filter.GroupScope = tab.scope
+		m.filter.GroupTarget = tab.target
+		return m.filterChanged()
 	}
-	contentY := mouse.Y - headerRows + m.viewportOffset
+	contentY := mouse.Y - m.feedHeaderRows() + m.viewportOffset
 	if index := m.feedGroupAtLine(contentY); index >= 0 {
 		return m.selectFeedIndex(index)
 	}
@@ -147,9 +153,6 @@ func (m Model) feedGroupAtLine(line int) int {
 		}
 		rows := m.feedGroupHeight(group, m.feedViewport.Width())
 		if line >= cursor && line < cursor+rows {
-			if m.snoozedGroupCollapsed(group) {
-				return -1
-			}
 			return index
 		}
 		cursor += rows

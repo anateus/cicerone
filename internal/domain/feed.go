@@ -28,6 +28,8 @@ type FeedFilter struct {
 	ExternalMatches []PackageID
 	CatalogPackages []CatalogPackage
 	HorizonExempt   map[PackageID]bool
+	GroupScope      GroupScope
+	GroupTarget     PackageGroupID
 }
 
 // CatalogPackage is a Homebrew search hit without a recorded update event.
@@ -52,7 +54,7 @@ func BuildFeed(events []UpdateEvent, installed map[PackageID]bool, f FeedFilter)
 
 	candidates := make([]UpdateEvent, 0, len(events))
 	for _, event := range events {
-		if !matchesFeedFilter(event, f) {
+		if !matchesFeedFilter(event, f) || !MatchesGroupScope(f.GroupScope, event.GroupID, event.Status, f.GroupTarget) {
 			continue
 		}
 		candidates = append(candidates, event)

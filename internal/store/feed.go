@@ -75,21 +75,61 @@ func (s *Store) UpsertCatalogPackages(ctx context.Context, packages []domain.Cat
 	})
 }
 
-// SetPackageStatus persists the user-assigned status for a package.
+// SetPackageStatus persists the user-assigned status for a package. Hidden is
+// stored under the legacy 'snoozed' value that migration 014's CHECK allows.
 func (s *Store) SetPackageStatus(ctx context.Context, packageID domain.PackageID, status domain.PackageStatus) error {
 	if status == "" {
 		status = domain.PackageStatusDefault
 	}
 	return s.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE packages SET status=? WHERE id=?`, status, packageID)
+		_, err := tx.ExecContext(ctx, `UPDATE packages SET status=? WHERE id=?`, packageStatusStorage(status), packageID)
 		return err
 	})
+}
+
+// packageStatusStorage maps domain statuses onto the values allowed by the
+// migration-014 CHECK constraint. The groups feature keeps 'snoozed' on disk
+// as the storage spelling of hidden.
+func packageStatusStorage(status domain.PackageStatus) string {
+	if status == domain.PackageStatusHidden {
+		return "snoozed"
+	}
+	return string(status)
+}
+
+// packageStatusDomain maps stored status values back onto domain statuses.
+func packageStatusDomain(status domain.PackageStatus) domain.PackageStatus {
+	if status == "snoozed" {
+		return domain.PackageStatusHidden
+	}
+	return status
+}
+
+// groupScopeSQL returns the SQL predicate and arguments that restrict the feed
+// to the filter's group scope. Hidden packages are excluded from every scope
+// except the hidden one itself.
+func groupScopeSQL(filter domain.FeedFilter) (string, []any) {
+	switch filter.GroupScope {
+	case domain.GroupScopeUngrouped:
+		return `p.group_id IS NULL AND p.status != 'snoozed'`, nil
+	case domain.GroupScopeStarred:
+		return `p.status = 'starred'`, nil
+	case domain.GroupScopeHidden:
+		return `p.status = 'snoozed'`, nil
+	case domain.GroupScopeUser:
+		return `p.group_id = ? AND p.status != 'snoozed'`, []any{int64(filter.GroupTarget)}
+	default:
+		return `p.status != 'snoozed'`, nil
+	}
 }
 
 // QueryFeed selects relevant event rows in SQL and applies domain grouping rules.
 func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
 	where := []string{"1=1"}
 	args := make([]any, 0, 8)
+	scopePredicate, scopeArgs := groupScopeSQL(filter)
+	where = append(where, scopePredicate)
+	args = append(args, scopeArgs...)
 	if filter.Horizon > 0 {
 		horizon := `(e.event_time >= ? OR i.package_id IS NOT NULL`
 		args = append(args, filter.Now.Add(-filter.Horizon).UnixNano())
@@ -162,7 +202,7 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		}
 		where = append(where, `(`+strings.Join(matches, ` OR `)+`)`)
 	}
-	query := `SELECT e.id, e.package_id, p.name, p.type, p.status, e.kind,
+	query := `SELECT e.id, e.package_id, p.name, p.type, p.status, COALESCE(p.group_id, 0), e.kind,
 		e.old_version, e.new_version, e.old_revision, e.new_revision,
 		e.repository, e.definition_path, e.commit_hash, e.event_time, e.diagnostic, e.seen,
 		i.package_id IS NOT NULL,
@@ -190,13 +230,14 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		var versionCount int
 		var firstUpdate, lastUpdate int64
 		var isInstalled bool
-		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.Status, &event.Kind,
+		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.Status, &event.GroupID, &event.Kind,
 			&event.OldVersion, &event.NewVersion, &event.OldRevision, &event.NewRevision,
 			&event.Repository, &event.DefinitionPath, &event.Commit, &timestamp, &event.Diagnostic, &event.Seen, &isInstalled,
 			&versionCount, &firstUpdate, &lastUpdate); err != nil {
 			return nil, err
 		}
 		event.Time = time.Unix(0, timestamp).UTC()
+		event.Status = packageStatusDomain(event.Status)
 		event.Installed = isInstalled
 		if versionCount > 0 {
 			first, last := time.Unix(0, firstUpdate).UTC(), time.Unix(0, lastUpdate).UTC()
@@ -243,14 +284,15 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		var name string
 		var kind domain.PackageType
 		var status domain.PackageStatus
+		var groupID domain.PackageGroupID
 		var isInstalled bool
 		var version, description string
 		err := s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(json_extract(pi.normalized_json, '$.Name'), ''), p.name),
-			p.type, p.status, i.package_id IS NOT NULL,
+			p.type, p.status, COALESCE(p.group_id, 0), i.package_id IS NOT NULL,
 			COALESCE(json_extract(pi.normalized_json, '$.StableVersion'), ''), COALESCE(pi.description, '')
 			FROM packages p LEFT JOIN installed_packages i ON i.package_id=p.id
 			LEFT JOIN package_info pi ON pi.package_id=p.id WHERE p.id=?`, pkg.ID).
-			Scan(&name, &kind, &status, &isInstalled, &version, &description)
+			Scan(&name, &kind, &status, &groupID, &isInstalled, &version, &description)
 		if err == sql.ErrNoRows {
 			continue
 		}
@@ -260,13 +302,17 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		if len(filter.Types) > 0 && !filter.Types[kind] {
 			continue
 		}
+		if !domain.MatchesGroupScope(filter.GroupScope, groupID, packageStatusDomain(status), filter.GroupTarget) {
+			continue
+		}
+		status = packageStatusDomain(status)
 		shown[pkg.ID] = true
 		if description == "" {
 			description = pkg.Description
 		}
 		id := domain.EventID("catalog:" + string(pkg.ID))
 		groups = append(groups, domain.FeedGroup{ID: id, Events: []domain.UpdateEvent{{
-			ID: id, PackageID: pkg.ID, Name: name, Type: kind, Status: status,
+			ID: id, PackageID: pkg.ID, Name: name, Type: kind, Status: status, GroupID: groupID,
 			Kind: domain.EventCatalog, CatalogDescription: description, CatalogVersion: version, Installed: isInstalled, Seen: true,
 		}}})
 	}
@@ -297,10 +343,12 @@ func (s *Store) MarkEventsSeen(ctx context.Context, ids []domain.EventID) error 
 func (s *Store) Preferences(ctx context.Context) (domain.FeedFilter, error) {
 	var horizon int64
 	var version, revision, metadata, formula, cask bool
+	var scopeValue, targetValue int64
 	var filter domain.FeedFilter
 	err := s.db.QueryRowContext(ctx, `SELECT horizon_seconds, show_version, show_revision, show_metadata,
-			show_formula, show_cask, query, search_scope, roll_up FROM preferences WHERE id=1`).
-		Scan(&horizon, &version, &revision, &metadata, &formula, &cask, &filter.Query, &filter.Search, &filter.RollUp)
+			show_formula, show_cask, query, search_scope, roll_up, group_scope, group_target FROM preferences WHERE id=1`).
+		Scan(&horizon, &version, &revision, &metadata, &formula, &cask, &filter.Query, &filter.Search, &filter.RollUp,
+			&scopeValue, &targetValue)
 	if err != nil {
 		return domain.FeedFilter{}, err
 	}
@@ -322,6 +370,11 @@ func (s *Store) Preferences(ctx context.Context) (domain.FeedFilter, error) {
 	if cask {
 		filter.Types[domain.PackageCask] = true
 	}
+	if scopeValue < 0 || scopeValue > int64(domain.GroupScopeUser) {
+		scopeValue = 0
+	}
+	filter.GroupScope = domain.GroupScope(scopeValue)
+	filter.GroupTarget = domain.PackageGroupID(targetValue)
 	return filter, nil
 }
 
@@ -333,9 +386,10 @@ func (s *Store) SetPreferences(ctx context.Context, filter domain.FeedFilter) er
 			scope = domain.SearchNames
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE preferences SET horizon_seconds=?, show_version=?, show_revision=?,
-				show_metadata=?, show_formula=?, show_cask=?, query=?, search_scope=?, roll_up=? WHERE id=1`,
+				show_metadata=?, show_formula=?, show_cask=?, query=?, search_scope=?, roll_up=?, group_scope=?, group_target=? WHERE id=1`,
 			int64(filter.Horizon/time.Second), filter.Kinds[domain.EventVersion], filter.Kinds[domain.EventRevision], filter.Kinds[domain.EventMetadata],
-			filter.Types[domain.PackageFormula], filter.Types[domain.PackageCask], filter.Query, scope, filter.RollUp)
+			filter.Types[domain.PackageFormula], filter.Types[domain.PackageCask], filter.Query, scope, filter.RollUp,
+			int64(filter.GroupScope), int64(filter.GroupTarget))
 		return err
 	})
 }

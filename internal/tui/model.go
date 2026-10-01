@@ -32,8 +32,12 @@ type SeenRecorder interface {
 	MarkEventsSeen(context.Context, []domain.EventID) error
 }
 
-type PackageStatusSource interface {
-	SetPackageStatus(context.Context, domain.PackageID, domain.PackageStatus) error
+// PackageGroupSource reads and writes user-defined package groups.
+type PackageGroupSource interface {
+	PackageGroups(context.Context) ([]domain.PackageGroup, error)
+	CreatePackageGroup(context.Context, string) (domain.PackageGroup, error)
+	DeletePackageGroup(context.Context, domain.PackageGroupID) error
+	SetPackageGroup(context.Context, domain.PackageID, domain.PackageGroupID) error
 }
 
 type FreshnessSource interface {
@@ -112,7 +116,6 @@ type Model struct {
 	width, height                                                     int
 	groups                                                            []domain.FeedGroup
 	selected                                                          int
-	showSnoozed                                                       bool
 	viewportOffset                                                    int
 	focus                                                             pane
 	expanded                                                          map[domain.EventID]bool
@@ -172,6 +175,8 @@ type Model struct {
 	activeSync                                                        map[string]bool
 	searching                                                         bool
 	searchQueryCancel                                                 context.CancelFunc
+	userGroups                                                        []domain.PackageGroup
+	groupAssign                                                       *groupModal
 	freshness                                                         store.FreshnessStatus
 	freshnessErr                                                      error
 }
@@ -202,7 +207,7 @@ func NewModel(deps Dependencies) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.loadFreshness(m.freshnessRequestID), m.queryFeed(m.feedRequestID)}
+	cmds := []tea.Cmd{m.loadFreshness(m.freshnessRequestID), m.queryFeed(m.feedRequestID), m.loadGroups()}
 	if m.deps.OnReady != nil {
 		cmds = append(cmds, m.deps.OnReady)
 	}
@@ -320,25 +325,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.activeSync, msg.Source)
 		m.freshnessRequestID++
 		return m, m.loadFreshness(m.freshnessRequestID)
-	case PackageStatusSaved:
-		if msg.Err != nil {
-			m.err = msg.Err
-			m.notification = "Error: save package status: " + msg.Err.Error()
-			return m, nil
-		}
-		for groupIndex := range m.groups {
-			for eventIndex := range m.groups[groupIndex].Events {
-				if m.groups[groupIndex].Events[eventIndex].PackageID == msg.PackageID {
-					m.groups[groupIndex].Events[eventIndex].Status = msg.Status
-				}
-			}
-		}
-		previousSelection := m.selected
-		m.clampSelection()
-		m.syncViewports()
-		if m.selected != previousSelection {
-			return m.selectionChanged()
-		}
 	case PreferencesLoaded:
 		if msg.Err == nil {
 			msg.Filter.Now = m.filter.Now
@@ -638,6 +624,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.feedRequestID++
 		m.captureRefreshAnchor(m.feedRequestID, m.actionAnchor)
 		return m, m.queryFeed(m.feedRequestID)
+	case groupsLoaded:
+		if msg.Err != nil {
+			return m, nil
+		}
+		m.userGroups = msg.Groups
+		m.syncViewports()
+	case groupAssignRequested:
+		source, ok := m.deps.Data.(PackageGroupSource)
+		if !ok || msg.PackageID == "" {
+			return m, nil
+		}
+		packageID, groupID, newName := msg.PackageID, msg.GroupID, msg.NewName
+		return m, func() tea.Msg {
+			if newName != "" {
+				group, err := source.CreatePackageGroup(m.deps.Context, newName)
+				if err != nil {
+					return groupAssigned{PackageID: packageID, Err: err}
+				}
+				groupID = group.ID
+			}
+			err := source.SetPackageGroup(m.deps.Context, packageID, groupID)
+			return groupAssigned{PackageID: packageID, Group: domain.PackageGroup{ID: groupID}, Err: err}
+		}
+	case groupAssigned:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.notification = "Error: assign group: " + msg.Err.Error()
+			return m, nil
+		}
+		if msg.Group.ID != 0 {
+			m.rememberGroup(domain.PackageGroup{ID: msg.Group.ID})
+		}
+		m.applyPackageGroup(msg.PackageID, msg.Group.ID)
+		m.stale, m.loading = true, true
+		m.feedRequestID++
+		return m, m.queryFeed(m.feedRequestID)
+	case groupDeleteRequested:
+		source, ok := m.deps.Data.(PackageGroupSource)
+		if !ok {
+			return m, nil
+		}
+		groupID := msg.GroupID
+		return m, func() tea.Msg {
+			return groupDeleted{GroupID: groupID, Err: source.DeletePackageGroup(m.deps.Context, groupID)}
+		}
+	case groupDeleted:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.notification = "Error: delete group: " + msg.Err.Error()
+			return m, nil
+		}
+		m.removeGroup(msg.GroupID)
+		if m.filter.GroupScope == domain.GroupScopeUser && m.filter.GroupTarget == msg.GroupID {
+			m.filter.GroupScope = domain.GroupScopeAll
+			m.filter.GroupTarget = 0
+		}
+		return m.filterChanged()
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.MouseClickMsg:
@@ -658,14 +701,11 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.groupAssign != nil {
+		return m.handleGroupModalKey(key)
+	}
 	if m.searching {
 		return m.handleSearchKey(key)
-	}
-	if key.Key().Code == 's' && key.Key().Mod == tea.ModAlt|tea.ModShift {
-		return m.toggleSnoozedVisibility()
-	}
-	if key.Key().Code == 's' && key.Key().Mod == tea.ModAlt {
-		return m.cycleSelectedPackageStatus()
 	}
 	if key.String() == "q" {
 		return m, tea.Quit
@@ -803,6 +843,12 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.filterChanged()
 	case "a":
 		return m.requestSelectedAction()
+	case "g":
+		return m.requestGroupModal()
+	case ",":
+		return m.cycleGroupTab(-1)
+	case ".":
+		return m.cycleGroupTab(1)
 	case "[":
 		m.document = store.DocumentREADME
 		m.documentExplicit = true
@@ -940,17 +986,6 @@ func (m Model) moveSelection(direction int) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(commands...)
 }
 
-func (m Model) toggleSnoozedVisibility() (tea.Model, tea.Cmd) {
-	m.showSnoozed = !m.showSnoozed
-	previousSelection := m.selected
-	m.clampSelection()
-	m.syncViewports()
-	if m.selected != previousSelection {
-		return m.selectionChanged()
-	}
-	return m, tea.Batch(m.loadVisiblePackageDescriptions()...)
-}
-
 func (m *Model) setPackageScope(formulae, casks bool) {
 	m.filter.Types = map[domain.PackageType]bool{
 		domain.PackageFormula: formulae,
@@ -981,19 +1016,59 @@ func (m Model) refreshDataset() (Model, tea.Cmd) {
 	return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadFreshness(m.freshnessRequestID))
 }
 
-func (m Model) cycleSelectedPackageStatus() (tea.Model, tea.Cmd) {
+func (m Model) loadGroups() tea.Cmd {
+	return func() tea.Msg {
+		source, ok := m.deps.Data.(PackageGroupSource)
+		if !ok {
+			return groupsLoaded{}
+		}
+		groups, err := source.PackageGroups(m.deps.Context)
+		return groupsLoaded{Groups: groups, Err: err}
+	}
+}
+
+// rememberGroup registers a newly created group so the strip can show it
+// before the next full reload.
+func (m *Model) rememberGroup(group domain.PackageGroup) {
+	for _, existing := range m.userGroups {
+		if existing.ID == group.ID {
+			return
+		}
+	}
+	m.userGroups = append(m.userGroups, group)
+}
+
+// removeGroup drops a group from the strip and clears membership from any
+// feed rows carrying it.
+func (m *Model) removeGroup(id domain.PackageGroupID) {
+	kept := m.userGroups[:0]
+	for _, group := range m.userGroups {
+		if group.ID != id {
+			kept = append(kept, group)
+		}
+	}
+	m.userGroups = kept
+}
+
+// applyPackageGroup updates membership for every feed row of a package.
+func (m *Model) applyPackageGroup(packageID domain.PackageID, groupID domain.PackageGroupID) {
+	for groupIndex := range m.groups {
+		for eventIndex := range m.groups[groupIndex].Events {
+			if m.groups[groupIndex].Events[eventIndex].PackageID == packageID {
+				m.groups[groupIndex].Events[eventIndex].GroupID = groupID
+			}
+		}
+	}
+}
+
+// requestGroupModal opens the assignment modal for the selected package.
+func (m Model) requestGroupModal() (tea.Model, tea.Cmd) {
 	if !m.hasSelection() {
 		return m, nil
 	}
-	source, ok := m.deps.Data.(PackageStatusSource)
-	if !ok {
-		return m, nil
-	}
-	event := m.selectedEvent()
-	status := domain.NextPackageStatus(event.Status)
-	return m, func() tea.Msg {
-		return PackageStatusSaved{PackageID: event.PackageID, Status: status, Err: source.SetPackageStatus(m.deps.Context, event.PackageID, status)}
-	}
+	modal := newGroupModal(m.userGroups, m.selectedPackageGroupID())
+	m.groupAssign = &modal
+	return m, nil
 }
 
 func (m Model) anchor() domain.Anchor {
@@ -1044,7 +1119,7 @@ func (m *Model) clampSelection() {
 func (m Model) hasSelection() bool { return m.selectableFeedIndex(m.selected) }
 
 func (m Model) selectableFeedIndex(index int) bool {
-	return index >= 0 && index < len(m.groups) && !m.snoozedGroupCollapsed(m.groups[index])
+	return index >= 0 && index < len(m.groups)
 }
 
 func (m Model) nextSelectableFeedIndex(start, direction int) int {
@@ -1456,7 +1531,7 @@ func (m Model) visibleCatalogPackages() map[domain.PackageID]bool {
 			line++
 		}
 		height := m.feedGroupHeight(group, m.feedViewport.Width())
-		if line < bottom && line+height > top && catalogGroup(group) && !m.snoozedGroupCollapsed(group) {
+		if line < bottom && line+height > top && catalogGroup(group) {
 			visible[group.Events[0].PackageID] = true
 		}
 		line += height

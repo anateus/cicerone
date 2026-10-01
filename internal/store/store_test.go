@@ -52,7 +52,7 @@ func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`PRAGMA user_version=15`); err != nil {
+	if _, err := db.Exec(`PRAGMA user_version=17`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -62,9 +62,9 @@ func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
 	store, err := Open(context.Background(), path)
 	if store != nil {
 		_ = store.Close()
-		t.Fatal("Open returned a store for schema version 15 with latest migration 14")
+		t.Fatal("Open returned a store for schema version 17 with latest migration 16")
 	}
-	if err == nil || !strings.Contains(err.Error(), "version 15") || !strings.Contains(err.Error(), "version 14") ||
+	if err == nil || !strings.Contains(err.Error(), "version 17") || !strings.Contains(err.Error(), "version 16") ||
 		!strings.Contains(strings.ToLower(err.Error()), "backup") || !strings.Contains(strings.ToLower(err.Error()), "downgrade") {
 		t.Fatalf("Open future schema error = %v, want versions and backup/downgrade recovery guidance", err)
 	}
@@ -143,7 +143,7 @@ func TestOpenUpgradesRepresentativeVersionTwoAndThreeDatabases(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = s.Close() })
-			assertPragma(t, s.db, "user_version", "14")
+			assertPragma(t, s.db, "user_version", "16")
 			assertScalar(t, s.db, `SELECT show_formula || ':' || show_cask FROM preferences WHERE id=1`, "1:0")
 			assertScalar(t, s.db, `SELECT search_scope FROM preferences WHERE id=1`, "names")
 			assertScalar(t, s.db, `SELECT count(*) FROM pragma_table_info('package_info') WHERE name='description'`, "1")
@@ -230,12 +230,12 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	assertPragma(t, store.db, "journal_mode", "wal")
 	assertPragma(t, store.db, "foreign_keys", "1")
 	assertPragma(t, store.db, "busy_timeout", "5000")
-	assertPragma(t, store.db, "user_version", "14")
+	assertPragma(t, store.db, "user_version", "16")
 
 	wantTables := []string{
 		"changelog_artifacts", "changelog_artifacts_fts", "changelog_attempts",
 		"changelog_sections", "document_attempts", "document_sections", "history_aliases", "history_diagnostics", "history_fallback_coverage", "history_scan_progress", "installed_packages", "package_aliases", "package_changelog_artifacts",
-		"package_document_links", "package_documents", "package_documents_fts", "package_info", "package_info_fts", "package_repositories", "package_repository_tags", "packages",
+		"package_document_links", "package_documents", "package_documents_fts", "package_groups", "package_info", "package_info_fts", "package_repositories", "package_repository_tags", "packages",
 		"packages_fts", "preferences", "repositories", "repository_ranges", "sync_runs",
 		"update_events",
 	}

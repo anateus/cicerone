@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"github.com/anateus/cicerone/internal/domain"
 )
 
@@ -82,9 +81,6 @@ func (m Model) renderVisibleFeedRows(width, offset, height int) (string, int) {
 }
 
 func (m Model) renderFeedGroup(index int, group domain.FeedGroup, width int) []string {
-	if m.snoozedGroupCollapsed(group) {
-		return []string{m.collapsedSnoozedRow(index, width)}
-	}
 	marker := "  "
 	if index == m.selected {
 		marker = "› "
@@ -106,21 +102,6 @@ func (m Model) renderFeedGroup(index int, group domain.FeedGroup, width int) []s
 	return lines
 }
 
-func (m Model) collapsedSnoozedRow(index, width int) string {
-	p := m.palette()
-	background := p.feedBG
-	if index%2 == 1 {
-		background = p.alternateRowBG
-	}
-	ruleWidth := min(16, max(4, width/4))
-	text := "   " + strings.Repeat("┄", ruleWidth)
-	foreground := lipgloss.Color("#7C7C7C")
-	if m.light {
-		foreground = lipgloss.Color("#888888")
-	}
-	return preserveOuterStyle(lipgloss.NewStyle().Faint(true).Foreground(foreground).Background(background).Render(fit(text, width)))
-}
-
 func (m Model) feedLineCount(width int) int {
 	if len(m.groups) == 0 {
 		return 1
@@ -135,14 +116,7 @@ func (m Model) feedLineCount(width int) int {
 	return total
 }
 
-func (m Model) snoozedGroupCollapsed(group domain.FeedGroup) bool {
-	return !m.showSnoozed && len(group.Events) > 0 && group.Events[0].Status == domain.PackageStatusSnoozed
-}
-
 func (m Model) feedGroupHeight(group domain.FeedGroup, width int) int {
-	if m.snoozedGroupCollapsed(group) {
-		return 1
-	}
 	height := feedRowHeight(width)
 	if m.expanded[group.ID] {
 		height += len(group.Events) - 1

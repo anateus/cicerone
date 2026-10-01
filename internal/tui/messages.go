@@ -136,3 +136,25 @@ type ActionFinished struct {
 	Err    error
 }
 type installedRefreshed struct{ Err error }
+
+// groupAssignRequested assigns a package to a group. Either GroupID is set for
+// an existing group, or NewName names a group to create first.
+type groupAssignRequested struct {
+	PackageID domain.PackageID
+	GroupID   domain.PackageGroupID
+	NewName   string
+}
+type groupAssigned struct {
+	PackageID domain.PackageID
+	Group     domain.PackageGroup
+	Err       error
+}
+type groupDeleteRequested struct{ GroupID domain.PackageGroupID }
+type groupDeleted struct {
+	GroupID domain.PackageGroupID
+	Err     error
+}
+type groupsLoaded struct {
+	Groups []domain.PackageGroup
+	Err    error
+}
