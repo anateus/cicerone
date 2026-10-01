@@ -457,7 +457,9 @@ func (m Model) groupStrip(width int) string {
 	tabs, offset := m.visibleGroupTabs(width)
 	p := m.palette()
 	var b strings.Builder
-	if offset > 0 {
+	if offset > 0 || len(tabs) == 0 {
+		// Show the overflow marker whenever tabs are hidden: a scrolled
+		// window (offset > 0), or a width too narrow to show any tab at all.
 		b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(p.primary).Background(p.feedBG).Render("‹"))
 	}
 	for index, tab := range tabs {
@@ -478,6 +480,14 @@ func (m Model) groupStrip(width int) string {
 func (m Model) visibleGroupTabs(width int) ([]groupTab, int) {
 	all := groupTabs(m.userGroups)
 	active := activeGroupTab(m.userGroups, m.filter)
+	// A label that cannot fit even alone renders as a truncated fragment
+	// ("[Al"), so the guard uses the bare leading space (1) plus, only when a
+	// neighbor would extend the window past an edge, the overflow marker (2).
+	// The active tab is always worth returning alone: a strip with one real
+	// tab beats a blank strip the user cannot act on.
+	if 1+ansi.StringWidth("["+all[active].label+"]") > width {
+		return nil, active
+	}
 	// Measure forward from the active tab, then extend backwards.
 	end := active + 1
 	used := ansi.StringWidth("[" + all[active].label + "]")
@@ -513,9 +523,14 @@ func (m Model) groupTabAt(y, x int) (bool, groupTab) {
 		return false, groupTab{}
 	}
 	tabs, offset := m.visibleGroupTabs(m.width)
-	// The leading space, plus the overflow marker and its trailing space when
-	// the window starts past the first tab.
-	cursor := 1 + offset
+	// The leading space, plus the overflow marker and its separator space
+	// when the window starts past the first tab. The marker occupies fixed
+	// cells regardless of how far the window scrolled; adding the offset
+	// itself would shift every click target past its label.
+	cursor := 1
+	if offset > 0 {
+		cursor += 2
+	}
 	for _, tab := range tabs {
 		labelWidth := ansi.StringWidth("[" + tab.label + "]")
 		if x >= cursor && x < cursor+labelWidth {

@@ -286,6 +286,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncViewports()
 		}
+		// A refresh can move the selection to another package or change its
+		// membership; the open modal must not keep acting on the old snapshot.
+		m.syncGroupModal()
 		cmds := []tea.Cmd{m.markFeedSeen(msg.Groups)}
 		if !sameDetailSelection(previousEvent, m.selectedEvent()) {
 			cmds = append(cmds, m.detailLoadCommands()...)
@@ -694,6 +697,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filter.GroupScope = domain.GroupScopeAll
 			m.filter.GroupTarget = 0
 		}
+		// The open modal must stop offering the deleted group; its cursor
+		// moves back in bounds and any remove focus falls back to the list.
+		m.syncGroupModal()
 		return m.filterChanged()
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)

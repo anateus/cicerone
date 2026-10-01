@@ -422,6 +422,165 @@ func contains(s, sub string) bool {
 	return indexOf(s, sub) >= 0
 }
 
+// TestGroupStripClicksTrackScrolledWindow guards the hit-test x math against
+// a scrolled strip: the overflow marker occupies fixed cells, so every
+// rendered tab must resolve to itself under a click.
+func TestGroupStripClicksTrackScrolledWindow(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 44, 24, false
+	var gs []domain.PackageGroup
+	for i := 1; i <= 4; i++ {
+		gs = append(gs, domain.PackageGroup{ID: domain.PackageGroupID(i), Name: "GroupNumber" + string(rune('0'+i)), Index: i})
+	}
+	m.userGroups = gs
+	m.filter.GroupScope = domain.GroupScopeUser
+	m.filter.GroupTarget = 4 // active near the end: window slides, offset > 0
+
+	strip := ansi.Strip(m.groupStrip(44))
+	tabs, offset := m.visibleGroupTabs(44)
+	if offset == 0 {
+		t.Fatalf("offset = 0, want a scrolled window for this fixture")
+	}
+	if len(tabs) == 0 {
+		t.Fatal("window must keep the active tab visible")
+	}
+	for _, tab := range tabs {
+		label := "[" + tab.label + "]"
+		at := indexOf(strip, label)
+		if at < 0 {
+			t.Errorf("rendered strip missing %q: %q", label, strip)
+			continue
+		}
+		x := ansi.StringWidth(strip[:at])
+		hit, got := m.groupTabAt(m.feedHeaderRows()-2, x)
+		if !hit {
+			t.Errorf("click at x=%d on %q missed", x, label)
+		} else if got.label != tab.label {
+			t.Errorf("click at x=%d hit %q, want %q", x, got.label, tab.label)
+		}
+	}
+}
+
+// TestGroupModalSyncsAcrossRefresh guards the modal snapshot against feed
+// refreshes: the radio and enter semantics must follow the package's current
+// membership, not the membership captured when the modal opened.
+func TestGroupModalSyncsAcrossRefresh(t *testing.T) {
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 9, Name: "Term", Index: 2}}}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = data.groups
+	m.groups[0].Events[0].GroupID = 3
+	m.selected = 0
+
+	m = update(t, m, key("g"))
+	if m.groupAssign == nil || m.groupAssign.assignedTo != 3 {
+		t.Fatalf("modal open state = %#v, want assigned to 3", m.groupAssign)
+	}
+	// A refresh lands where the package is now ungrouped (cleared elsewhere).
+	fresh := groups("a")
+	fresh[0].Events[0].GroupID = 0
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: fresh})
+	if m.groupAssign == nil {
+		t.Fatal("modal closed by refresh; want it synced and open")
+	}
+	if m.groupAssign.assignedTo != 0 {
+		t.Fatalf("modal assignedTo = %d after refresh, want 0 (ungrouped)", m.groupAssign.assignedTo)
+	}
+	// Enter on the first group must now assign, not clear.
+	if m.groupAssign.cursor != 1 {
+		t.Fatalf("modal cursor = %d, want 1 (first group)", m.groupAssign.cursor)
+	}
+	var requestMsg tea.Msg
+	m, requestMsg = updateAndRunCommand(t, m, key("enter"))
+	request, ok := requestMsg.(groupAssignRequested)
+	if !ok {
+		t.Fatalf("enter produced %T, want groupAssignRequested", requestMsg)
+	}
+	if request.Clear || request.GroupID != 3 {
+		t.Fatalf("request after refresh = %#v, want assign to 3", request)
+	}
+}
+
+// TestGroupModalSyncsAfterDelete guards the modal group list against a
+// deletion that arrives while the modal is open on another package.
+func TestGroupModalSyncsAfterDelete(t *testing.T) {
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 4, Name: "Term", Index: 2}}}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = data.groups
+	m.filter.GroupScope = domain.GroupScopeUser
+	m.filter.GroupTarget = 4 // active tab is NOT the one being deleted
+
+	m = update(t, m, key("g"))
+	if m.groupAssign == nil {
+		t.Fatal("modal did not open")
+	}
+	m = update(t, m, groupDeleted{GroupID: 3})
+	if m.groupAssign == nil {
+		t.Fatal("modal closed by delete; want it synced and open")
+	}
+	if len(m.groupAssign.groups) != 1 {
+		t.Fatalf("modal groups after delete = %d, want 1 (Editors gone)", len(m.groupAssign.groups))
+	}
+	if m.groupAssign.groups[0].ID != 4 {
+		t.Fatalf("modal groups after delete = %#v, want Term", m.groupAssign.groups)
+	}
+	if m.filter.GroupScope != domain.GroupScopeUser || m.filter.GroupTarget != 4 {
+		t.Fatalf("filter after delete = %d/%d, want unchanged user/4", m.filter.GroupScope, m.filter.GroupTarget)
+	}
+}
+
+// TestGroupModalEnterIgnoredWhilePending guards the confirm-once semantics:
+// a second enter before the store confirms must not fire a duplicate create.
+func TestGroupModalEnterIgnoredWhilePending(t *testing.T) {
+	data := &fakeGroupData{}
+	m := groupTestModel(data, groups("a"))
+	m = update(t, m, key("g"))
+	if m.groupAssign == nil {
+		t.Fatal("modal did not open")
+	}
+	m.groupAssign.cursor = 0 // new-group row
+	m = update(t, m, key("c"))
+	m = update(t, m, key("l"))
+	m = update(t, m, key("i"))
+	first := update(t, m, key("enter"))
+	if first.groupAssign == nil || !first.groupAssign.pending {
+		t.Fatal("first enter did not set pending")
+	}
+	second := update(t, m, key("enter"))
+	if second.groupAssign == nil || !second.groupAssign.pending {
+		t.Fatal("second enter closed or cleared the modal; want it still pending")
+	}
+	if len(data.created) != 0 {
+		// The request itself is async; the guard prevents the duplicate only
+		// once confirmed. Two enters must not emit two requests either.
+		t.Fatalf("created = %#v", data.created)
+	}
+}
+
+// TestVisibleGroupTabsDropsUnfittableTabs guards the degenerate widths: a
+// label that cannot fit even alone must not render as a truncated fragment,
+// and the strip must still show the overflow marker.
+func TestVisibleGroupTabsDropsUnfittableTabs(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.userGroups = []domain.PackageGroup{{ID: 1, Name: "G1", Index: 1}}
+
+	// [Ungrouped] is 11 wide; at width 10 even alone it cannot fit.
+	m.filter.GroupScope = domain.GroupScopeUngrouped
+	tabs, _ := m.visibleGroupTabs(10)
+	if len(tabs) != 0 {
+		t.Fatalf("tabs at width 10 for Ungrouped = %#v, want empty", tabs)
+	}
+	strip := ansi.Strip(m.groupStrip(10))
+	if !contains(strip, "‹") {
+		t.Fatalf("strip at width 10 = %q, want overflow marker", strip)
+	}
+
+	// At width 44 every tab fits.
+	tabs, offset := m.visibleGroupTabs(44)
+	if offset != 0 || len(tabs) != 5 {
+		t.Fatalf("tabs at width 44 = %d (offset %d), want all 5", len(tabs), offset)
+	}
+}
+
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

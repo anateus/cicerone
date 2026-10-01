@@ -60,6 +60,40 @@ type groupModal struct {
 	pending    bool
 }
 
+// syncGroupModal refreshes an open modal's snapshot after the feed or group
+// list changed underneath it. The typed name, cursor, and pending state
+// survive; the group list, the package's assignment, and the cursor bounds
+// are re-derived so the radio list cannot show or act on stale membership.
+func (m *Model) syncGroupModal() {
+	if m.groupAssign == nil {
+		return
+	}
+	modal := *m.groupAssign
+	modal.groups = m.userGroups
+	modal.assignedTo = m.selectedPackageGroupID()
+	if !modal.nameFocused() && modal.cursor == 0 && len(modal.groups) > 0 {
+		// The list gained groups since open; keep the default-on-first-group
+		// behavior instead of stranding the cursor on the new-group row.
+		modal.cursor = 1
+	}
+	if modal.cursor > modal.rowCount()-1 {
+		modal.cursor = modal.rowCount() - 1
+	}
+	if modal.removeHot && modal.selectedGroupRaw() == 0 {
+		modal.removeHot = false
+	}
+	m.groupAssign = &modal
+}
+
+// selectedGroupRaw returns the cursor's group without bounds paranoia; used
+// only for removeHot reset logic above.
+func (m groupModal) selectedGroupRaw() domain.PackageGroupID {
+	if m.cursor <= 0 || m.cursor > len(m.groups) {
+		return 0
+	}
+	return m.groups[m.cursor-1].ID
+}
+
 func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID) groupModal {
 	// Default the cursor to the first non-new group; fall back to the
 	// new-group row when no groups exist yet.
@@ -265,6 +299,11 @@ func (m Model) handleGroupModalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.groupAssign = &modal
 		return m, nil
 	case "enter":
+		if modal.pending {
+			// The store has not confirmed yet; a second enter would fire a
+			// duplicate create (UNIQUE-name error) or a redundant assign.
+			return m, nil
+		}
 		if modal.removeHot {
 			return m.removeSelectedGroup()
 		}
