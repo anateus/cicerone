@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -111,6 +112,24 @@ func TestGroupModalCreatesNewGroupFromName(t *testing.T) {
 	}
 }
 
+func TestGroupModalEnterOnAssignedGroupClearsMembership(t *testing.T) {
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = data.groups
+
+	m = update(t, m, key("g"))
+	m.groupAssign.assignedTo = 3 // package is already in Editors
+
+	m, msg := updateAndRunCommand(t, m, key("enter"))
+	request, ok := msg.(groupAssignRequested)
+	if !ok {
+		t.Fatalf("enter produced %T, want groupAssignRequested", msg)
+	}
+	if !request.Clear || request.GroupID != 0 || request.NewName != "" {
+		t.Fatalf("request = %#v, want clear membership", request)
+	}
+}
+
 func TestGroupModalRemoveRequestsDeletion(t *testing.T) {
 	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
 	m := groupTestModel(data, groups("a"))
@@ -135,6 +154,71 @@ func TestGroupModalEscCloses(t *testing.T) {
 	m = update(t, m, key("esc"))
 	if m.groupAssign != nil {
 		t.Fatal("esc did not close the group modal")
+	}
+}
+
+func TestGroupModalRendersRadioStatesAndRemoveHint(t *testing.T) {
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 4, Name: "Terminal", Index: 2}}}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = data.groups
+
+	m = update(t, m, key("g"))
+	m.groupAssign.assignedTo = 3
+	view := ansi.Strip(m.renderGroupModal())
+	if !strings.Contains(view, "Group: pkg-a") {
+		t.Fatalf("modal = %q, want package heading", view)
+	}
+	if !strings.Contains(view, "(●) Editors") {
+		t.Fatalf("modal = %q, want filled radio on the assigned group", view)
+	}
+	if !strings.Contains(view, "← enter to remove") {
+		t.Fatalf("modal = %q, want unassign affordance on cursor row", view)
+	}
+	if !strings.Contains(view, "( ) Terminal") {
+		t.Fatalf("modal = %q, want empty radio on other groups", view)
+	}
+	if !strings.Contains(view, "New group") {
+		t.Fatalf("modal = %q, want new-group row", view)
+	}
+}
+
+func TestGroupModalTypingShowsNameOnNewGroupRow(t *testing.T) {
+	data := &fakeGroupData{}
+	m := groupTestModel(data, groups("a"))
+
+	m = update(t, m, key("g"))
+	m = update(t, m, key("t"))
+	m = update(t, m, key("u"))
+	view := ansi.Strip(m.renderGroupModal())
+	if !strings.Contains(view, "New group: tu█") {
+		t.Fatalf("modal = %q, want typed name with cursor", view)
+	}
+}
+
+func TestGroupStripMouseHitSelectsTab(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 120, 24, false
+	m.userGroups = []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1}}
+
+	hit, tab := m.groupTabAt(3, 1) // [All] starts after the leading space
+	if !hit || tab.scope != domain.GroupScopeAll {
+		t.Fatalf("hit at x=1 = %v/%#v, want All", hit, tab)
+	}
+	hit, tab = m.groupTabAt(3, 4) // inside "All]"
+	if !hit || tab.scope != domain.GroupScopeAll {
+		t.Fatalf("hit at x=4 = %v/%#v, want All", hit, tab)
+	}
+	hit, tab = m.groupTabAt(3, 6) // the space between tabs
+	if hit {
+		t.Fatalf("gap between tabs hit %#v, want miss", tab)
+	}
+	hit, tab = m.groupTabAt(3, 7) // "[Ungrouped]"
+	if !hit || tab.scope != domain.GroupScopeUngrouped {
+		t.Fatalf("hit at x=8 = %v/%#v, want Ungrouped", hit, tab)
+	}
+	hit, tab = m.groupTabAt(2, 4) // wrong row
+	if hit {
+		t.Fatalf("hit on tab row = %v, want miss", hit)
 	}
 }
 

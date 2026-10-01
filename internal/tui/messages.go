@@ -133,11 +133,13 @@ type ActionFinished struct {
 type installedRefreshed struct{ Err error }
 
 // groupAssignRequested assigns a package to a group. Either GroupID is set for
-// an existing group, or NewName names a group to create first.
+// an existing group, NewName names a group to create first, or Clear removes
+// the package's current membership.
 type groupAssignRequested struct {
 	PackageID domain.PackageID
 	GroupID   domain.PackageGroupID
 	NewName   string
+	Clear     bool
 }
 type groupAssigned struct {
 	PackageID domain.PackageID

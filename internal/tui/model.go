@@ -635,7 +635,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || msg.PackageID == "" {
 			return m, nil
 		}
-		packageID, groupID, newName := msg.PackageID, msg.GroupID, msg.NewName
+		packageID, groupID, newName, clear := msg.PackageID, msg.GroupID, msg.NewName, msg.Clear
 		return m, func() tea.Msg {
 			if newName != "" {
 				group, err := source.CreatePackageGroup(m.deps.Context, newName)
@@ -643,6 +643,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return groupAssigned{PackageID: packageID, Err: err}
 				}
 				groupID = group.ID
+			}
+			if clear {
+				groupID = 0
 			}
 			err := source.SetPackageGroup(m.deps.Context, packageID, groupID)
 			return groupAssigned{PackageID: packageID, Group: domain.PackageGroup{ID: groupID}, Err: err}

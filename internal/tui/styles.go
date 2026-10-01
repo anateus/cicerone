@@ -478,12 +478,11 @@ func (m Model) groupTabAt(y, x int) (bool, groupTab) {
 	tabs := groupTabs(m.userGroups)
 	cursor := 1 // leading space
 	for _, tab := range tabs {
-		start := cursor
-		width := ansi.StringWidth("["+tab.label+"]") + 1
-		cursor += width
-		if x >= start && x < cursor {
+		labelWidth := ansi.StringWidth("[" + tab.label + "]")
+		if x >= cursor && x < cursor+labelWidth {
 			return true, tab
 		}
+		cursor += labelWidth + 1 // trailing separator space
 	}
 	return false, groupTab{}
 }

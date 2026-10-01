@@ -81,7 +81,8 @@ func (m groupModal) selectedGroup() (domain.PackageGroup, bool) {
 	return m.groups[m.cursor-1], true
 }
 
-// assignRequest resolves the modal selection to a group assignment.
+// assignRequest resolves the modal selection to a group assignment. Selecting
+// the group the package already belongs to clears its membership instead.
 func (m groupModal) assignRequest(packageID domain.PackageID) (groupAssignRequested, bool) {
 	request := groupAssignRequested{PackageID: packageID}
 	if m.cursor == 0 {
@@ -94,6 +95,10 @@ func (m groupModal) assignRequest(packageID domain.PackageID) (groupAssignReques
 	group, ok := m.selectedGroup()
 	if !ok {
 		return request, false
+	}
+	if group.ID == m.assignedTo {
+		request.Clear = true
+		return request, true
 	}
 	request.GroupID = group.ID
 	return request, true
@@ -125,7 +130,11 @@ func (m Model) renderGroupModal() string {
 		row := modal.cursor == index+1 && !modal.nameFocused()
 		line := fmt.Sprintf(" %s %s", radio(row), group.Name)
 		if modal.assignedTo == group.ID {
-			line += "  ←"
+			if modal.cursor == index+1 {
+				line += "  ← enter to remove"
+			} else {
+				line += "  ←"
+			}
 		}
 		style := lipgloss.NewStyle()
 		if modal.cursor == index+1 {

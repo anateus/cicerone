@@ -54,18 +54,6 @@ func (s *Store) CreatePackageGroup(ctx context.Context, name string) (domain.Pac
 	return group, err
 }
 
-// RenamePackageGroup changes a group's display name.
-func (s *Store) RenamePackageGroup(ctx context.Context, id domain.PackageGroupID, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("group name cannot be empty")
-	}
-	return s.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE package_groups SET name=? WHERE id=?`, name, id)
-		return err
-	})
-}
-
 // DeletePackageGroup removes a group. Member packages return to ungrouped.
 func (s *Store) DeletePackageGroup(ctx context.Context, id domain.PackageGroupID) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {

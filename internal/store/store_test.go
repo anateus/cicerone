@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anateus/cicerone/internal/domain"
 )
 
 func TestValidateSQLiteVersion(t *testing.T) {
@@ -198,6 +200,81 @@ func createMigrationFixture(t *testing.T, path string, version int) *sql.DB {
 		}
 	}
 	return db
+}
+
+func TestPackageGroupsMigrationFromLegacyStatuses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "groups.db")
+	db := createMigrationFixture(t, path, 14)
+	if _, err := db.Exec(`
+		INSERT INTO packages(id,name,type,status) VALUES
+			('plain','Plain','formula','default'),
+			('fav','Fav','cask','starred'),
+			('gone','Gone','formula','snoozed');
+		INSERT INTO update_events(id, package_id, kind, repository, commit_hash, event_time) VALUES
+			('e1','plain','version','core','a',1),
+			('e2','fav','version','core','b',2),
+			('e3','gone','version','core','c',3);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Legacy statuses survive: starred keeps starred, snoozed reads as hidden.
+	all, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all scope rows = %d, want 2 (hidden excluded)", len(all))
+	}
+	starred, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeStarred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starred) != 1 || starred[0].Events[0].PackageID != "fav" {
+		t.Fatalf("starred scope = %#v, want fav", starred)
+	}
+	hidden, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeHidden})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hidden) != 1 || hidden[0].Events[0].PackageID != "gone" {
+		t.Fatalf("hidden scope = %#v, want gone", hidden)
+	}
+	if hidden[0].Events[0].Status != domain.PackageStatusHidden {
+		t.Fatalf("hidden status = %q, want hidden", hidden[0].Events[0].Status)
+	}
+
+	// A group created after the migration can take members and drive scopes.
+	group, err := s.CreatePackageGroup(ctx, "Post-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPackageGroup(ctx, "plain", group.ID); err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: group.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(user) != 1 || user[0].Events[0].PackageID != "plain" {
+		t.Fatalf("user scope = %#v, want plain", user)
+	}
+	ungrouped, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeUngrouped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ungrouped) != 1 || ungrouped[0].Events[0].PackageID != "fav" {
+		t.Fatalf("ungrouped scope = %#v, want fav", ungrouped)
+	}
 }
 
 func assertScalar(t *testing.T, db *sql.DB, query, want string, args ...any) {
