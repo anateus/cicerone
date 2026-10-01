@@ -275,23 +275,6 @@ func (m Model) cycleGroupTab(direction int) (tea.Model, tea.Cmd) {
 	return m.filterChanged()
 }
 
-// assignSelectedGroup applies the modal's radio selection to the package.
-func (m Model) assignSelectedGroup() (tea.Model, tea.Cmd) {
-	if m.groupAssign == nil {
-		return m, nil
-	}
-	modal := *m.groupAssign
-	event := m.selectedEvent()
-	if event.PackageID == "" {
-		return m, nil
-	}
-	if request, ok := modal.assignRequest(event.PackageID); ok {
-		m.groupAssign = nil
-		return m, func() tea.Msg { return request }
-	}
-	return m, nil
-}
-
 // selectedPackageGroupID returns the package's current group for the modal.
 func (m Model) selectedPackageGroupID() domain.PackageGroupID {
 	if !m.hasSelection() {

@@ -64,10 +64,11 @@ reconciled when that scan resumes.
 | `j`, `↓` | Move down; scroll down while reading package details |
 | `k`, `↑` | Move up; scroll up while reading package details |
 | `1`, `2`, `3` | Show Formulae, Casks, or both |
+| `,`, `.` | Move to the previous or next group in the group strip |
+| Mouse click on the group strip | Jump straight to a group |
+| `g` | Assign the selected package to a group, create a group, or remove a group |
 | `/` | Enter package search; typing filters after a short debounce |
 | `r` | Force a newest-first repository refresh; active catch-up resumes from its durable checkpoint |
-| `alt-s` | Cycle the selected package through normal, starred, and snoozed |
-| `alt-shift-s` | Show or collapse snoozed package rows; they start collapsed |
 | `tab` while searching | Broaden search through names, descriptions, changelogs, and READMEs |
 | `enter`, `esc` while searching | Apply and leave search, or leave search input |
 | `h`, `←` / `l`, `→` | Switch toward package details; scroll horizontally while reading |
@@ -81,6 +82,12 @@ reconciled when that scan resumes.
 | `y`, `enter` | Confirm a pending Homebrew action |
 | `n`, `esc` | Cancel or close the current modal/detail |
 | Mouse click / wheel | Select tabs and packages, activate visible controls, or scroll the pane under the pointer |
+
+## Groups
+
+Each type tab carries a group strip: All, Ungrouped, then any groups you have created in creation order, then Starred and Hidden. The strip filters the feed inside the current type tab. All shows everything except hidden packages; Ungrouped shows only packages not in any group; Starred and Hidden collect packages carrying that marker. The active group is remembered across restarts.
+
+Press `g` on a selected package to open the group modal. It lists a new-group field first, then existing groups as radio options with the first group highlighted, and marks the package's current group. Enter assigns, typing on the new-group row names a group to create and assign, tab reaches the Remove button, which deletes the highlighted group and returns its members to Ungrouped. Starred and Hidden cannot be removed from the modal.
 
 ## Feed behavior
 

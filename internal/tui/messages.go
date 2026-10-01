@@ -101,11 +101,6 @@ type PreferencesLoaded struct {
 	Err    error
 }
 
-type PackageStatusSaved struct {
-	PackageID domain.PackageID
-	Status    domain.PackageStatus
-	Err       error
-}
 type preferencesSaved struct{ Err error }
 type eventsSeen struct{ Err error }
 type ChangelogDebounced struct{ SelectionID uint64 }
