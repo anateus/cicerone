@@ -499,7 +499,7 @@ func (m Model) groupStrip(width int) string {
 // visibleGroupTabs returns the tabs that fit in the width, keeping the active
 // tab in view, and the index of the first returned tab in the full list.
 func (m Model) visibleGroupTabs(width int) ([]groupTab, int) {
-	all := groupTabs(m.userGroups)
+	all := groupTabs(m.userGroups, m.filter)
 	active := activeGroupTab(m.userGroups, m.filter)
 	// A label that cannot fit even alone renders as a truncated fragment
 	// ("[Al"), so the guard uses the bare leading space (1) plus, only when a
@@ -716,7 +716,7 @@ func (m Model) feedGroupRows(marker string, e domain.UpdateEvent, width int) []s
 }
 
 func packageNameWithStatus(event domain.UpdateEvent) string {
-	return stylePackageName(event, event.Name+packageStatusSuffix(event.Status))
+	return stylePackageName(event, event.Name+packageStatusSuffix(event.GroupKind))
 }
 
 func fitPackageName(event domain.UpdateEvent, width int) string {
@@ -724,7 +724,7 @@ func fitPackageName(event domain.UpdateEvent, width int) string {
 }
 
 func truncatePackageName(event domain.UpdateEvent, width int) string {
-	suffix := packageStatusSuffix(event.Status)
+	suffix := packageStatusSuffix(event.GroupKind)
 	if suffix == "" {
 		return ansi.Truncate(event.Name, width, "")
 	}
@@ -734,11 +734,12 @@ func truncatePackageName(event domain.UpdateEvent, width int) string {
 	return stylePackageName(event, ansi.Truncate(event.Name, width-ansi.StringWidth(suffix), "")+suffix)
 }
 
-func packageStatusSuffix(status domain.PackageStatus) string {
-	switch status {
-	case domain.PackageStatusStarred:
+// packageStatusSuffix marks members of the built-in groups next to their name.
+func packageStatusSuffix(kind domain.GroupKind) string {
+	switch kind {
+	case domain.GroupKindStarred:
 		return " ★"
-	case domain.PackageStatusHidden:
+	case domain.GroupKindHidden:
 		return " ⃠"
 	default:
 		return ""
@@ -746,8 +747,8 @@ func packageStatusSuffix(status domain.PackageStatus) string {
 }
 
 func stylePackageName(event domain.UpdateEvent, name string) string {
-	switch event.Status {
-	case domain.PackageStatusHidden:
+	switch event.GroupKind {
+	case domain.GroupKindHidden:
 		return lipgloss.NewStyle().Faint(true).Render(name)
 	default:
 		return name

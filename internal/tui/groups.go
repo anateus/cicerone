@@ -18,29 +18,53 @@ type groupTab struct {
 	target domain.PackageGroupID
 }
 
-// groupTabs builds the strip order: All, Ungrouped, then user groups by their
-// index. Starred and Hidden sit at the end so their position stays stable as
-// the user accumulates groups.
-func groupTabs(groups []domain.PackageGroup) []groupTab {
+// groupTabs builds the strip order: All, Ungrouped, then every group that has
+// members. User groups keep their creation order; Starred and Hidden sit at
+// the end so their position stays stable as the user adds groups. Empty
+// groups get no tab. The active group keeps its tab even while empty so the
+// strip never claims a different view than the one on screen.
+func groupTabs(groups []domain.PackageGroup, filter domain.FeedFilter) []groupTab {
 	tabs := []groupTab{
 		{label: "All", scope: domain.GroupScopeAll},
 		{label: "Ungrouped", scope: domain.GroupScopeUngrouped},
 	}
-	ordered := make([]domain.PackageGroup, len(groups))
-	copy(ordered, groups)
-	sort.SliceStable(ordered, func(a, b int) bool { return ordered[a].Index < ordered[b].Index })
+	ordered := orderedGroups(groups)
 	for _, group := range ordered {
+		active := filter.GroupScope == domain.GroupScopeUser && filter.GroupTarget == group.ID
+		if group.Members == 0 && !active {
+			continue
+		}
 		tabs = append(tabs, groupTab{label: group.Name, scope: domain.GroupScopeUser, target: group.ID})
 	}
-	tabs = append(tabs,
-		groupTab{label: "Starred", scope: domain.GroupScopeStarred},
-		groupTab{label: "Hidden", scope: domain.GroupScopeHidden})
 	return tabs
+}
+
+// orderedGroups sorts user groups by position, then Starred, then Hidden.
+func orderedGroups(groups []domain.PackageGroup) []domain.PackageGroup {
+	rank := func(kind domain.GroupKind) int {
+		switch kind {
+		case domain.GroupKindStarred:
+			return 1
+		case domain.GroupKindHidden:
+			return 2
+		default:
+			return 0
+		}
+	}
+	ordered := make([]domain.PackageGroup, len(groups))
+	copy(ordered, groups)
+	sort.SliceStable(ordered, func(a, b int) bool {
+		if ra, rb := rank(ordered[a].Kind), rank(ordered[b].Kind); ra != rb {
+			return ra < rb
+		}
+		return ordered[a].Index < ordered[b].Index
+	})
+	return ordered
 }
 
 // activeGroupTab returns the strip index matching the filter's group scope.
 func activeGroupTab(groups []domain.PackageGroup, filter domain.FeedFilter) int {
-	for index, tab := range groupTabs(groups) {
+	for index, tab := range groupTabs(groups, filter) {
 		if tab.scope == filter.GroupScope && tab.target == filter.GroupTarget {
 			return index
 		}
@@ -70,7 +94,7 @@ func (m *Model) syncGroupModal() {
 		return
 	}
 	modal := *m.groupAssign
-	modal.groups = m.userGroups
+	modal.groups = orderedGroups(m.userGroups)
 	if len(m.markOrder) == 0 {
 		// Without marks the modal follows the selected row; with marks it
 		// keeps acting on the set it opened with.
@@ -101,6 +125,7 @@ func (m groupModal) selectedGroupRaw() domain.PackageGroupID {
 }
 
 func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID, targets []domain.PackageID) groupModal {
+	groups = orderedGroups(groups)
 	// Default the cursor to the first non-new group; fall back to the
 	// new-group row when no groups exist yet.
 	cursor := 0
@@ -222,7 +247,7 @@ func (m Model) renderGroupModal() string {
 		}
 		group := modal.groups[index-1]
 		row := modal.cursor == index && !modal.nameFocused()
-		line := fmt.Sprintf(" %s %s", radio(row), group.Name)
+		line := fmt.Sprintf(" %s %s%s", radio(row), group.Name, packageStatusSuffix(group.Kind))
 		if modal.assignedTo == group.ID {
 			if modal.cursor == index {
 				line += "  ← enter to remove"
@@ -246,7 +271,13 @@ func (m Model) renderGroupModal() string {
 	confirmStyle := lipgloss.NewStyle().Bold(true).Foreground(p.selectedFG).Background(p.selectedBG)
 	cancelStyle := lipgloss.NewStyle().Bold(true).Foreground(p.statusFG).Background(p.recessedBG)
 	removeStyle := cancelStyle
-	if modal.removeHot {
+	selected, _ := modal.selectedGroup()
+	switch {
+	case selected.Kind.Builtin():
+		// Starred and Hidden are permanent; their tabs simply disappear when
+		// empty, so there is nothing to remove.
+		removeStyle = cancelStyle.Faint(true)
+	case modal.removeHot:
 		removeStyle = confirmStyle
 	}
 	b.WriteString(" " + confirmStyle.Render(" Enter ") + "  " + removeStyle.Render(" Remove group ") + "  " + cancelStyle.Render(" Esc "))
@@ -318,7 +349,11 @@ func (m Model) handleGroupModalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "tab":
-		modal.removeHot = !modal.removeHot
+		if group, ok := modal.selectedGroup(); ok && group.Kind.Builtin() {
+			modal.removeHot = false
+		} else {
+			modal.removeHot = !modal.removeHot
+		}
 		m.groupAssign = &modal
 		return m, nil
 	case "enter":
@@ -355,7 +390,7 @@ func (m Model) handleGroupModalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) removeSelectedGroup() (tea.Model, tea.Cmd) {
 	modal := *m.groupAssign
 	group, ok := modal.selectedGroup()
-	if !ok {
+	if !ok || group.Kind.Builtin() {
 		return m, nil
 	}
 	m.groupAssign = nil
@@ -364,7 +399,7 @@ func (m Model) removeSelectedGroup() (tea.Model, tea.Cmd) {
 
 // cycleGroupTab moves to the next or previous group tab in the strip.
 func (m Model) cycleGroupTab(direction int) (tea.Model, tea.Cmd) {
-	tabs := groupTabs(m.userGroups)
+	tabs := groupTabs(m.userGroups, m.filter)
 	if len(tabs) == 0 {
 		return m, nil
 	}

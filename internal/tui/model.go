@@ -182,6 +182,7 @@ type Model struct {
 	searching                                                         bool
 	searchQueryCancel                                                 context.CancelFunc
 	userGroups                                                        []domain.PackageGroup
+	groupsReady                                                       bool
 	groupAssign                                                       *groupModal
 	freshness                                                         store.FreshnessStatus
 	freshnessErr                                                      error
@@ -351,6 +352,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.Filter.Search = domain.SearchNames
 			}
 			m.filter = msg.Filter
+			if m.groupsReady {
+				// A saved tab may point at a group emptied since last run.
+				m.leaveEmptyGroup()
+			}
 			m.loading = true
 			m.feedRequestID++
 			return m, m.queryFeed(m.feedRequestID)
@@ -632,6 +637,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.userGroups = msg.Groups
+		m.groupsReady = true
+		m.syncGroupModal()
+		if m.leaveEmptyGroup() {
+			return m.filterChanged()
+		}
 		m.syncViewports()
 	case groupAssignRequested:
 		source, ok := m.deps.Data.(PackageGroupSource)
@@ -697,7 +707,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.stale, m.loading = true, true
 		m.feedRequestID++
-		return m, m.queryFeed(m.feedRequestID)
+		// Membership changed, so reload the groups to refresh their member
+		// counts; the strip shows or drops tabs from those counts.
+		return m, tea.Batch(m.queryFeed(m.feedRequestID), m.loadGroups())
 	case groupDeleteRequested:
 		source, ok := m.deps.Data.(PackageGroupSource)
 		if !ok {
@@ -1052,9 +1064,11 @@ func (m Model) loadGroups() tea.Cmd {
 }
 
 // rememberGroup registers a newly created group so the strip can show it with
-// its name before the next full reload. The Index lands the new group before
-// the Starred and Hidden tabs, which the strip appends last anyway.
+// its name before the group reload lands.
 func (m *Model) rememberGroup(group domain.PackageGroup) {
+	if group.Kind == "" {
+		group.Kind = domain.GroupKindUser
+	}
 	for index, existing := range m.userGroups {
 		if existing.ID == group.ID {
 			m.userGroups[index] = group
@@ -1063,6 +1077,22 @@ func (m *Model) rememberGroup(group domain.PackageGroup) {
 	}
 	group.Index = len(m.userGroups) + 1
 	m.userGroups = append(m.userGroups, group)
+}
+
+// leaveEmptyGroup switches the view back to All when the active group has no
+// members left, since its tab is no longer shown. It reports whether the
+// filter changed.
+func (m *Model) leaveEmptyGroup() bool {
+	if m.filter.GroupScope != domain.GroupScopeUser {
+		return false
+	}
+	for _, group := range m.userGroups {
+		if group.ID == m.filter.GroupTarget && group.Members > 0 {
+			return false
+		}
+	}
+	m.filter.GroupScope, m.filter.GroupTarget = domain.GroupScopeAll, 0
+	return true
 }
 
 // removeGroup drops a group from the strip and clears membership from any
@@ -1077,15 +1107,33 @@ func (m *Model) removeGroup(id domain.PackageGroupID) {
 	m.userGroups = kept
 }
 
-// applyPackageGroup updates membership for every feed row of a package.
+// applyPackageGroup updates membership for every feed row of a package and
+// keeps member counts current until the group reload confirms them.
 func (m *Model) applyPackageGroup(packageID domain.PackageID, groupID domain.PackageGroupID) {
+	kind := domain.GroupKind("")
+	for _, group := range m.userGroups {
+		if group.ID == groupID {
+			kind = group.Kind
+		}
+	}
 	for groupIndex := range m.groups {
 		for eventIndex := range m.groups[groupIndex].Events {
 			if m.groups[groupIndex].Events[eventIndex].PackageID == packageID {
 				m.groups[groupIndex].Events[eventIndex].GroupID = groupID
+				m.groups[groupIndex].Events[eventIndex].GroupKind = kind
 			}
 		}
 	}
+	if groupID == 0 {
+		return
+	}
+	groups := append([]domain.PackageGroup(nil), m.userGroups...)
+	for index := range groups {
+		if groups[index].ID == groupID && groups[index].Members == 0 {
+			groups[index].Members = 1
+		}
+	}
+	m.userGroups = groups
 }
 
 // requestGroupModal opens the assignment modal for the marked packages, or

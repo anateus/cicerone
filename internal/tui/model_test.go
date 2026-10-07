@@ -23,21 +23,6 @@ type fakeData struct {
 	prefs  domain.FeedFilter
 }
 
-type statusRecordingData struct {
-	*fakeData
-	updates []packageStatusUpdate
-}
-
-type packageStatusUpdate struct {
-	PackageID domain.PackageID
-	Status    domain.PackageStatus
-}
-
-func (f *statusRecordingData) SetPackageStatus(_ context.Context, packageID domain.PackageID, status domain.PackageStatus) error {
-	f.updates = append(f.updates, packageStatusUpdate{PackageID: packageID, Status: status})
-	return nil
-}
-
 type recordingData struct {
 	fakeData
 	queried domain.FeedFilter
@@ -406,13 +391,13 @@ func TestInitialFeedQueryUsesCurrentTimeForHorizon(t *testing.T) {
 func TestFeedRowsMarkStarredAndHiddenPackages(t *testing.T) {
 	m := NewModel(Dependencies{})
 	e := event("status", "package")
-	e.Status = domain.PackageStatusStarred
+	e.GroupKind = domain.GroupKindStarred
 	starred := m.feedGroupRows("› ", e, 72)[0]
 	if !strings.Contains(ansi.Strip(starred), "package ★") {
 		t.Fatalf("starred row = %q, want star after package name", starred)
 	}
 
-	e.Status = domain.PackageStatusHidden
+	e.GroupKind = domain.GroupKindHidden
 	hidden := m.feedGroupRows("› ", e, 72)[0]
 	if !strings.Contains(ansi.Strip(hidden), "package ⃠") {
 		t.Fatalf("hidden row = %q, want hidden marker after package name", hidden)
@@ -425,7 +410,7 @@ func TestFeedRowsMarkStarredAndHiddenPackages(t *testing.T) {
 func TestFeedRowsKeepStatusMarkerWhenPackageNameIsTruncated(t *testing.T) {
 	m := NewModel(Dependencies{})
 	e := event("status", "a-very-long-package-name")
-	e.Status = domain.PackageStatusStarred
+	e.GroupKind = domain.GroupKindStarred
 	row := ansi.Strip(m.feedGroupRows("› ", e, 24)[0])
 	if !strings.Contains(row, "★") {
 		t.Fatalf("truncated starred row = %q, want status marker", row)

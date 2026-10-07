@@ -75,51 +75,18 @@ func (s *Store) UpsertCatalogPackages(ctx context.Context, packages []domain.Cat
 	})
 }
 
-// SetPackageStatus persists the user-assigned status for a package. Hidden is
-// stored under the legacy 'snoozed' value that migration 014's CHECK allows.
-func (s *Store) SetPackageStatus(ctx context.Context, packageID domain.PackageID, status domain.PackageStatus) error {
-	if status == "" {
-		status = domain.PackageStatusDefault
-	}
-	return s.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE packages SET status=? WHERE id=?`, packageStatusStorage(status), packageID)
-		return err
-	})
-}
-
-// packageStatusStorage maps domain statuses onto the values allowed by the
-// migration-014 CHECK constraint. The groups feature keeps 'snoozed' on disk
-// as the storage spelling of hidden.
-func packageStatusStorage(status domain.PackageStatus) string {
-	if status == domain.PackageStatusHidden {
-		return "snoozed"
-	}
-	return string(status)
-}
-
-// packageStatusDomain maps stored status values back onto domain statuses.
-func packageStatusDomain(status domain.PackageStatus) domain.PackageStatus {
-	if status == "snoozed" {
-		return domain.PackageStatusHidden
-	}
-	return status
-}
-
 // groupScopeSQL returns the SQL predicate and arguments that restrict the feed
-// to the filter's group scope. Hidden packages are excluded from every scope
-// except the hidden one itself.
+// to the filter's group scope. Members of the Hidden group are left out of All;
+// every other scope is plain group membership. The feed query joins
+// package_groups as g.
 func groupScopeSQL(filter domain.FeedFilter) (string, []any) {
 	switch filter.GroupScope {
 	case domain.GroupScopeUngrouped:
-		return `p.group_id IS NULL AND p.status != 'snoozed'`, nil
-	case domain.GroupScopeStarred:
-		return `p.status = 'starred'`, nil
-	case domain.GroupScopeHidden:
-		return `p.status = 'snoozed'`, nil
+		return `p.group_id IS NULL`, nil
 	case domain.GroupScopeUser:
-		return `p.group_id = ? AND p.status != 'snoozed'`, []any{int64(filter.GroupTarget)}
+		return `p.group_id = ?`, []any{int64(filter.GroupTarget)}
 	default:
-		return `p.status != 'snoozed'`, nil
+		return `COALESCE(g.kind, '') != 'hidden'`, nil
 	}
 }
 
@@ -202,12 +169,13 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		}
 		where = append(where, `(`+strings.Join(matches, ` OR `)+`)`)
 	}
-	query := `SELECT e.id, e.package_id, p.name, p.type, p.status, COALESCE(p.group_id, 0), e.kind,
+	query := `SELECT e.id, e.package_id, p.name, p.type, COALESCE(p.group_id, 0), COALESCE(g.kind, ''), e.kind,
 		e.old_version, e.new_version, e.old_revision, e.new_revision,
 		e.repository, e.definition_path, e.commit_hash, e.event_time, e.diagnostic, e.seen,
 		i.package_id IS NOT NULL,
 		COALESCE(c.version_count, 0), COALESCE(c.first_update, 0), COALESCE(c.last_update, 0)
 		FROM update_events e JOIN packages p ON p.id=e.package_id
+		LEFT JOIN package_groups g ON g.id=p.group_id
 		LEFT JOIN installed_packages i ON i.package_id=e.package_id
 		LEFT JOIN (
 			SELECT package_id, COUNT(*) AS version_count,
@@ -230,14 +198,13 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		var versionCount int
 		var firstUpdate, lastUpdate int64
 		var isInstalled bool
-		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.Status, &event.GroupID, &event.Kind,
+		if err := rows.Scan(&event.ID, &event.PackageID, &event.Name, &event.Type, &event.GroupID, &event.GroupKind, &event.Kind,
 			&event.OldVersion, &event.NewVersion, &event.OldRevision, &event.NewRevision,
 			&event.Repository, &event.DefinitionPath, &event.Commit, &timestamp, &event.Diagnostic, &event.Seen, &isInstalled,
 			&versionCount, &firstUpdate, &lastUpdate); err != nil {
 			return nil, err
 		}
 		event.Time = time.Unix(0, timestamp).UTC()
-		event.Status = packageStatusDomain(event.Status)
 		event.Installed = isInstalled
 		if versionCount > 0 {
 			first, last := time.Unix(0, firstUpdate).UTC(), time.Unix(0, lastUpdate).UTC()
@@ -269,7 +236,7 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		return groups, nil
 	}
 	// Show catalog hits without history after real updates. Query the packages
-	// table for persisted status and installed state, rather than fabricating an
+	// table for group membership and installed state, rather than fabricating an
 	// update timestamp, version or an installed flag.
 	shown := make(map[domain.PackageID]bool)
 	for _, group := range groups {
@@ -283,16 +250,17 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		}
 		var name string
 		var kind domain.PackageType
-		var status domain.PackageStatus
 		var groupID domain.PackageGroupID
+		var groupKind domain.GroupKind
 		var isInstalled bool
 		var version, description string
 		err := s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(json_extract(pi.normalized_json, '$.Name'), ''), p.name),
-			p.type, p.status, COALESCE(p.group_id, 0), i.package_id IS NOT NULL,
+			p.type, COALESCE(p.group_id, 0), COALESCE(g.kind, ''), i.package_id IS NOT NULL,
 			COALESCE(json_extract(pi.normalized_json, '$.StableVersion'), ''), COALESCE(pi.description, '')
-			FROM packages p LEFT JOIN installed_packages i ON i.package_id=p.id
+			FROM packages p LEFT JOIN package_groups g ON g.id=p.group_id
+			LEFT JOIN installed_packages i ON i.package_id=p.id
 			LEFT JOIN package_info pi ON pi.package_id=p.id WHERE p.id=?`, pkg.ID).
-			Scan(&name, &kind, &status, &groupID, &isInstalled, &version, &description)
+			Scan(&name, &kind, &groupID, &groupKind, &isInstalled, &version, &description)
 		if err == sql.ErrNoRows {
 			continue
 		}
@@ -302,17 +270,16 @@ func (s *Store) QueryFeed(ctx context.Context, filter domain.FeedFilter) ([]doma
 		if len(filter.Types) > 0 && !filter.Types[kind] {
 			continue
 		}
-		if !domain.MatchesGroupScope(filter.GroupScope, groupID, packageStatusDomain(status), filter.GroupTarget) {
+		if !domain.MatchesGroupScope(filter.GroupScope, groupID, groupKind, filter.GroupTarget) {
 			continue
 		}
-		status = packageStatusDomain(status)
 		shown[pkg.ID] = true
 		if description == "" {
 			description = pkg.Description
 		}
 		id := domain.EventID("catalog:" + string(pkg.ID))
 		groups = append(groups, domain.FeedGroup{ID: id, Events: []domain.UpdateEvent{{
-			ID: id, PackageID: pkg.ID, Name: name, Type: kind, Status: status, GroupID: groupID,
+			ID: id, PackageID: pkg.ID, Name: name, Type: kind, GroupID: groupID, GroupKind: groupKind,
 			Kind: domain.EventCatalog, CatalogDescription: description, CatalogVersion: version, Installed: isInstalled, Seen: true,
 		}}})
 	}
@@ -370,8 +337,12 @@ func (s *Store) Preferences(ctx context.Context) (domain.FeedFilter, error) {
 	if cask {
 		filter.Types[domain.PackageCask] = true
 	}
-	if scopeValue < 0 || scopeValue > int64(domain.GroupScopeUser) {
-		scopeValue = 0
+	switch domain.GroupScope(scopeValue) {
+	case domain.GroupScopeAll, domain.GroupScopeUngrouped, domain.GroupScopeUser:
+	default:
+		// Retired or unknown scopes fall back to All. Migration 017 already
+		// rewrote the old Starred and Hidden scopes to their groups.
+		scopeValue, targetValue = 0, 0
 	}
 	filter.GroupScope = domain.GroupScope(scopeValue)
 	filter.GroupTarget = domain.PackageGroupID(targetValue)

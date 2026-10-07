@@ -54,7 +54,7 @@ func BuildFeed(events []UpdateEvent, installed map[PackageID]bool, f FeedFilter)
 
 	candidates := make([]UpdateEvent, 0, len(events))
 	for _, event := range events {
-		if !matchesFeedFilter(event, f) || !MatchesGroupScope(f.GroupScope, event.GroupID, event.Status, f.GroupTarget) {
+		if !matchesFeedFilter(event, f) || !MatchesGroupScope(f.GroupScope, event.GroupID, event.GroupKind, f.GroupTarget) {
 			continue
 		}
 		candidates = append(candidates, event)

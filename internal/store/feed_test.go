@@ -32,22 +32,26 @@ func TestUpsertEventsIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestQueryFeedLoadsPackageStatus(t *testing.T) {
+func TestQueryFeedLoadsGroupKind(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	event := testEvent("one", "foo", domain.EventVersion, time.Now().UTC())
 	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPackageStatus(ctx, event.PackageID, domain.PackageStatusStarred); err != nil {
+	starred, err := s.BuiltinGroup(ctx, domain.GroupKindStarred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPackageGroup(ctx, event.PackageID, starred.ID); err != nil {
 		t.Fatal(err)
 	}
 	groups, err := s.QueryFeed(ctx, domain.FeedFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := groups[0].Events[0].Status; got != domain.PackageStatusStarred {
-		t.Fatalf("package status = %q, want %q", got, domain.PackageStatusStarred)
+	if got := groups[0].Events[0]; got.GroupKind != domain.GroupKindStarred || got.GroupID != starred.ID {
+		t.Fatalf("event group = %d/%q, want starred %d", got.GroupID, got.GroupKind, starred.ID)
 	}
 }
 

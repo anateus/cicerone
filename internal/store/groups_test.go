@@ -26,7 +26,8 @@ func TestCreatePackageGroupAppendsInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 2 || groups[0].Name != "Editors" || groups[1].Name != "Terminal" {
+	user := userGroupNames(groups)
+	if len(user) != 2 || user[0] != "Editors" || user[1] != "Terminal" {
 		t.Fatalf("groups = %#v, want Editors then Terminal", groups)
 	}
 }
@@ -121,7 +122,7 @@ func TestSetPackagesGroupMovesAndClearsSeveralPackages(t *testing.T) {
 	}
 }
 
-func TestHiddenStatusExcludedFromAllAndShownInHiddenScope(t *testing.T) {
+func TestHiddenGroupExcludedFromAllAndShownInItsOwnTab(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	events := []domain.UpdateEvent{
@@ -131,7 +132,11 @@ func TestHiddenStatusExcludedFromAllAndShownInHiddenScope(t *testing.T) {
 	if err := s.UpsertEvents(ctx, events); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPackageStatus(ctx, "gone", domain.PackageStatusHidden); err != nil {
+	hiddenGroup, err := s.BuiltinGroup(ctx, domain.GroupKindHidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPackageGroup(ctx, "gone", hiddenGroup.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -142,35 +147,98 @@ func TestHiddenStatusExcludedFromAllAndShownInHiddenScope(t *testing.T) {
 	if len(all) != 1 || all[0].Events[0].PackageID != "kept" {
 		t.Fatalf("all scope = %#v, want only kept", all)
 	}
-
-	hidden, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeHidden})
+	ungrouped, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeUngrouped})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hidden) != 1 || hidden[0].Events[0].PackageID != "gone" {
-		t.Fatalf("hidden scope = %#v, want only gone", hidden)
+	if len(ungrouped) != 1 || ungrouped[0].Events[0].PackageID != "kept" {
+		t.Fatalf("ungrouped scope = %#v, want only kept", ungrouped)
 	}
-	if hidden[0].Events[0].Status != domain.PackageStatusHidden {
-		t.Fatalf("hidden scope round-trip status = %q, want hidden", hidden[0].Events[0].Status)
+
+	hidden, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: hiddenGroup.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hidden) != 1 || hidden[0].Events[0].PackageID != "gone" || hidden[0].Events[0].GroupKind != domain.GroupKindHidden {
+		t.Fatalf("hidden group = %#v, want gone carrying the hidden kind", hidden)
 	}
 }
 
-func TestStarredScopeFromLegacyStatus(t *testing.T) {
+func TestStarredGroupStaysInAll(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	event := testEvent("one", "fav", domain.EventVersion, time.Now().UTC())
-	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{testEvent("one", "fav", domain.EventVersion, time.Now().UTC())}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPackageStatus(ctx, "fav", domain.PackageStatusStarred); err != nil {
-		t.Fatal(err)
-	}
-	starred, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeStarred})
+	starred, err := s.BuiltinGroup(ctx, domain.GroupKindStarred)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(starred) != 1 || starred[0].Events[0].PackageID != "fav" {
-		t.Fatalf("starred scope = %#v, want fav", starred)
+	if err := s.SetPackageGroup(ctx, "fav", starred.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, filter := range []domain.FeedFilter{{GroupScope: domain.GroupScopeAll}, {GroupScope: domain.GroupScopeUser, GroupTarget: starred.ID}} {
+		groups, err := s.QueryFeed(ctx, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(groups) != 1 || groups[0].Events[0].GroupKind != domain.GroupKindStarred {
+			t.Fatalf("scope %d = %#v, want fav marked starred", filter.GroupScope, groups)
+		}
+	}
+}
+
+func TestPackageGroupsIncludeBuiltinsWithMemberCounts(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{
+		testEvent("one", "a", domain.EventVersion, time.Now().UTC()),
+		testEvent("two", "b", domain.EventVersion, time.Now().UTC()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	editors, err := s.CreatePackageGroup(ctx, "Editors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	starred, err := s.BuiltinGroup(ctx, domain.GroupKindStarred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPackagesGroup(ctx, []domain.PackageID{"a", "b"}, starred.ID); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.PackageGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	kinds := map[string]domain.GroupKind{}
+	for _, group := range groups {
+		counts[group.Name], kinds[group.Name] = group.Members, group.Kind
+	}
+	if len(groups) != 3 || counts["Starred"] != 2 || counts["Hidden"] != 0 || counts["Editors"] != 0 {
+		t.Fatalf("groups = %#v", groups)
+	}
+	if kinds["Starred"] != domain.GroupKindStarred || kinds["Hidden"] != domain.GroupKindHidden || kinds["Editors"] != domain.GroupKindUser || editors.Kind != domain.GroupKindUser {
+		t.Fatalf("kinds = %v", kinds)
+	}
+}
+
+func TestBuiltinGroupsCannotBeDeletedOrDuplicated(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	for _, kind := range []domain.GroupKind{domain.GroupKindStarred, domain.GroupKindHidden} {
+		group, err := s.BuiltinGroup(ctx, kind)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeletePackageGroup(ctx, group.ID); err == nil {
+			t.Fatalf("deleting %s succeeded", kind)
+		}
+		if _, err := s.CreatePackageGroup(ctx, group.Name); err == nil {
+			t.Fatalf("creating a second %q succeeded", group.Name)
+		}
 	}
 }
 
@@ -202,9 +270,19 @@ func TestDeletePackageGroupReturnsMembersToUngrouped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 0 {
-		t.Fatalf("groups after delete = %#v, want empty", groups)
+	if user := userGroupNames(groups); len(user) != 0 {
+		t.Fatalf("groups after delete = %#v, want only the built-ins", groups)
 	}
+}
+
+func userGroupNames(groups []domain.PackageGroup) []string {
+	var names []string
+	for _, group := range groups {
+		if group.Kind == domain.GroupKindUser {
+			names = append(names, group.Name)
+		}
+	}
+	return names
 }
 
 func TestGroupScopePreferencesRoundTrip(t *testing.T) {

@@ -13,25 +13,31 @@ const (
 	PackageCask    PackageType = "cask"
 )
 
-// PackageStatus is the user-assigned marker state of a package in the feed.
-// Starred packages surface in the built-in Starred group; hidden packages are
-// excluded from every group view.
-type PackageStatus string
-
-const (
-	PackageStatusDefault PackageStatus = "default"
-	PackageStatusStarred PackageStatus = "starred"
-	PackageStatusHidden  PackageStatus = "hidden"
-)
-
 // PackageGroupID is the stable identity of a user-defined package group.
 type PackageGroupID int64
 
-// PackageGroup is a user-defined collection of packages with a manual order.
+// GroupKind distinguishes the built-in Starred and Hidden groups from groups
+// the user creates. Membership works the same for every kind; hidden members
+// are additionally left out of the All view.
+type GroupKind string
+
+const (
+	GroupKindUser    GroupKind = "user"
+	GroupKindStarred GroupKind = "starred"
+	GroupKindHidden  GroupKind = "hidden"
+)
+
+// Builtin reports whether the group ships with Cicerone and cannot be removed.
+func (k GroupKind) Builtin() bool { return k == GroupKindStarred || k == GroupKindHidden }
+
+// PackageGroup is a collection of packages. Members counts the packages
+// currently assigned to it.
 type PackageGroup struct {
-	ID    PackageGroupID
-	Name  string
-	Index int
+	ID      PackageGroupID
+	Name    string
+	Index   int
+	Kind    GroupKind
+	Members int
 }
 
 // GroupScope selects which slice of packages a feed view shows.
@@ -42,27 +48,24 @@ const (
 	GroupScopeAll GroupScope = iota
 	// GroupScopeUngrouped shows only packages with no group assigned.
 	GroupScopeUngrouped
-	// GroupScopeStarred shows only starred packages.
-	GroupScopeStarred
-	// GroupScopeHidden shows only hidden packages.
-	GroupScopeHidden
-	// GroupScopeUser shows only packages assigned to one user group.
+	// Values 2 and 3 were the Starred and Hidden scopes before those became
+	// groups. They stay reserved so saved preferences keep their meaning.
+	_
+	_
+	// GroupScopeUser shows only packages assigned to one group (GroupTarget).
 	GroupScopeUser
 )
 
 // MatchesGroupScope reports whether a package row belongs to the scope.
-func MatchesGroupScope(scope GroupScope, groupID PackageGroupID, status PackageStatus, target PackageGroupID) bool {
+// groupKind is the kind of the package's group, or "" when it has none.
+func MatchesGroupScope(scope GroupScope, groupID PackageGroupID, groupKind GroupKind, target PackageGroupID) bool {
 	switch scope {
 	case GroupScopeUngrouped:
-		return groupID == 0 && status != PackageStatusHidden
-	case GroupScopeStarred:
-		return status == PackageStatusStarred && status != PackageStatusHidden
-	case GroupScopeHidden:
-		return status == PackageStatusHidden
+		return groupID == 0
 	case GroupScopeUser:
-		return groupID == target && status != PackageStatusHidden
+		return groupID != 0 && groupID == target
 	default:
-		return status != PackageStatusHidden
+		return groupKind != GroupKindHidden
 	}
 }
 

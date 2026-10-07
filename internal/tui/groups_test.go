@@ -32,7 +32,7 @@ func (f *fakeGroupData) PackageGroups(context.Context) ([]domain.PackageGroup, e
 
 func (f *fakeGroupData) CreatePackageGroup(_ context.Context, name string) (domain.PackageGroup, error) {
 	f.created = append(f.created, name)
-	return domain.PackageGroup{ID: domain.PackageGroupID(len(f.groups) + 1), Name: name, Index: len(f.groups) + 1}, nil
+	return domain.PackageGroup{ID: domain.PackageGroupID(len(f.groups) + 1), Name: name, Index: len(f.groups) + 1, Members: 1}, nil
 }
 
 func (f *fakeGroupData) DeletePackageGroup(_ context.Context, id domain.PackageGroupID) error {
@@ -56,7 +56,7 @@ func groupTestModel(data *fakeGroupData, feedGroups []domain.FeedGroup) Model {
 }
 
 func TestGroupModalDefaultsToFirstExistingGroup(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 4, Name: "Terminal", Index: 2}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}, {ID: 4, Name: "Terminal", Index: 2, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 
@@ -80,7 +80,7 @@ func TestGroupModalCursorStartsAtNewGroupRowWithoutGroups(t *testing.T) {
 }
 
 func TestGroupModalAssignsSelectedGroupOnEnter(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 
@@ -105,7 +105,7 @@ func TestGroupModalAssignsSelectedGroupOnEnter(t *testing.T) {
 }
 
 func TestGroupModalCreatesNewGroupFromName(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 
@@ -145,7 +145,7 @@ func TestGroupModalCreatesNewGroupFromName(t *testing.T) {
 }
 
 func TestGroupModalEnterOnAssignedGroupClearsMembership(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 
@@ -163,7 +163,7 @@ func TestGroupModalEnterOnAssignedGroupClearsMembership(t *testing.T) {
 }
 
 func TestGroupModalRemoveRequestsDeletion(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 
@@ -190,7 +190,7 @@ func TestGroupModalEscCloses(t *testing.T) {
 }
 
 func TestGroupModalRendersRadioStatesAndRemoveHint(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 4, Name: "Terminal", Index: 2}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}, {ID: 4, Name: "Terminal", Index: 2, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 
@@ -231,7 +231,7 @@ func TestGroupModalWindowsLargeGroupLists(t *testing.T) {
 	data := &fakeGroupData{}
 	list := make([]domain.PackageGroup, 12)
 	for i := range list {
-		list[i] = domain.PackageGroup{ID: domain.PackageGroupID(i + 1), Name: fmt.Sprintf("Group%02d", i+1), Index: i + 1}
+		list[i] = domain.PackageGroup{ID: domain.PackageGroupID(i + 1), Name: fmt.Sprintf("Group%02d", i+1), Index: i + 1, Members: 1}
 	}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = list
@@ -272,8 +272,9 @@ func TestGroupStripWindowsToActiveTabOnNarrowWidth(t *testing.T) {
 	m.width, m.height, m.loading = 44, 24, false
 	var groups []domain.PackageGroup
 	for i := 1; i <= 6; i++ {
-		groups = append(groups, domain.PackageGroup{ID: domain.PackageGroupID(i), Name: fmt.Sprintf("GroupNumber%d", i), Index: i})
+		groups = append(groups, domain.PackageGroup{ID: domain.PackageGroupID(i), Name: fmt.Sprintf("GroupNumber%d", i), Index: i, Members: 1})
 	}
+	groups = append(groups, builtinGroups(1, 1)...)
 	m.userGroups = groups
 
 	// Active tab defaults to All (index 0); narrow width must trim trailing tabs.
@@ -301,7 +302,7 @@ func TestGroupStripWindowsToActiveTabOnNarrowWidth(t *testing.T) {
 func TestGroupStripMouseHitSelectsTab(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m.width, m.height, m.loading = 120, 24, false
-	m.userGroups = []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1}}
+	m.userGroups = []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1, Members: 1}}
 	m.syncViewports()
 
 	stripRow := m.feedHeaderRows() - 2    // title(1)+tabs(3)+strip(1)+list header(1), minus the two rows below the strip
@@ -332,7 +333,7 @@ func TestGroupStripMouseHitSelectsTab(t *testing.T) {
 // hit-test drifting from what is drawn) fails here even if groupTabAt and
 // the renderer agree with each other on the wrong row.
 func TestGroupStripClickFiltersFeed(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 	m.syncViewports()
@@ -366,7 +367,7 @@ func TestGroupStripClickFiltersFeed(t *testing.T) {
 }
 
 func TestGroupDeletedCaseClearsFilterAndStrip(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 	m.filter.GroupScope = domain.GroupScopeUser
@@ -385,27 +386,30 @@ func TestDotAndCommaCycleGroupTabs(t *testing.T) {
 	data := &fakeGroupData{}
 	m := groupTestModel(data, groups("a"))
 	m.filter.Types = map[domain.PackageType]bool{}
+	m.userGroups = append([]domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1, Members: 1}}, builtinGroups(1, 1)...)
 
 	m = update(t, m, key("."))
 	if m.filter.GroupScope != domain.GroupScopeUngrouped {
 		t.Fatalf("scope after dot = %d, want ungrouped", m.filter.GroupScope)
 	}
-	for range 2 {
+	for range 3 {
 		m = update(t, m, key("."))
 	}
-	if m.filter.GroupScope != domain.GroupScopeHidden {
-		t.Fatalf("scope after three dots = %d, want hidden", m.filter.GroupScope)
+	if m.filter.GroupScope != domain.GroupScopeUser || m.filter.GroupTarget != hiddenID {
+		t.Fatalf("tab after four dots = %d/%d, want Hidden", m.filter.GroupScope, m.filter.GroupTarget)
 	}
 	m = update(t, m, key(","))
-	if m.filter.GroupScope != domain.GroupScopeStarred {
-		t.Fatalf("scope after comma = %d, want starred", m.filter.GroupScope)
+	if m.filter.GroupScope != domain.GroupScopeUser || m.filter.GroupTarget != starredID {
+		t.Fatalf("tab after comma = %d/%d, want Starred", m.filter.GroupScope, m.filter.GroupTarget)
 	}
 }
 
 func TestGroupStripRendersUserGroupsByIndex(t *testing.T) {
 	m := NewModel(Dependencies{})
 	m.width, m.height, m.loading = 120, 24, false
-	m.userGroups = []domain.PackageGroup{{ID: 2, Name: "Terminal", Index: 2}, {ID: 1, Name: "Editors", Index: 1}}
+	// Built-ins come first in storage order; the strip still puts them last.
+	m.userGroups = append(builtinGroups(1, 1), domain.PackageGroup{ID: 2, Name: "Terminal", Index: 2, Kind: domain.GroupKindUser, Members: 1},
+		domain.PackageGroup{ID: 1, Name: "Editors", Index: 1, Kind: domain.GroupKindUser, Members: 1})
 	strip := ansi.Strip(m.groupStrip(120))
 	for _, want := range []string{"[All]", "[Ungrouped]", "[Editors]", "[Terminal]", "[Starred]", "[Hidden]"} {
 		if !contains(strip, want) {
@@ -414,8 +418,99 @@ func TestGroupStripRendersUserGroupsByIndex(t *testing.T) {
 	}
 	editors := indexOf(strip, "[Editors]")
 	terminal := indexOf(strip, "[Terminal]")
-	if editors > terminal {
-		t.Fatalf("Editors (index 1) must precede Terminal (index 2): %q", strip)
+	if editors > terminal || terminal > indexOf(strip, "[Starred]") || indexOf(strip, "[Starred]") > indexOf(strip, "[Hidden]") {
+		t.Fatalf("want Editors, Terminal, Starred, Hidden in order: %q", strip)
+	}
+}
+
+const starredID, hiddenID domain.PackageGroupID = 101, 102
+
+func builtinGroups(starredMembers, hiddenMembers int) []domain.PackageGroup {
+	return []domain.PackageGroup{
+		{ID: starredID, Name: "Starred", Kind: domain.GroupKindStarred, Members: starredMembers},
+		{ID: hiddenID, Name: "Hidden", Kind: domain.GroupKindHidden, Members: hiddenMembers},
+	}
+}
+
+func TestGroupStripHidesEmptyGroups(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m.width, m.height, m.loading = 120, 24, false
+	m.userGroups = append([]domain.PackageGroup{
+		{ID: 1, Name: "Editors", Index: 1, Kind: domain.GroupKindUser, Members: 2},
+		{ID: 2, Name: "Empty", Index: 2, Kind: domain.GroupKindUser},
+	}, builtinGroups(0, 3)...)
+	strip := ansi.Strip(m.groupStrip(120))
+	for _, want := range []string{"[All]", "[Ungrouped]", "[Editors]", "[Hidden]"} {
+		if !contains(strip, want) {
+			t.Fatalf("strip = %q, want %q", strip, want)
+		}
+	}
+	for _, gone := range []string{"[Empty]", "[Starred]"} {
+		if contains(strip, gone) {
+			t.Fatalf("strip = %q, empty group %q should have no tab", strip, gone)
+		}
+	}
+	// Cycling skips the empty groups too.
+	m.filter.GroupScope, m.filter.GroupTarget = domain.GroupScopeUser, 1
+	m = update(t, m, key("."))
+	if m.filter.GroupTarget != hiddenID {
+		t.Fatalf("dot from Editors landed on %d, want Hidden", m.filter.GroupTarget)
+	}
+}
+
+func TestEmptiedActiveGroupFallsBackToAll(t *testing.T) {
+	data := &fakeGroupData{}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = append([]domain.PackageGroup{{ID: 1, Name: "Editors", Index: 1, Kind: domain.GroupKindUser, Members: 1}}, builtinGroups(0, 0)...)
+	m.filter.GroupScope, m.filter.GroupTarget = domain.GroupScopeUser, 1
+
+	// Moving the last member out reloads the groups with Editors empty.
+	_, cmd := m.Update(groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Group: domain.PackageGroup{ID: starredID}})
+	if _, ok := runCommand[groupsLoaded](t, cmd); !ok {
+		t.Fatal("assignment did not reload groups for fresh member counts")
+	}
+	before := m.feedRequestID
+	m = update(t, m, groupsLoaded{Groups: append([]domain.PackageGroup{{ID: 1, Name: "Editors", Index: 1, Kind: domain.GroupKindUser}}, builtinGroups(1, 0)...)})
+	if m.filter.GroupScope != domain.GroupScopeAll || m.filter.GroupTarget != 0 {
+		t.Fatalf("filter = %d/%d, want All once the active group is empty", m.filter.GroupScope, m.filter.GroupTarget)
+	}
+	if m.feedRequestID == before {
+		t.Fatal("falling back to All did not requery the feed")
+	}
+	if strip := ansi.Strip(m.groupStrip(120)); contains(strip, "[Editors]") || !contains(strip, "[Starred]") {
+		t.Fatalf("strip = %q, want Editors gone and Starred shown", strip)
+	}
+}
+
+func TestSavedTabForEmptyGroupFallsBackOnLoad(t *testing.T) {
+	m := groupTestModel(&fakeGroupData{}, groups("a"))
+	m = update(t, m, groupsLoaded{Groups: builtinGroups(0, 0)})
+	m = update(t, m, PreferencesLoaded{Filter: domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: starredID}})
+	if m.filter.GroupScope != domain.GroupScopeAll {
+		t.Fatalf("saved empty Starred tab restored as %d/%d, want All", m.filter.GroupScope, m.filter.GroupTarget)
+	}
+}
+
+func TestGroupModalAssignsToBuiltinsButCannotRemoveThem(t *testing.T) {
+	data := &fakeGroupData{groups: append([]domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Kind: domain.GroupKindUser, Members: 1}}, builtinGroups(0, 0)...)}
+	m := groupTestModel(data, groups("a"))
+	m.userGroups = data.groups
+	m = update(t, m, key("g"))
+	view := ansi.Strip(m.render())
+	// Empty built-ins have no tab but stay assignable from the modal.
+	if !strings.Contains(view, "Starred ★") || !strings.Contains(view, "Hidden ⃠") {
+		t.Fatalf("modal does not offer the built-in groups:\n%s", view)
+	}
+	m = update(t, m, key("j")) // Editors -> Starred
+	if group, _ := m.groupAssign.selectedGroup(); group.ID != starredID {
+		t.Fatalf("cursor on %d, want Starred", group.ID)
+	}
+	if hot := update(t, m, key("tab")); hot.groupAssign.removeHot {
+		t.Fatal("Remove became focusable on a built-in group")
+	}
+	_, msg := updateAndRunCommand(t, m, key("enter"))
+	if request := msg.(groupAssignRequested); request.GroupID != starredID {
+		t.Fatalf("request = %#v, want assign to Starred", request)
 	}
 }
 
@@ -431,7 +526,7 @@ func TestGroupStripClicksTrackScrolledWindow(t *testing.T) {
 	m.width, m.height, m.loading = 44, 24, false
 	var gs []domain.PackageGroup
 	for i := 1; i <= 4; i++ {
-		gs = append(gs, domain.PackageGroup{ID: domain.PackageGroupID(i), Name: "GroupNumber" + string(rune('0'+i)), Index: i})
+		gs = append(gs, domain.PackageGroup{ID: domain.PackageGroupID(i), Name: "GroupNumber" + string(rune('0'+i)), Index: i, Members: 1})
 	}
 	m.userGroups = gs
 	m.filter.GroupScope = domain.GroupScopeUser
@@ -466,7 +561,7 @@ func TestGroupStripClicksTrackScrolledWindow(t *testing.T) {
 // refreshes: the radio and enter semantics must follow the package's current
 // membership, not the membership captured when the modal opened.
 func TestGroupModalSyncsAcrossRefresh(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 9, Name: "Term", Index: 2}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}, {ID: 9, Name: "Term", Index: 2, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 	m.groups[0].Events[0].GroupID = 3
@@ -504,7 +599,7 @@ func TestGroupModalSyncsAcrossRefresh(t *testing.T) {
 // TestGroupModalSyncsAfterDelete guards the modal group list against a
 // deletion that arrives while the modal is open on another package.
 func TestGroupModalSyncsAfterDelete(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}, {ID: 4, Name: "Term", Index: 2}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}, {ID: 4, Name: "Term", Index: 2, Members: 1}}}
 	m := groupTestModel(data, groups("a"))
 	m.userGroups = data.groups
 	m.filter.GroupScope = domain.GroupScopeUser
@@ -562,7 +657,7 @@ func TestGroupModalEnterIgnoredWhilePending(t *testing.T) {
 // and the strip must still show the overflow marker.
 func TestVisibleGroupTabsDropsUnfittableTabs(t *testing.T) {
 	m := NewModel(Dependencies{})
-	m.userGroups = []domain.PackageGroup{{ID: 1, Name: "G1", Index: 1}}
+	m.userGroups = append([]domain.PackageGroup{{ID: 1, Name: "G1", Index: 1, Members: 1}}, builtinGroups(1, 1)...)
 
 	// [Ungrouped] is 11 wide; at width 10 even alone it cannot fit.
 	m.filter.GroupScope = domain.GroupScopeUngrouped
@@ -592,7 +687,7 @@ func indexOf(s, sub string) int {
 }
 
 func TestActiveGroupTabMatchesFilterScope(t *testing.T) {
-	userGroups := []domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1}}
+	userGroups := append([]domain.PackageGroup{{ID: 5, Name: "Editors", Index: 1, Members: 1}}, builtinGroups(1, 1)...)
 	cases := []struct {
 		filter domain.FeedFilter
 		want   int
@@ -600,8 +695,8 @@ func TestActiveGroupTabMatchesFilterScope(t *testing.T) {
 		{domain.FeedFilter{GroupScope: domain.GroupScopeAll}, 0},
 		{domain.FeedFilter{GroupScope: domain.GroupScopeUngrouped}, 1},
 		{domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: 5}, 2},
-		{domain.FeedFilter{GroupScope: domain.GroupScopeStarred}, 3},
-		{domain.FeedFilter{GroupScope: domain.GroupScopeHidden}, 4},
+		{domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: starredID}, 3},
+		{domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: hiddenID}, 4},
 	}
 	for _, tt := range cases {
 		if got := activeGroupTab(userGroups, tt.filter); got != tt.want {
@@ -633,6 +728,7 @@ func TestGroupAssignMessageUpdatesRowsAndRefetches(t *testing.T) {
 func TestGroupCreatedMessageShowsNamedGroupInStrip(t *testing.T) {
 	data := &fakeGroupData{}
 	m := groupTestModel(data, groups("a"))
+	m.userGroups = builtinGroups(1, 0)
 
 	m = update(t, m, groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
 	strip := ansi.Strip(m.groupStrip(120))
@@ -658,7 +754,7 @@ func (f *fakeBatchGroupData) SetPackagesGroup(_ context.Context, ids []domain.Pa
 }
 
 func TestGroupModalMovesEveryMarkedPackageInOneBatch(t *testing.T) {
-	data := &fakeBatchGroupData{fakeGroupData: fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}}
+	data := &fakeBatchGroupData{fakeGroupData: fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}}
 	m := NewModel(Dependencies{Data: data})
 	m.width, m.height, m.loading = 120, 24, false
 	m.groups = groups("a", "b", "c")
@@ -696,7 +792,7 @@ func TestGroupModalMovesEveryMarkedPackageInOneBatch(t *testing.T) {
 }
 
 func TestGroupModalWithMixedMembershipNeverClears(t *testing.T) {
-	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1, Members: 1}}}
 	m := groupTestModel(data, groups("a", "b"))
 	m.userGroups = data.groups
 	m.groups[0].Events[0].GroupID = 3

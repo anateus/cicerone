@@ -713,12 +713,16 @@ func TestSearchableFeedDataDisplaysCatalogWithoutIndexedEvents(t *testing.T) {
 		groups[0].Events[0].CatalogDescription != "Terminal emulator" {
 		t.Fatalf("description search: descriptions=%v groups=%#v", searcher.descriptions, groups)
 	}
-	if err := destination.SetPackageStatus(ctx, "iterm2", domain.PackageStatusStarred); err != nil {
+	starred, err := destination.BuiltinGroup(ctx, domain.GroupKindStarred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.SetPackageGroup(ctx, "iterm2", starred.ID); err != nil {
 		t.Fatal(err)
 	}
 	groups, err = data.QueryFeed(ctx, filter)
-	if err != nil || len(groups) != 1 || groups[0].Events[0].Status != domain.PackageStatusStarred {
-		t.Fatalf("status after search: groups=%#v err=%v", groups, err)
+	if err != nil || len(groups) != 1 || groups[0].Events[0].GroupKind != domain.GroupKindStarred {
+		t.Fatalf("group after search: groups=%#v err=%v", groups, err)
 	}
 	if _, ok, err := destination.PackageInfo(ctx, "iterm2"); err != nil || ok {
 		t.Fatalf("package info before selection: found=%v err=%v", ok, err)

@@ -6,35 +6,31 @@ import (
 )
 
 func TestMatchesGroupScope(t *testing.T) {
-	const group PackageGroupID = 7
+	const group, hidden PackageGroupID = 7, 9
 	cases := []struct {
 		name    string
 		scope   GroupScope
 		groupID PackageGroupID
-		status  PackageStatus
+		kind    GroupKind
+		target  PackageGroupID
 		want    bool
 	}{
-		{"all default", GroupScopeAll, 0, PackageStatusDefault, true},
-		{"all starred", GroupScopeAll, 0, PackageStatusStarred, true},
-		{"all excludes hidden", GroupScopeAll, 0, PackageStatusHidden, false},
-		{"all excludes hidden with group", GroupScopeAll, group, PackageStatusHidden, false},
-		{"ungrouped takes empty", GroupScopeUngrouped, 0, PackageStatusDefault, true},
-		{"ungrouped takes starred", GroupScopeUngrouped, 0, PackageStatusStarred, true},
-		{"ungrouped rejects member", GroupScopeUngrouped, group, PackageStatusDefault, false},
-		{"ungrouped rejects hidden", GroupScopeUngrouped, 0, PackageStatusHidden, false},
-		{"starred takes starred", GroupScopeStarred, 0, PackageStatusStarred, true},
-		{"starred rejects default", GroupScopeStarred, 0, PackageStatusDefault, false},
-		{"starred rejects member", GroupScopeStarred, group, PackageStatusDefault, false},
-		{"hidden takes hidden", GroupScopeHidden, 0, PackageStatusHidden, true},
-		{"hidden rejects default", GroupScopeHidden, 0, PackageStatusDefault, false},
-		{"user takes member", GroupScopeUser, group, PackageStatusDefault, true},
-		{"user rejects other group", GroupScopeUser, 3, PackageStatusDefault, false},
-		{"user rejects ungrouped", GroupScopeUser, 0, PackageStatusDefault, false},
-		{"user rejects hidden member", GroupScopeUser, group, PackageStatusHidden, false},
+		{"all ungrouped", GroupScopeAll, 0, "", group, true},
+		{"all user member", GroupScopeAll, group, GroupKindUser, group, true},
+		{"all starred member", GroupScopeAll, group, GroupKindStarred, group, true},
+		{"all excludes hidden", GroupScopeAll, hidden, GroupKindHidden, group, false},
+		{"ungrouped takes empty", GroupScopeUngrouped, 0, "", group, true},
+		{"ungrouped rejects member", GroupScopeUngrouped, group, GroupKindUser, group, false},
+		{"ungrouped rejects hidden", GroupScopeUngrouped, hidden, GroupKindHidden, group, false},
+		{"group takes member", GroupScopeUser, group, GroupKindUser, group, true},
+		{"group rejects other group", GroupScopeUser, 3, GroupKindUser, group, false},
+		{"group rejects ungrouped", GroupScopeUser, 0, "", group, false},
+		{"hidden group shows its members", GroupScopeUser, hidden, GroupKindHidden, hidden, true},
+		{"group with no target shows nothing", GroupScopeUser, 0, "", 0, false},
 	}
 	for _, tt := range cases {
-		if got := MatchesGroupScope(tt.scope, tt.groupID, tt.status, group); got != tt.want {
-			t.Errorf("%s: MatchesGroupScope(%d, %d, %q) = %v, want %v", tt.name, tt.scope, tt.groupID, tt.status, got, tt.want)
+		if got := MatchesGroupScope(tt.scope, tt.groupID, tt.kind, tt.target); got != tt.want {
+			t.Errorf("%s: MatchesGroupScope(%d, %d, %q, %d) = %v, want %v", tt.name, tt.scope, tt.groupID, tt.kind, tt.target, got, tt.want)
 		}
 	}
 }
@@ -42,31 +38,37 @@ func TestMatchesGroupScope(t *testing.T) {
 func TestBuildFeedAppliesGroupScopes(t *testing.T) {
 	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	events := []UpdateEvent{
-		{ID: "a", PackageID: "plain", Kind: EventVersion, Time: now, Status: PackageStatusDefault},
-		{ID: "b", PackageID: "member", Kind: EventVersion, Time: now, Status: PackageStatusDefault, GroupID: 7},
-		{ID: "c", PackageID: "gone", Kind: EventVersion, Time: now, Status: PackageStatusHidden},
+		{ID: "a", PackageID: "plain", Kind: EventVersion, Time: now},
+		{ID: "b", PackageID: "member", Kind: EventVersion, Time: now, GroupID: 7, GroupKind: GroupKindUser},
+		{ID: "c", PackageID: "gone", Kind: EventVersion, Time: now, GroupID: 9, GroupKind: GroupKindHidden},
 	}
 	installed := map[PackageID]bool{}
-	filter := func(scope GroupScope) FeedFilter {
-		return FeedFilter{Now: now, GroupScope: scope, GroupTarget: 7}
+	filter := func(scope GroupScope, target PackageGroupID) FeedFilter {
+		return FeedFilter{Now: now, GroupScope: scope, GroupTarget: target}
 	}
 
-	if got := len(BuildFeed(events, installed, filter(GroupScopeAll))); got != 2 {
+	if got := len(BuildFeed(events, installed, filter(GroupScopeAll, 0))); got != 2 {
 		t.Fatalf("all scope rows = %d, want 2 (hidden excluded)", got)
 	}
-	ungrouped := BuildFeed(events, installed, filter(GroupScopeUngrouped))
+	ungrouped := BuildFeed(events, installed, filter(GroupScopeUngrouped, 0))
 	if len(ungrouped) != 1 || ungrouped[0].Events[0].PackageID != "plain" {
 		t.Fatalf("ungrouped scope = %#v, want only plain", ungrouped)
 	}
-	if got := len(BuildFeed(events, installed, filter(GroupScopeHidden))); got != 1 {
-		t.Fatalf("hidden scope rows = %d, want 1", got)
+	hidden := BuildFeed(events, installed, filter(GroupScopeUser, 9))
+	if len(hidden) != 1 || hidden[0].Events[0].PackageID != "gone" {
+		t.Fatalf("hidden group = %#v, want only gone", hidden)
 	}
-	user := BuildFeed(events, installed, filter(GroupScopeUser))
+	user := BuildFeed(events, installed, filter(GroupScopeUser, 7))
 	if len(user) != 1 || user[0].Events[0].PackageID != "member" {
 		t.Fatalf("user scope = %#v, want only member", user)
 	}
-	other := BuildFeed(events, installed, FeedFilter{Now: now, GroupScope: GroupScopeUser, GroupTarget: 3})
-	if len(other) != 0 {
+	if other := BuildFeed(events, installed, filter(GroupScopeUser, 3)); len(other) != 0 {
 		t.Fatalf("other-group scope = %#v, want empty", other)
+	}
+}
+
+func TestBuiltinGroupKinds(t *testing.T) {
+	if GroupKindUser.Builtin() || !GroupKindStarred.Builtin() || !GroupKindHidden.Builtin() {
+		t.Fatal("only Starred and Hidden are built in")
 	}
 }

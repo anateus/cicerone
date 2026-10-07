@@ -54,7 +54,7 @@ func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`PRAGMA user_version=17`); err != nil {
+	if _, err := db.Exec(`PRAGMA user_version=18`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -64,9 +64,9 @@ func TestOpenRejectsDatabaseFromNewerSchemaVersion(t *testing.T) {
 	store, err := Open(context.Background(), path)
 	if store != nil {
 		_ = store.Close()
-		t.Fatal("Open returned a store for schema version 17 with latest migration 16")
+		t.Fatal("Open returned a store for schema version 18 with latest migration 17")
 	}
-	if err == nil || !strings.Contains(err.Error(), "version 17") || !strings.Contains(err.Error(), "version 16") ||
+	if err == nil || !strings.Contains(err.Error(), "version 18") || !strings.Contains(err.Error(), "version 17") ||
 		!strings.Contains(strings.ToLower(err.Error()), "backup") || !strings.Contains(strings.ToLower(err.Error()), "downgrade") {
 		t.Fatalf("Open future schema error = %v, want versions and backup/downgrade recovery guidance", err)
 	}
@@ -145,7 +145,7 @@ func TestOpenUpgradesRepresentativeVersionTwoAndThreeDatabases(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = s.Close() })
-			assertPragma(t, s.db, "user_version", "16")
+			assertPragma(t, s.db, "user_version", "17")
 			assertScalar(t, s.db, `SELECT show_formula || ':' || show_cask FROM preferences WHERE id=1`, "1:0")
 			assertScalar(t, s.db, `SELECT search_scope FROM preferences WHERE id=1`, "names")
 			assertScalar(t, s.db, `SELECT count(*) FROM pragma_table_info('package_info') WHERE name='description'`, "1")
@@ -202,18 +202,24 @@ func createMigrationFixture(t *testing.T, path string, version int) *sql.DB {
 	return db
 }
 
-func TestPackageGroupsMigrationFromLegacyStatuses(t *testing.T) {
+func TestBuiltinGroupsMigrationMovesLegacyStatusesIntoGroups(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "groups.db")
-	db := createMigrationFixture(t, path, 14)
+	db := createMigrationFixture(t, path, 16)
 	if _, err := db.Exec(`
-		INSERT INTO packages(id,name,type,status) VALUES
-			('plain','Plain','formula','default'),
-			('fav','Fav','cask','starred'),
-			('gone','Gone','formula','snoozed');
+		INSERT INTO package_groups(id,name,position) VALUES (1,'Editors',1), (2,'Starred',2);
+		INSERT INTO packages(id,name,type,status,group_id) VALUES
+			('plain','Plain','formula','default',NULL),
+			('fav','Fav','cask','starred',NULL),
+			('gone','Gone','formula','snoozed',NULL),
+			('both','Both','formula','starred',1),
+			('member','Member','formula','default',1);
 		INSERT INTO update_events(id, package_id, kind, repository, commit_hash, event_time) VALUES
 			('e1','plain','version','core','a',1),
 			('e2','fav','version','core','b',2),
-			('e3','gone','version','core','c',3);`); err != nil {
+			('e3','gone','version','core','c',3),
+			('e4','both','version','core','d',4),
+			('e5','member','version','core','e',5);
+		UPDATE preferences SET group_scope=3, group_target=0 WHERE id=1;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -227,53 +233,46 @@ func TestPackageGroupsMigrationFromLegacyStatuses(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	// Legacy statuses survive: starred keeps starred, snoozed reads as hidden.
+	assertScalar(t, s.db, `SELECT count(*) FROM pragma_table_info('packages') WHERE name='status'`, "0")
+	// A user group that already used a built-in name keeps its members under
+	// a new name.
+	assertScalar(t, s.db, `SELECT name || ':' || kind FROM package_groups WHERE id=2`, "Starred (custom):user")
+	starred, err := s.BuiltinGroup(ctx, domain.GroupKindStarred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := s.BuiltinGroup(ctx, domain.GroupKindHidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupOf := func(id string) string {
+		var group sql.NullInt64
+		if err := s.db.QueryRow(`SELECT group_id FROM packages WHERE id=?`, id).Scan(&group); err != nil {
+			t.Fatal(err)
+		}
+		return strconv.FormatInt(group.Int64, 10)
+	}
+	for id, want := range map[string]domain.PackageGroupID{"plain": 0, "fav": starred.ID, "gone": hidden.ID, "both": 1, "member": 1} {
+		if got := groupOf(id); got != strconv.FormatInt(int64(want), 10) {
+			t.Errorf("%s group = %s, want %d", id, got, want)
+		}
+	}
+
+	// The saved Hidden tab now points at the Hidden group.
+	prefs, err := s.Preferences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefs.GroupScope != domain.GroupScopeUser || prefs.GroupTarget != hidden.ID {
+		t.Fatalf("migrated tab = %d/%d, want group %d", prefs.GroupScope, prefs.GroupTarget, hidden.ID)
+	}
+
 	all, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeAll})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("all scope rows = %d, want 2 (hidden excluded)", len(all))
-	}
-	starred, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeStarred})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(starred) != 1 || starred[0].Events[0].PackageID != "fav" {
-		t.Fatalf("starred scope = %#v, want fav", starred)
-	}
-	hidden, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeHidden})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hidden) != 1 || hidden[0].Events[0].PackageID != "gone" {
-		t.Fatalf("hidden scope = %#v, want gone", hidden)
-	}
-	if hidden[0].Events[0].Status != domain.PackageStatusHidden {
-		t.Fatalf("hidden status = %q, want hidden", hidden[0].Events[0].Status)
-	}
-
-	// A group created after the migration can take members and drive scopes.
-	group, err := s.CreatePackageGroup(ctx, "Post-migration")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetPackageGroup(ctx, "plain", group.ID); err != nil {
-		t.Fatal(err)
-	}
-	user, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: group.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(user) != 1 || user[0].Events[0].PackageID != "plain" {
-		t.Fatalf("user scope = %#v, want plain", user)
-	}
-	ungrouped, err := s.QueryFeed(ctx, domain.FeedFilter{GroupScope: domain.GroupScopeUngrouped})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ungrouped) != 1 || ungrouped[0].Events[0].PackageID != "fav" {
-		t.Fatalf("ungrouped scope = %#v, want fav", ungrouped)
+	if len(all) != 4 {
+		t.Fatalf("all scope rows = %d, want 4 (hidden excluded)", len(all))
 	}
 }
 
@@ -307,7 +306,7 @@ func TestOpenConfiguresAndMigratesDatabase(t *testing.T) {
 	assertPragma(t, store.db, "journal_mode", "wal")
 	assertPragma(t, store.db, "foreign_keys", "1")
 	assertPragma(t, store.db, "busy_timeout", "5000")
-	assertPragma(t, store.db, "user_version", "16")
+	assertPragma(t, store.db, "user_version", "17")
 
 	wantTables := []string{
 		"changelog_artifacts", "changelog_artifacts_fts", "changelog_attempts",
