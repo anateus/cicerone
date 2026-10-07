@@ -358,6 +358,9 @@ func groups(ids ...string) []domain.FeedGroup {
 
 func key(s string) tea.KeyPressMsg {
 	special := map[string]rune{"tab": tea.KeyTab, "enter": tea.KeyEnter, "esc": tea.KeyEscape}
+	if s == "space" {
+		return tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Text: " "})
+	}
 	if code, ok := special[s]; ok {
 		return tea.KeyPressMsg(tea.Key{Code: code})
 	}
@@ -480,43 +483,55 @@ func TestSynchronizationIsVisibleBeforeFirstScanProgressAndFailureReplacesSyncNe
 
 func TestGlobalQuitKeys(t *testing.T) {
 	states := []struct {
-		name  string
-		model func() Model
+		name    string
+		model   func() Model
+		escQuit bool
 	}{
-		{name: "normal", model: func() Model { return NewModel(Dependencies{}) }},
+		{name: "normal", escQuit: true, model: func() Model { return NewModel(Dependencies{}) }},
 		{name: "error", model: func() Model {
 			m := NewModel(Dependencies{})
 			m.err = errors.New("visible error")
 			return m
-		}},
+		}, escQuit: true},
 		{name: "pending-action", model: func() Model {
 			m := NewModel(Dependencies{})
-			a := action()
-			m.pendingAction = &a
-			return m
+			return m.startActionSession([]homebrew.Action{action()})
 		}},
 		{name: "action-running", model: func() Model {
 			m := NewModel(Dependencies{})
-			m.actionRunning = true
+			m = m.startActionSession([]homebrew.Action{action()})
+			m.action.phase = actionRunning
 			return m
 		}},
 		{name: "action-result", model: func() Model {
 			m := NewModel(Dependencies{})
-			a := action()
-			m.actionResult = &a
+			m = m.startActionSession([]homebrew.Action{action()})
+			m.action.phase = actionDone
 			return m
+		}},
+		{name: "marked", model: func() Model {
+			m := NewModel(Dependencies{})
+			m.groups = groups("a")
+			m.selected = 0
+			return m.toggleMark()
 		}},
 	}
 
 	for _, state := range states {
-		for _, quitKey := range []string{"q", "esc"} {
-			t.Run(state.name+"/"+quitKey, func(t *testing.T) {
-				_, msg := updateAndRunCommand(t, state.model(), key(quitKey))
-				if _, ok := msg.(tea.QuitMsg); !ok {
-					t.Fatalf("command result = %T, want tea.QuitMsg", msg)
-				}
-			})
-		}
+		t.Run(state.name+"/q", func(t *testing.T) {
+			_, msg := updateAndRunCommand(t, state.model(), key("q"))
+			if _, ok := msg.(tea.QuitMsg); !ok {
+				t.Fatalf("command result = %T, want tea.QuitMsg", msg)
+			}
+		})
+		// Esc quits only from the bare feed. Inside a modal or with marks it
+		// backs out one level, so a reflexive esc never kills a running brew.
+		t.Run(state.name+"/esc", func(t *testing.T) {
+			_, msg := updateAndRunCommand(t, state.model(), key("esc"))
+			if _, quit := msg.(tea.QuitMsg); quit != state.escQuit {
+				t.Fatalf("esc quit = %v, want %v", quit, state.escQuit)
+			}
+		})
 	}
 }
 

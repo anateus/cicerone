@@ -19,18 +19,69 @@ const (
 	Upgrade ActionKind = "upgrade"
 )
 
+// Action is one brew invocation. Every package shares the kind and type so a
+// single `brew install --formula a b c` covers them.
 type Action struct {
-	Kind    ActionKind
-	Package domain.PackageID
-	Type    domain.PackageType
+	Kind     ActionKind
+	Packages []domain.PackageID
+	Type     domain.PackageType
+}
+
+// ActionTarget is a package the user asked to install or upgrade.
+type ActionTarget struct {
+	Package   domain.PackageID
+	Type      domain.PackageType
+	Installed bool
+}
+
+// PlanActions splits targets into the fewest brew invocations: brew takes one
+// verb and one --formula/--cask flag per call, so installs and upgrades of
+// formulae and casks each get their own action. Order is stable (formula
+// installs, formula upgrades, cask installs, cask upgrades) and duplicates
+// are dropped.
+func PlanActions(targets []ActionTarget) []Action {
+	order := []struct {
+		kind ActionKind
+		typ  domain.PackageType
+	}{
+		{Install, domain.PackageFormula}, {Upgrade, domain.PackageFormula},
+		{Install, domain.PackageCask}, {Upgrade, domain.PackageCask},
+	}
+	seen := make(map[domain.PackageID]bool, len(targets))
+	var actions []Action
+	for _, slot := range order {
+		action := Action{Kind: slot.kind, Type: slot.typ}
+		for _, target := range targets {
+			kind := Install
+			if target.Installed {
+				kind = Upgrade
+			}
+			if kind != slot.kind || target.Type != slot.typ || seen[target.Package] {
+				continue
+			}
+			seen[target.Package] = true
+			action.Packages = append(action.Packages, target.Package)
+		}
+		if len(action.Packages) > 0 {
+			actions = append(actions, action)
+		}
+	}
+	return actions
 }
 
 var actionPackageNamePattern = regexp.MustCompile(`^[A-Za-z0-9@+_.\-/]+$`)
 
 func actionArgs(action Action) ([]string, error) {
-	name := string(action.Package)
-	if name == "" || name[0] == '-' || !actionPackageNamePattern.MatchString(name) {
-		return nil, fmt.Errorf("invalid Homebrew package name %q", name)
+	if len(action.Packages) == 0 {
+		return nil, fmt.Errorf("Homebrew action has no packages")
+	}
+	names := make([]string, 0, len(action.Packages))
+	for _, packageID := range action.Packages {
+		name := string(packageID)
+		if name == "" || name[0] == '-' || !actionPackageNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("invalid Homebrew package name %q", name)
+		}
+		names = append(names, name)
 	}
 	if action.Kind != Install && action.Kind != Upgrade {
 		return nil, fmt.Errorf("invalid Homebrew action %q", action.Kind)
@@ -44,7 +95,7 @@ func actionArgs(action Action) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("invalid Homebrew package type %q", action.Type)
 	}
-	return []string{string(action.Kind), flag, name}, nil
+	return append([]string{string(action.Kind), flag}, names...), nil
 }
 
 func (c *Client) RunAction(ctx context.Context, action Action, output io.Writer) error {

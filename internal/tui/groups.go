@@ -56,6 +56,7 @@ type groupModal struct {
 	cursor     int
 	name       string
 	assignedTo domain.PackageGroupID
+	targets    []domain.PackageID
 	removeHot  bool
 	pending    bool
 }
@@ -70,7 +71,12 @@ func (m *Model) syncGroupModal() {
 	}
 	modal := *m.groupAssign
 	modal.groups = m.userGroups
-	modal.assignedTo = m.selectedPackageGroupID()
+	if len(m.markOrder) == 0 {
+		// Without marks the modal follows the selected row; with marks it
+		// keeps acting on the set it opened with.
+		modal.targets = m.groupTargets()
+	}
+	modal.assignedTo = m.targetGroupID()
 	if !modal.nameFocused() && modal.cursor == 0 && len(modal.groups) > 0 {
 		// The list gained groups since open; keep the default-on-first-group
 		// behavior instead of stranding the cursor on the new-group row.
@@ -94,7 +100,7 @@ func (m groupModal) selectedGroupRaw() domain.PackageGroupID {
 	return m.groups[m.cursor-1].ID
 }
 
-func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID) groupModal {
+func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID, targets []domain.PackageID) groupModal {
 	// Default the cursor to the first non-new group; fall back to the
 	// new-group row when no groups exist yet.
 	cursor := 0
@@ -104,7 +110,7 @@ func newGroupModal(groups []domain.PackageGroup, assigned domain.PackageGroupID)
 	if len(groups) == 0 && assigned == 0 {
 		cursor = 0
 	}
-	return groupModal{groups: groups, cursor: cursor, assignedTo: assigned}
+	return groupModal{groups: groups, cursor: cursor, assignedTo: assigned, targets: targets}
 }
 
 func (m groupModal) rowCount() int { return len(m.groups) + 1 }
@@ -132,9 +138,12 @@ func (m groupModal) selectedGroup() (domain.PackageGroup, bool) {
 }
 
 // assignRequest resolves the modal selection to a group assignment. Selecting
-// the group the package already belongs to clears its membership instead.
-func (m groupModal) assignRequest(packageID domain.PackageID) (groupAssignRequested, bool) {
-	request := groupAssignRequested{PackageID: packageID}
+// the group every target already belongs to clears membership instead.
+func (m groupModal) assignRequest() (groupAssignRequested, bool) {
+	if len(m.targets) == 0 {
+		return groupAssignRequested{}, false
+	}
+	request := groupAssignRequested{PackageIDs: append([]domain.PackageID(nil), m.targets...)}
 	if m.cursor == 0 {
 		if strings.TrimSpace(m.name) == "" {
 			return request, false
@@ -160,15 +169,29 @@ func (m Model) renderGroupModal() string {
 	}
 	p := m.palette()
 	modal := m.groupAssign
-	event := m.selectedEvent()
 
 	var b strings.Builder
-	heading := "Group: " + event.Name
-	if event.PackageID == "" {
-		heading = "Group"
+	heading := "Group"
+	switch {
+	case len(modal.targets) > 1:
+		heading = fmt.Sprintf("Group: %d packages", len(modal.targets))
+	case len(modal.targets) == 1:
+		heading = "Group: " + m.packageName(modal.targets[0])
 	}
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(p.primary).Render(heading))
 	b.WriteByte('\n')
+	if len(modal.targets) > 1 {
+		names := make([]string, len(modal.targets))
+		for index, id := range modal.targets {
+			names[index] = m.packageName(id)
+		}
+		summary := summarizeNames(names)
+		if modal.assignedTo == mixedGroups {
+			summary += " · mixed groups"
+		}
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(fit(summary, 44)))
+		b.WriteByte('\n')
+	}
 
 	radio := func(selected bool) string {
 		if selected {
@@ -307,14 +330,12 @@ func (m Model) handleGroupModalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if modal.removeHot {
 			return m.removeSelectedGroup()
 		}
-		if event := m.selectedEvent(); event.PackageID != "" {
-			if request, ok := modal.assignRequest(event.PackageID); ok {
-				// Keep the modal open until the store confirms; a failed create
-				// (duplicate name) must not lose the typed name.
-				modal.pending = true
-				m.groupAssign = &modal
-				return m, func() tea.Msg { return request }
-			}
+		if request, ok := modal.assignRequest(); ok {
+			// Keep the modal open until the store confirms; a failed create
+			// (duplicate name) must not lose the typed name.
+			modal.pending = true
+			m.groupAssign = &modal
+			return m, func() tea.Msg { return request }
 		}
 		return m, nil
 	}
@@ -361,4 +382,27 @@ func (m Model) selectedPackageGroupID() domain.PackageGroupID {
 		return 0
 	}
 	return m.selectedEvent().GroupID
+}
+
+// packageName returns a package's display name from its mark snapshot or a
+// loaded row, falling back to the package ID.
+func (m Model) packageName(id domain.PackageID) string {
+	if mark, ok := m.marked[id]; ok && mark.Name != "" {
+		return mark.Name
+	}
+	for _, group := range m.groups {
+		if e := group.Events[0]; e.PackageID == id && e.Name != "" {
+			return e.Name
+		}
+	}
+	return string(id)
+}
+
+func (m Model) userGroupName(id domain.PackageGroupID) string {
+	for _, group := range m.userGroups {
+		if group.ID == id {
+			return group.Name
+		}
+	}
+	return ""
 }

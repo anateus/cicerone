@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestGroupModalAssignsSelectedGroupOnEnter(t *testing.T) {
 	if !ok {
 		t.Fatalf("enter produced %T, want groupAssignRequested", msg)
 	}
-	if request.PackageID != "pkg-a" || request.GroupID != 3 {
+	if !reflect.DeepEqual(request.PackageIDs, []domain.PackageID{"pkg-a"}) || request.GroupID != 3 {
 		t.Fatalf("request = %#v, want pkg-a into group 3", request)
 	}
 	if m.groupAssign == nil || !m.groupAssign.pending {
@@ -97,7 +98,7 @@ func TestGroupModalAssignsSelectedGroupOnEnter(t *testing.T) {
 	}
 
 	// Store confirms; only then does the modal close.
-	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 3}})
+	m = update(t, m, groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Group: domain.PackageGroup{ID: 3}})
 	if m.groupAssign != nil {
 		t.Fatalf("modal after confirm = %#v, want closed", *m.groupAssign)
 	}
@@ -125,7 +126,7 @@ func TestGroupModalCreatesNewGroupFromName(t *testing.T) {
 	}
 
 	// A duplicate-name failure keeps the modal open and the name intact.
-	m = update(t, m, groupAssigned{PackageID: "pkg-a", Err: errDuplicateGroup})
+	m = update(t, m, groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Err: errDuplicateGroup})
 	if m.groupAssign == nil {
 		t.Fatal("modal closed on failed create, name lost")
 	}
@@ -134,7 +135,7 @@ func TestGroupModalCreatesNewGroupFromName(t *testing.T) {
 	}
 
 	// A retry that succeeds closes the modal and names the strip tab.
-	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
+	m = update(t, m, groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
 	if m.groupAssign != nil {
 		t.Fatal("modal stayed open after successful retry")
 	}
@@ -614,7 +615,7 @@ func TestGroupAssignMessageUpdatesRowsAndRefetches(t *testing.T) {
 	m := groupTestModel(data, groups("a", "b"))
 	before := m.feedRequestID
 
-	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 3}})
+	m = update(t, m, groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Group: domain.PackageGroup{ID: 3}})
 	if got := m.groups[0].Events[0].GroupID; got != 3 {
 		t.Fatalf("pkg-a group = %d, want 3", got)
 	}
@@ -633,7 +634,7 @@ func TestGroupCreatedMessageShowsNamedGroupInStrip(t *testing.T) {
 	data := &fakeGroupData{}
 	m := groupTestModel(data, groups("a"))
 
-	m = update(t, m, groupAssigned{PackageID: "pkg-a", Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
+	m = update(t, m, groupAssigned{PackageIDs: []domain.PackageID{"pkg-a"}, Group: domain.PackageGroup{ID: 9, Name: "CLI tools"}, Created: true})
 	strip := ansi.Strip(m.groupStrip(120))
 	if !strings.Contains(strip, "[CLI tools]") {
 		t.Fatalf("strip = %q, want named new group", strip)
@@ -645,3 +646,82 @@ func TestGroupCreatedMessageShowsNamedGroupInStrip(t *testing.T) {
 }
 
 var _ tea.Msg = groupAssigned{}
+
+type fakeBatchGroupData struct {
+	fakeGroupData
+	batches [][]domain.PackageID
+}
+
+func (f *fakeBatchGroupData) SetPackagesGroup(_ context.Context, ids []domain.PackageID, _ domain.PackageGroupID) error {
+	f.batches = append(f.batches, ids)
+	return nil
+}
+
+func TestGroupModalMovesEveryMarkedPackageInOneBatch(t *testing.T) {
+	data := &fakeBatchGroupData{fakeGroupData: fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}}
+	m := NewModel(Dependencies{Data: data})
+	m.width, m.height, m.loading = 120, 24, false
+	m.groups = groups("a", "b", "c")
+	m.selected = 0
+	m.userGroups = data.groups
+	m = update(t, m, key("space"))
+	m = update(t, m, key("j"))
+	m = update(t, m, key("j"))
+	m = update(t, m, key("space"))
+
+	m = update(t, m, key("g"))
+	view := ansi.Strip(m.render())
+	if !strings.Contains(view, "Group: 2 packages") || !strings.Contains(view, "pkg-a, pkg-c") {
+		t.Fatalf("modal does not name the marked set:\n%s", view)
+	}
+	m, msg := updateAndRunCommand(t, m, key("enter"))
+	request := msg.(groupAssignRequested)
+	if want := []domain.PackageID{"pkg-a", "pkg-c"}; !reflect.DeepEqual(request.PackageIDs, want) || request.GroupID != 3 {
+		t.Fatalf("request = %#v", request)
+	}
+	_, assigned := updateAndRunCommand(t, m, request)
+	if len(data.batches) != 1 || len(data.assignments) != 0 {
+		t.Fatalf("batch source not used: batches %v, singles %v", data.batches, data.assignments)
+	}
+	m = update(t, m, assigned)
+	if m.groupAssign != nil || len(m.markOrder) != 0 {
+		t.Fatal("batch move did not close the modal and clear marks")
+	}
+	if m.notification != "Moved 2 packages to Editors" {
+		t.Fatalf("notification = %q", m.notification)
+	}
+	if m.groups[0].Events[0].GroupID != 3 || m.groups[1].Events[0].GroupID != 0 || m.groups[2].Events[0].GroupID != 3 {
+		t.Fatal("rows not updated optimistically")
+	}
+}
+
+func TestGroupModalWithMixedMembershipNeverClears(t *testing.T) {
+	data := &fakeGroupData{groups: []domain.PackageGroup{{ID: 3, Name: "Editors", Index: 1}}}
+	m := groupTestModel(data, groups("a", "b"))
+	m.userGroups = data.groups
+	m.groups[0].Events[0].GroupID = 3
+	m.selected = 0
+	m = update(t, m, key("space"))
+	m = update(t, m, key("j"))
+	m = update(t, m, key("space"))
+	m = update(t, m, key("g"))
+	if m.groupAssign.assignedTo != mixedGroups {
+		t.Fatalf("assignedTo = %d, want mixed", m.groupAssign.assignedTo)
+	}
+	if !strings.Contains(ansi.Strip(m.render()), "mixed groups") {
+		t.Fatal("mixed membership not shown")
+	}
+	_, msg := updateAndRunCommand(t, m, key("enter"))
+	if request := msg.(groupAssignRequested); request.Clear || request.GroupID != 3 {
+		t.Fatalf("enter on a group some marks already share should assign all, got %#v", request)
+	}
+}
+
+func TestGroupModalFallsBackToSingleWritesWithoutBatchSource(t *testing.T) {
+	data := &fakeGroupData{}
+	m := groupTestModel(data, groups("a", "b"))
+	_, msg := updateAndRunCommand(t, m, groupAssignRequested{PackageIDs: []domain.PackageID{"pkg-a", "pkg-b"}, GroupID: 4})
+	if len(data.assignments) != 2 || msg.(groupAssigned).Err != nil {
+		t.Fatalf("assignments = %#v", data.assignments)
+	}
+}

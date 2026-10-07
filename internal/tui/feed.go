@@ -81,16 +81,25 @@ func (m Model) renderVisibleFeedRows(width, offset, height int) (string, int) {
 }
 
 func (m Model) renderFeedGroup(index int, group domain.FeedGroup, width int) []string {
+	// A marked row shows ● in the cursor column; the selection band already
+	// distinguishes the cursor, so a marked cursor row needs no second glyph.
+	marked := m.isMarked(group.Events[0].PackageID)
 	marker := "  "
-	if index == m.selected {
+	switch {
+	case marked:
+		marker = "● "
+	case index == m.selected:
 		marker = "› "
 	}
 	lines := m.feedGroupRows(marker, group.Events[0], width)
 	p := m.palette()
 	for row, line := range lines {
-		if index == m.selected {
+		switch {
+		case index == m.selected:
 			lines[row] = m.selectedLine(line)
-		} else if index%2 == 1 {
+		case marked:
+			lines[row] = m.markedLine(line, width)
+		case index%2 == 1:
 			lines[row] = m.surfaceLine(line, width, p.alternateRowBG)
 		}
 	}

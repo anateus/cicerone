@@ -77,3 +77,20 @@ func (s *Store) SetPackageGroup(ctx context.Context, packageID domain.PackageID,
 		return err
 	})
 }
+
+// SetPackagesGroup assigns several packages to one group, or clears their
+// membership when the group ID is zero, in a single transaction.
+func (s *Store) SetPackagesGroup(ctx context.Context, packageIDs []domain.PackageID, groupID domain.PackageGroupID) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		var value any
+		if groupID != 0 {
+			value = groupID
+		}
+		for _, packageID := range packageIDs {
+			if _, err := tx.ExecContext(ctx, `UPDATE packages SET group_id=? WHERE id=?`, value, packageID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

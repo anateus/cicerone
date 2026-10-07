@@ -93,7 +93,7 @@ func TestCachedRestartNeedsNoHTTPOrGitAndReturnsSameFeed(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(brewBin)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CICERONE_UPGRADE_MARKER", marker)
 	var actionOutput bytes.Buffer
-	if err := homebrew.NewClient(brewRunner).RunAction(ctx, homebrew.Action{Kind: homebrew.Upgrade, Package: "fixture", Type: domain.PackageFormula}, &actionOutput); err != nil {
+	if err := homebrew.NewClient(brewRunner).RunAction(ctx, homebrew.Action{Kind: homebrew.Upgrade, Packages: []domain.PackageID{"fixture"}, Type: domain.PackageFormula}, &actionOutput); err != nil {
 		t.Fatal(err)
 	}
 	if args := strings.TrimSpace(string(mustRead(t, marker))); args != "upgrade --formula fixture" {

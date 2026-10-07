@@ -40,6 +40,12 @@ type PackageGroupSource interface {
 	SetPackageGroup(context.Context, domain.PackageID, domain.PackageGroupID) error
 }
 
+// PackageGroupBatchSource assigns several packages in one transaction so a
+// multi-package move cannot land half-applied.
+type PackageGroupBatchSource interface {
+	SetPackagesGroup(context.Context, []domain.PackageID, domain.PackageGroupID) error
+}
+
 type FreshnessSource interface {
 	LatestFreshness(context.Context) (store.FreshnessStatus, error)
 }
@@ -166,11 +172,11 @@ type Model struct {
 	detailCancel                                                      context.CancelFunc
 	initialRefreshRunning                                             bool
 	manualRefreshRunning                                              bool
-	pendingAction                                                     *homebrew.Action
-	actionResult                                                      *homebrew.Action
-	actionRunning                                                     bool
-	actionOutput                                                      string
+	action                                                            *actionSession
+	actionSessionID                                                   uint64
 	actionAnchor                                                      domain.Anchor
+	marked                                                            map[domain.PackageID]markedPackage
+	markOrder                                                         []domain.PackageID
 	syncProgress                                                      map[string]SyncProgress
 	activeSync                                                        map[string]bool
 	searching                                                         bool
@@ -273,6 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.groups = m.partitionSeenGroups(msg.Groups)
 			m.seenBoundaryIndex = m.findSeenBoundary(m.groups)
+			m.refreshMarks()
 			restored := domain.RestoreSelection(anchor, m.groups)
 			m.selected, m.viewportOffset = restored.FallbackIndex, restored.ViewportOffset
 			m.clampSelection()
@@ -588,35 +595,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.light = msg.Light
 		m.syncViewports()
 	case ActionRequested:
-		if m.actionRunning || m.pendingAction != nil || m.actionResult != nil {
+		if m.action != nil || len(msg.Actions) == 0 {
 			return m, nil
 		}
-		action := msg.Action
-		m.pendingAction = &action
-		m.actionAnchor = m.anchor()
+		return m.startActionSession(msg.Actions), nil
 	case ActionConfirmed:
-		if m.pendingAction == nil || m.actionRunning {
-			return m, nil
-		}
-		action := *m.pendingAction
-		m.pendingAction, m.actionRunning, m.actionOutput = nil, true, ""
-		return m, m.runAction(action)
+		return m.confirmAction()
 	case ActionOutput:
-		if m.actionRunning {
-			m.actionOutput = msg.Output
+		if m.action != nil && m.action.phase == actionRunning && msg.Session == m.action.id && msg.Step == m.action.current {
+			session := *m.action
+			session.output = msg.Output
+			m.action = &session
 		}
 	case ActionFinished:
-		if !m.actionRunning {
+		return m.finishActionStep(msg)
+	case actionSpinnerTick:
+		if m.action == nil || m.action.phase != actionRunning || msg.Session != m.action.id {
 			return m, nil
 		}
-		m.actionRunning, m.actionOutput = false, msg.Output
-		if msg.Err != nil {
-			m.err, m.actionResult = msg.Err, &msg.Action
-			m.notification = "Error: " + msg.Err.Error()
-			return m, nil
-		}
-		m.actionOutput, m.actionResult = "", nil
-		return m, m.refreshInstalled()
+		session := *m.action
+		session.spinnerFrame++
+		m.action = &session
+		return m, m.actionSpinner(session.id)
 	case installedRefreshed:
 		if msg.Err != nil {
 			m.err = msg.Err
@@ -635,16 +635,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncViewports()
 	case groupAssignRequested:
 		source, ok := m.deps.Data.(PackageGroupSource)
-		if !ok || msg.PackageID == "" {
+		if !ok || len(msg.PackageIDs) == 0 {
 			return m, nil
 		}
-		packageID, groupID, newName, clear := msg.PackageID, msg.GroupID, msg.NewName, msg.Clear
+		packageIDs, groupID, newName, clear := msg.PackageIDs, msg.GroupID, msg.NewName, msg.Clear
 		return m, func() tea.Msg {
 			created := false
 			if newName != "" {
 				group, err := source.CreatePackageGroup(m.deps.Context, newName)
 				if err != nil {
-					return groupAssigned{PackageID: packageID, Err: err}
+					return groupAssigned{PackageIDs: packageIDs, Err: err}
 				}
 				groupID = group.ID
 				created = true
@@ -652,8 +652,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if clear {
 				groupID = 0
 			}
-			err := source.SetPackageGroup(m.deps.Context, packageID, groupID)
-			return groupAssigned{PackageID: packageID, Group: domain.PackageGroup{ID: groupID, Name: newName}, Created: created, Err: err}
+			var err error
+			if batch, ok := source.(PackageGroupBatchSource); ok {
+				err = batch.SetPackagesGroup(m.deps.Context, packageIDs, groupID)
+			} else {
+				for _, packageID := range packageIDs {
+					if err = source.SetPackageGroup(m.deps.Context, packageID, groupID); err != nil {
+						break
+					}
+				}
+			}
+			return groupAssigned{PackageIDs: packageIDs, Group: domain.PackageGroup{ID: groupID, Name: newName}, Created: created, Err: err}
 		}
 	case groupAssigned:
 		if msg.Err != nil {
@@ -673,7 +682,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Created {
 			m.rememberGroup(msg.Group)
 		}
-		m.applyPackageGroup(msg.PackageID, msg.Group.ID)
+		for _, packageID := range msg.PackageIDs {
+			m.applyPackageGroup(packageID, msg.Group.ID)
+		}
+		if len(msg.PackageIDs) > 1 {
+			// A batch assignment finishes the marked set's job.
+			m.clearMarks()
+			m.notification = fmt.Sprintf("Moved %d packages", len(msg.PackageIDs))
+			if msg.Group.ID == 0 {
+				m.notification += " to Ungrouped"
+			} else if name := m.userGroupName(msg.Group.ID); name != "" {
+				m.notification += " to " + name
+			}
+		}
 		m.stale, m.loading = true, true
 		m.feedRequestID++
 		return m, m.queryFeed(m.feedRequestID)
@@ -730,6 +751,9 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "q" {
 		return m, tea.Quit
 	}
+	if m.action != nil {
+		return m.handleActionKey(key)
+	}
 	if key.String() == "esc" {
 		if m.width >= narrowBreakpoint && m.focus == inspectorPane {
 			m.focus = feedPane
@@ -741,22 +765,12 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.syncViewports()
 			return m, nil
 		}
-		return m, tea.Quit
-	}
-	if m.pendingAction != nil {
-		switch key.String() {
-		case "y", "enter":
-			return m.Update(ActionConfirmed{})
-		case "n":
-			m.pendingAction = nil
+		if len(m.markOrder) > 0 {
+			m.clearMarks()
+			m.syncViewports()
+			return m, nil
 		}
-		return m, nil
-	}
-	if m.actionResult != nil {
-		return m, nil
-	}
-	if m.actionRunning {
-		return m, nil
+		return m, tea.Quit
 	}
 	readingInspector := (m.width >= narrowBreakpoint && m.focus == inspectorPane) || (m.width < narrowBreakpoint && m.detailOpen)
 	if readingInspector {
@@ -848,9 +862,12 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.inspectorViewport.SetYOffset(0)
 			m.syncViewports()
 		}
-	case " ":
+	case "space":
+		return m.toggleMark(), nil
+	case "e":
 		if m.hasSelection() {
 			m.expanded[m.groups[m.selected].ID] = !m.expanded[m.groups[m.selected].ID]
+			m.syncViewports()
 		}
 	case "1":
 		m.setPackageScope(true, false)
@@ -946,19 +963,6 @@ func validSearchScope(scope domain.SearchScope) bool {
 	default:
 		return false
 	}
-}
-
-func (m Model) requestSelectedAction() (tea.Model, tea.Cmd) {
-	if !m.hasSelection() {
-		return m, nil
-	}
-	e := m.selectedEvent()
-	kind := homebrew.Install
-	if e.Installed {
-		kind = homebrew.Upgrade
-	}
-	action := homebrew.Action{Kind: kind, Package: e.PackageID, Type: e.Type}
-	return m, func() tea.Msg { return ActionRequested{Action: action} }
 }
 
 func (m Model) selectFeedIndex(index int) (tea.Model, tea.Cmd) {
@@ -1084,12 +1088,14 @@ func (m *Model) applyPackageGroup(packageID domain.PackageID, groupID domain.Pac
 	}
 }
 
-// requestGroupModal opens the assignment modal for the selected package.
+// requestGroupModal opens the assignment modal for the marked packages, or
+// the selected package when nothing is marked.
 func (m Model) requestGroupModal() (tea.Model, tea.Cmd) {
-	if !m.hasSelection() {
+	targets := m.groupTargets()
+	if len(targets) == 0 {
 		return m, nil
 	}
-	modal := newGroupModal(m.userGroups, m.selectedPackageGroupID())
+	modal := newGroupModal(m.userGroups, m.targetGroupID(), targets)
 	m.groupAssign = &modal
 	return m, nil
 }

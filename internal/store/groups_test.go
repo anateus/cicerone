@@ -83,6 +83,44 @@ func TestSetPackageGroupFiltersFeedScopes(t *testing.T) {
 	}
 }
 
+func TestSetPackagesGroupMovesAndClearsSeveralPackages(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	group, err := s.CreatePackageGroup(ctx, "Editors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := s.UpsertEvents(ctx, []domain.UpdateEvent{
+		testEvent("one", "a", domain.EventVersion, now),
+		testEvent("two", "b", domain.EventVersion, now),
+		testEvent("three", "c", domain.EventVersion, now),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	count := func(filter domain.FeedFilter) int {
+		t.Helper()
+		groups, err := s.QueryFeed(ctx, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(groups)
+	}
+	inGroup := domain.FeedFilter{GroupScope: domain.GroupScopeUser, GroupTarget: group.ID}
+	if err := s.SetPackagesGroup(ctx, []domain.PackageID{"a", "b"}, group.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(inGroup); got != 2 {
+		t.Fatalf("group holds %d packages, want 2", got)
+	}
+	if err := s.SetPackagesGroup(ctx, []domain.PackageID{"a", "b"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got, ungrouped := count(inGroup), count(domain.FeedFilter{GroupScope: domain.GroupScopeUngrouped}); got != 0 || ungrouped != 3 {
+		t.Fatalf("after clear: group %d, ungrouped %d; want 0, 3", got, ungrouped)
+	}
+}
+
 func TestHiddenStatusExcludedFromAllAndShownInHiddenScope(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

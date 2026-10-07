@@ -18,7 +18,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		m.groupAssign = nil
 		return m, nil
 	}
-	if m.pendingAction != nil || m.actionRunning || m.actionResult != nil {
+	if m.action != nil {
 		width, height := m.width, m.height
 		if width <= 0 {
 			width = 80
@@ -26,18 +26,9 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		if height <= 0 {
 			height = 24
 		}
-		if m.pendingAction != nil {
-			yes, no := m.actionModalHit(mouse.X, mouse.Y, width, height-statusHeight)
-			if yes {
-				return m.Update(ActionConfirmed{})
-			}
-			if no {
-				m.pendingAction = nil
-			}
-		}
-		// A running or failed action owns the screen until it is complete or
-		// dismissed. Do not let clicks fall through to the feed beneath it.
-		return m, nil
+		// The action modal owns the screen until it is confirmed, finished, or
+		// dismissed. Clicks never fall through to the feed beneath it.
+		return m.handleActionClick(mouse.X, mouse.Y, width, height-statusHeight)
 	}
 	if mouse.Y == m.height-1 {
 		hints := m.footerHints(m.width, m.statusText())

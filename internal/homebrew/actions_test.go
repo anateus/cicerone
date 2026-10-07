@@ -23,14 +23,17 @@ func TestActionArgumentsAndValidation(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"formula install", Action{Kind: Install, Package: "homebrew/core/ripgrep", Type: domain.PackageFormula}, []string{"install", "--formula", "homebrew/core/ripgrep"}, false},
-		{"cask install", Action{Kind: Install, Package: "firefox@developer-edition", Type: domain.PackageCask}, []string{"install", "--cask", "firefox@developer-edition"}, false},
-		{"formula upgrade", Action{Kind: Upgrade, Package: "gcc+lib_1.2", Type: domain.PackageFormula}, []string{"upgrade", "--formula", "gcc+lib_1.2"}, false},
-		{"cask upgrade", Action{Kind: Upgrade, Package: "font.test", Type: domain.PackageCask}, []string{"upgrade", "--cask", "font.test"}, false},
-		{"leading dash", Action{Kind: Install, Package: "--help", Type: domain.PackageFormula}, nil, true},
-		{"space", Action{Kind: Install, Package: "bad name", Type: domain.PackageFormula}, nil, true},
-		{"semicolon", Action{Kind: Install, Package: "bad;name", Type: domain.PackageFormula}, nil, true},
-		{"empty", Action{Kind: Install, Package: "", Type: domain.PackageFormula}, nil, true},
+		{"formula install", Action{Kind: Install, Packages: []domain.PackageID{"homebrew/core/ripgrep"}, Type: domain.PackageFormula}, []string{"install", "--formula", "homebrew/core/ripgrep"}, false},
+		{"cask install", Action{Kind: Install, Packages: []domain.PackageID{"firefox@developer-edition"}, Type: domain.PackageCask}, []string{"install", "--cask", "firefox@developer-edition"}, false},
+		{"formula upgrade", Action{Kind: Upgrade, Packages: []domain.PackageID{"gcc+lib_1.2"}, Type: domain.PackageFormula}, []string{"upgrade", "--formula", "gcc+lib_1.2"}, false},
+		{"cask upgrade", Action{Kind: Upgrade, Packages: []domain.PackageID{"font.test"}, Type: domain.PackageCask}, []string{"upgrade", "--cask", "font.test"}, false},
+		{"leading dash", Action{Kind: Install, Packages: []domain.PackageID{"--help"}, Type: domain.PackageFormula}, nil, true},
+		{"space", Action{Kind: Install, Packages: []domain.PackageID{"bad name"}, Type: domain.PackageFormula}, nil, true},
+		{"semicolon", Action{Kind: Install, Packages: []domain.PackageID{"bad;name"}, Type: domain.PackageFormula}, nil, true},
+		{"empty", Action{Kind: Install, Packages: []domain.PackageID{""}, Type: domain.PackageFormula}, nil, true},
+		{"no packages", Action{Kind: Install, Type: domain.PackageFormula}, nil, true},
+		{"several formulae", Action{Kind: Install, Packages: []domain.PackageID{"ripgrep", "fd", "bat"}, Type: domain.PackageFormula}, []string{"install", "--formula", "ripgrep", "fd", "bat"}, false},
+		{"one bad name poisons the batch", Action{Kind: Upgrade, Packages: []domain.PackageID{"ok", "--force"}, Type: domain.PackageFormula}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -63,11 +66,34 @@ func TestActionArgumentsAndValidation(t *testing.T) {
 	}
 }
 
+func TestPlanActionsGroupsByVerbAndTypeInStableOrder(t *testing.T) {
+	got := PlanActions([]ActionTarget{
+		{Package: "firefox", Type: domain.PackageCask},
+		{Package: "git", Type: domain.PackageFormula, Installed: true},
+		{Package: "ripgrep", Type: domain.PackageFormula},
+		{Package: "iterm2", Type: domain.PackageCask, Installed: true},
+		{Package: "fd", Type: domain.PackageFormula},
+		{Package: "ripgrep", Type: domain.PackageFormula},
+	})
+	want := []Action{
+		{Kind: Install, Type: domain.PackageFormula, Packages: []domain.PackageID{"ripgrep", "fd"}},
+		{Kind: Upgrade, Type: domain.PackageFormula, Packages: []domain.PackageID{"git"}},
+		{Kind: Install, Type: domain.PackageCask, Packages: []domain.PackageID{"firefox"}},
+		{Kind: Upgrade, Type: domain.PackageCask, Packages: []domain.PackageID{"iterm2"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("plan = %#v\nwant %#v", got, want)
+	}
+	if PlanActions(nil) != nil {
+		t.Fatal("empty targets produced actions")
+	}
+}
+
 func TestRunActionStreamsBothOutputsIntoBoundedRetainedOutput(t *testing.T) {
 	client := NewClient(nil)
 	client.commandContext = helperCommand("large-output")
 	output := NewRetainedOutput()
-	if err := client.RunAction(context.Background(), Action{Kind: Install, Package: "ok", Type: domain.PackageFormula}, output); err != nil {
+	if err := client.RunAction(context.Background(), Action{Kind: Install, Packages: []domain.PackageID{"ok"}, Type: domain.PackageFormula}, output); err != nil {
 		t.Fatal(err)
 	}
 	got := output.String()
@@ -92,7 +118,7 @@ func TestRunActionCancellationInterruptsChild(t *testing.T) {
 	client.commandContext = helperCommand("interrupt")
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
-	err := client.RunAction(ctx, Action{Kind: Upgrade, Package: "ok", Type: domain.PackageCask}, io.Discard)
+	err := client.RunAction(ctx, Action{Kind: Upgrade, Packages: []domain.PackageID{"ok"}, Type: domain.PackageCask}, io.Discard)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want canceled", err)
 	}
@@ -109,7 +135,7 @@ func TestRunActionKillsAndReapsChildAfterGracePeriod(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
 	started := time.Now()
-	err := client.RunAction(ctx, Action{Kind: Upgrade, Package: "ok", Type: domain.PackageCask}, io.Discard)
+	err := client.RunAction(ctx, Action{Kind: Upgrade, Packages: []domain.PackageID{"ok"}, Type: domain.PackageCask}, io.Discard)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}

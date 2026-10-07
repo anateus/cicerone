@@ -122,30 +122,37 @@ type ToggleExpanded struct{}
 type SearchChanged struct{ Text string }
 type SetLightMode struct{ Light bool }
 
-type ActionRequested struct{ Action homebrew.Action }
+// ActionRequested opens confirmation for one or more planned brew commands.
+type ActionRequested struct{ Actions []homebrew.Action }
 type ActionConfirmed struct{}
-type ActionOutput struct{ Output string }
+type ActionOutput struct {
+	Session uint64
+	Step    int
+	Output  string
+}
 type ActionFinished struct {
-	Action homebrew.Action
-	Output string
-	Err    error
+	Session uint64
+	Step    int
+	Action  homebrew.Action
+	Output  string
+	Err     error
 }
 type installedRefreshed struct{ Err error }
 
-// groupAssignRequested assigns a package to a group. Either GroupID is set for
+// groupAssignRequested assigns packages to a group. Either GroupID is set for
 // an existing group, NewName names a group to create first, or Clear removes
-// the package's current membership.
+// the packages' current membership.
 type groupAssignRequested struct {
-	PackageID domain.PackageID
-	GroupID   domain.PackageGroupID
-	NewName   string
-	Clear     bool
+	PackageIDs []domain.PackageID
+	GroupID    domain.PackageGroupID
+	NewName    string
+	Clear      bool
 }
 type groupAssigned struct {
-	PackageID domain.PackageID
-	Group     domain.PackageGroup
-	Created   bool
-	Err       error
+	PackageIDs []domain.PackageID
+	Group      domain.PackageGroup
+	Created    bool
+	Err        error
 }
 type groupDeleteRequested struct{ GroupID domain.PackageGroupID }
 type groupDeleted struct {

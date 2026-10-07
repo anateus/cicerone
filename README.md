@@ -66,7 +66,7 @@ reconciled when that scan resumes.
 | `1`, `2`, `3` | Show Formulae, Casks, or both |
 | `,`, `.` | Move to the previous or next group in the group strip |
 | Mouse click on the group strip | Jump straight to a group |
-| `g` | Assign the selected package to a group, create a group, or remove a group |
+| `g` | Assign the selected package (or every marked package) to a group, create a group, or remove a group |
 | `/` | Enter package search; typing filters after a short debounce |
 | `r` | Force a newest-first repository refresh; active catch-up resumes from its durable checkpoint |
 | `tab` while searching | Broaden search through names, descriptions, changelogs, and READMEs |
@@ -77,17 +77,27 @@ reconciled when that scan resumes.
 | `tab` | Switch panes in a wide terminal |
 | `[`, `]` | Show the cached README or version changelog in package details |
 | `m` | Load 10 more GitHub releases when offered at the end of a release-backed changelog |
-| `space` | Expand or collapse a rolled-up event |
-| `a` | Request install or upgrade; a confirmation is always required |
-| `y`, `enter` | Confirm a pending Homebrew action |
-| `n`, `esc` | Cancel or close the current modal/detail |
+| `space` | Mark or unmark the selected package for a batch action |
+| `e` | Expand or collapse a rolled-up event |
+| `a` | Install or upgrade the marked packages, or the selected one when nothing is marked; a confirmation is always required |
+| `y`, `enter` | Confirm a pending Homebrew action, or close a finished one |
+| `tab` in the confirmation | Move focus between the confirm and Cancel buttons |
+| `esc` twice while Homebrew runs | Interrupt the running command and skip the remaining ones |
+| `n`, `esc` | Cancel or close the current modal/detail; with packages marked, `esc` clears the marks |
+| `q` | Quit from anywhere |
 | Mouse click / wheel | Select tabs and packages, activate visible controls, or scroll the pane under the pointer |
+
+## Marking packages
+
+Press `space` on a row to mark its package, and again to unmark it. Marked rows carry a `●` and a tint, the status line counts them, and marks persist while you move between tabs, groups, and searches. `esc` clears every mark.
+
+With packages marked, `a` acts on all of them instead of the selected row. Cicerone splits the batch into as few `brew` commands as it can (one per verb and package type, such as `brew install --formula ripgrep fd` and `brew upgrade --cask iterm2`), shows them in the confirmation, and runs them one after another while streaming the output. A failed command doesn't stop the rest. Packages that succeed are unmarked; failed ones stay marked so you can retry. `g` likewise moves every marked package into the chosen group in one transaction.
 
 ## Groups
 
 Each type tab carries a group strip: All, Ungrouped, then any groups you have created in creation order, then Starred and Hidden. The strip filters the feed inside the current type tab. All shows everything except hidden packages; Ungrouped shows only packages not in any group; Starred and Hidden collect packages carrying that marker. The active group is remembered across restarts.
 
-Press `g` on a selected package to open the group modal. It lists a new-group field first, then existing groups as radio options with the first group highlighted, and marks the package's current group. Enter assigns, typing on the new-group row names a group to create and assign, and Enter on the package's current group removes it from that group. Tab reaches the Remove button, which deletes the highlighted group and returns its members to Ungrouped. Starred and Hidden cannot be removed from the modal.
+Press `g` on a selected package to open the group modal. It lists a new-group field first, then existing groups as radio options with the first group highlighted, and marks the package's current group. Enter assigns, typing on the new-group row names a group to create and assign, and Enter on the package's current group removes it from that group. Tab reaches the Remove button, which deletes the highlighted group and returns its members to Ungrouped. Starred and Hidden cannot be removed from the modal. With packages marked, the modal lists them and assigns all of them at once; when they sit in different groups, no group reads as current and Enter always assigns.
 
 ## Feed behavior
 

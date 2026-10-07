@@ -116,6 +116,14 @@ func (m Model) statusText() string {
 			status += " · " + label
 		}
 	}
+	if count := len(m.markOrder); count > 0 {
+		label := fmt.Sprintf("%d marked", count)
+		if status == "Ready" {
+			status = label
+		} else {
+			status = label + " · " + status
+		}
+	}
 	return status
 }
 
@@ -244,6 +252,7 @@ type palette struct {
 	primary, selectedFG, selectedBG, statusFG, statusBG color.Color
 	canvasBG, feedBG, inspectorBG                       color.Color
 	alternateRowBG, raisedBG, recessedBG, tabBG         color.Color
+	markedFG, markedBG                                  color.Color
 	scrollTrack, scrollThumb                            color.Color
 }
 
@@ -254,6 +263,7 @@ func (m Model) palette() palette {
 			statusFG: lipgloss.Color("#2E2040"), statusBG: lipgloss.Color("#E9DFF5"), raisedBG: lipgloss.Color("#EEE5F7"),
 			canvasBG: lipgloss.Color("#F2ECF7"), feedBG: lipgloss.Color("#E8E3EF"), inspectorBG: lipgloss.Color("#F2ECF7"),
 			alternateRowBG: lipgloss.Color("#DED9E6"), recessedBG: lipgloss.Color("#F7F2FB"), tabBG: lipgloss.Color("#DDD0EB"),
+			markedFG: lipgloss.Color("#2E2040"), markedBG: lipgloss.Color("#CDBDE0"),
 			scrollTrack: lipgloss.Color("#CFC7D8"), scrollThumb: lipgloss.Color("#8D7A9D"),
 		}
 	}
@@ -262,6 +272,7 @@ func (m Model) palette() palette {
 		statusFG: lipgloss.Color("#EFE5FA"), statusBG: lipgloss.Color("#38264A"), raisedBG: lipgloss.Color("#3A3144"),
 		canvasBG: lipgloss.Color("#302A36"), feedBG: lipgloss.Color("#242A34"), inspectorBG: lipgloss.Color("#302A36"),
 		alternateRowBG: lipgloss.Color("#292F39"), recessedBG: lipgloss.Color("#2C303A"), tabBG: lipgloss.Color("#463653"),
+		markedFG: lipgloss.Color("#EFE5FA"), markedBG: lipgloss.Color("#43355A"),
 		scrollTrack: lipgloss.Color("#343A45"), scrollThumb: lipgloss.Color("#665775"),
 	}
 }
@@ -274,6 +285,13 @@ func (m Model) titleLine(text string, width int) string {
 func (m Model) selectedLine(text string) string {
 	p := m.palette()
 	return preserveOuterStyle(lipgloss.NewStyle().Bold(true).Foreground(p.selectedFG).Background(p.selectedBG).Render(text))
+}
+
+// markedLine tints a marked row between the plain and selected backgrounds
+// so marks stay visible while the cursor moves away.
+func (m Model) markedLine(text string, width int) string {
+	p := m.palette()
+	return preserveOuterStyle(lipgloss.NewStyle().Foreground(p.markedFG).Background(p.markedBG).Render(fitANSI(text, width)))
 }
 
 func (m Model) statusLine(text string, width int) string {
@@ -304,10 +322,12 @@ func (m Model) footerHints(width int, status string) []footerHint {
 	switch {
 	case m.searching:
 		hints = []footerHint{{"enter", "apply", 0}, {"tab", "broaden", 0}, {"esc", "done", 0}}
-	case m.pendingAction != nil:
-		hints = []footerHint{{"y/enter", "confirm", 0}, {"n", "cancel", 0}, {"q", "quit", 1}}
-	case m.actionRunning || m.actionResult != nil:
-		hints = []footerHint{{"q", "quit", 0}}
+	case m.action != nil && m.action.phase == actionConfirm:
+		hints = []footerHint{{"y/enter", "confirm", 0}, {"tab", "switch", 2}, {"n/esc", "cancel", 0}, {"q", "quit", 1}}
+	case m.action != nil && m.action.phase == actionRunning:
+		hints = []footerHint{{"esc esc", "interrupt", 0}}
+	case m.action != nil:
+		hints = []footerHint{{"enter", "close", 0}, {"q", "quit", 1}}
 	case (m.width >= narrowBreakpoint && m.focus == inspectorPane) || (m.width < narrowBreakpoint && m.detailOpen):
 		hints = []footerHint{
 			{"↑↓", "scroll", 0}, {"←→", "pan", 3}, {"enter", "feed", 0},
@@ -318,14 +338,15 @@ func (m Model) footerHints(width int, status string) []footerHint {
 		if m.deps.Refresh != nil {
 			hints = append(hints, footerHint{"r", "refresh", 1})
 		}
-		hints = append(hints, footerHint{"↑↓", "move", 0}, footerHint{"enter", "details", 1}, footerHint{"space", "expand", 3})
+		hints = append(hints, footerHint{"↑↓", "move", 0}, footerHint{"enter", "details", 1}, footerHint{"space", "mark", 2})
+		if len(m.markOrder) > 0 {
+			hints = append(hints, footerHint{"esc", "clear marks", 1})
+		} else if m.hasSelection() && len(m.groups[m.selected].Events) > 1 {
+			hints = append(hints, footerHint{"e", "expand", 3})
+		}
 		hints = append(hints, footerHint{",/.", "groups", 3})
-		if m.deps.Actions != nil && m.hasSelection() {
-			label := "install"
-			if m.selectedEvent().Installed {
-				label = "upgrade"
-			}
-			hints = append(hints, footerHint{"a", label, 0})
+		if m.deps.Actions != nil && len(m.actionTargets()) > 0 {
+			hints = append(hints, footerHint{"a", m.actionHintLabel(), 0})
 		}
 		hints = append(hints, footerHint{"q", "quit", 2})
 	}
