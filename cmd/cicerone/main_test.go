@@ -359,7 +359,7 @@ func TestHelpDocumentsKeysAndCacheBehavior(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("execute --help = %d, stderr %q", code, stderr.String())
 	}
-	for _, text := range []string{"h/j/k/l", "arrows", "r refreshes", "alt-shift-s", "q/esc", "30 days", "Library/Application Support/cicerone/cicerone.db", "cached"} {
+	for _, text := range []string{"h/j/k/l", "arrows", "r refreshes", "space marks", "e expands", "q quits", "30 days", "Library/Application Support/cicerone/cicerone.db", "cached"} {
 		if !strings.Contains(stdout.String(), text) {
 			t.Errorf("help missing %q:\n%s", text, stdout.String())
 		}

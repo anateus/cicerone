@@ -442,10 +442,10 @@ const helpText = `Cicerone — a cached Homebrew update feed
 
 Usage: cicerone [--help] [--plain]
 
-Keys: h/j/k/l or arrows navigate · / searches · r refreshes · enter opens details · space expands · a installs/upgrades · alt-s sets package status · alt-shift-s toggles snoozed packages · q/esc quit
+Keys: h/j/k/l or arrows navigate · / searches · r refreshes · enter opens details · space marks packages · e expands roll-ups · a installs/upgrades · g groups · , and . switch groups · q quits (esc also quits from the feed)
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
-The interactive feed appears after the first refreshed history batch; cached data remains available if refresh fails.
+The cached feed appears immediately and refreshes as history batches are indexed; cached data remains available if refresh fails.
 Database: ~/Library/Application Support/cicerone/cicerone.db
 Owned Git cache: ~/Library/Caches/cicerone
 `

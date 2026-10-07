@@ -1,6 +1,6 @@
 # Cicerone
 
-Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. On interactive startup it refreshes installed state and begins fetching and indexing Git history before showing the feed, falling back to the durable SQLite cache if synchronization fails.
+Cicerone is a macOS terminal feed for recent Homebrew formula and cask changes. It shows the cached feed immediately on startup, then fetches and indexes Homebrew's Git history in the background and refreshes the feed as new batches land. If synchronization fails, the durable SQLite cache keeps working. You can read changelogs and READMEs, sort packages into groups, and install or upgrade one package or a marked batch without leaving the terminal.
 
 ## Install
 
@@ -57,51 +57,89 @@ per-commit progress without advancing the completed cursor, so the next run can
 resume without reopening already checkpointed commits. Rewritten history is
 reconciled when that scan resumes.
 
+## The screen
+
+In a terminal at least 100 columns wide, the feed sits on the left and the inspector on the right. Narrower terminals show one at a time: `enter` or `l` opens the selected package's details full-screen, and `esc` or `h` returns to the feed.
+
+The top of the feed has the FORMULAE, CASKS, and ALL tabs, followed by the sync status, whether roll-up is on, and the active search. Sync status reads `Syncing homebrew-core…` while a repository is being indexed, `Sync <date>` after a successful run, or `Sync failed <date>`. A `! sync … old` warning appears once the last sync is more than a day old, and `! updates … behind` appears when the newest indexed update trails the last sync by more than a day. Under the tabs is the group strip (see [Groups](#groups)).
+
+Each feed row shows the package name, an update-cadence badge, and the version change, with the description underneath when the pane is wide enough. The badge is the package's average time between version updates, rounded to a readable rate such as `🐇 3×week`. The animal tracks speed: 🐆 daily or faster, 🐇 up to weekly, 🐄 up to about three months, and 🐢 slower than that. Packages without enough history show `last update: 5 days ago` or `last update unknown` instead. Starred packages carry `★`, hidden ones are dimmed, and marked ones carry `●` and a tint. Rows you saw in an earlier session drop below a `--- previously seen ---` divider, and catalog-only search matches come last.
+
+The inspector shows the selected package's type, installed version, last update, license, homepage, and repository tags, then README and CHANGELOG tabs for the cached documents.
+
+The bottom line shows status on the left (marked count, refresh and error messages, detail and catalog job counts) and the keys that work right now on the right. Low-priority hints drop off first on narrow terminals, and the `a` hint can be clicked.
+
 ## Keys
+
+Feed and navigation:
 
 | Key | Action |
 | --- | --- |
-| `j`, `↓` | Move down; scroll down while reading package details |
-| `k`, `↑` | Move up; scroll up while reading package details |
-| `1`, `2`, `3` | Show Formulae, Casks, or both |
-| `,`, `.` | Move to the previous or next group in the group strip |
-| Mouse click on the group strip | Jump straight to a group |
-| `g` | Assign the selected package (or every marked package) to a group, create a group, or remove a group |
-| `/` | Enter package search; typing filters after a short debounce |
-| `r` | Force a newest-first repository refresh; active catch-up resumes from its durable checkpoint |
-| `tab` while searching | Broaden search through names, descriptions, changelogs, and READMEs |
-| `enter`, `esc` while searching | Apply and leave search, or leave search input |
-| `h`, `←` / `l`, `→` | Switch toward package details; scroll horizontally while reading |
-| `enter` | Enter or leave package-detail reading mode |
-| `esc` | Leave package-detail reading mode; quit from the feed |
+| `j`, `↓` / `k`, `↑` | Move down or up; scroll while reading package details |
+| `h`, `←` / `l`, `→` | Move focus toward the feed or the details; scroll sideways while reading |
+| `enter` | Open package details, or return to the feed while reading them |
 | `tab` | Switch panes in a wide terminal |
-| `[`, `]` | Show the cached README or version changelog in package details |
-| `m` | Load 10 more GitHub releases when offered at the end of a release-backed changelog |
-| `space` | Mark or unmark the selected package for a batch action |
-| `e` | Expand or collapse a rolled-up event |
-| `a` | Install or upgrade the marked packages, or the selected one when nothing is marked; a confirmation is always required |
-| `y`, `enter` | Confirm a pending Homebrew action, or close a finished one |
-| `tab` in the confirmation | Move focus between the confirm and Cancel buttons |
-| `esc` twice while Homebrew runs | Interrupt the running command and skip the remaining ones |
-| `n`, `esc` | Cancel or close the current modal/detail; with packages marked, `esc` clears the marks |
+| `1`, `2`, `3` | Show formulae, casks, or both |
+| `,`, `.` | Move to the previous or next group in the group strip |
+| `/` | Search packages; typing filters after a short debounce |
+| `r` | Refresh both repositories now; any interrupted catch-up resumes from its checkpoint |
+| `e` | Expand or collapse a rolled-up package |
+| `space` | Mark or unmark the selected package |
+| `a` | Install or upgrade the marked packages, or the selected one if nothing is marked |
+| `g` | Open the group modal for the marked packages, or the selected one |
+| `esc` | Leave package details; with packages marked, clear the marks; otherwise quit |
 | `q` | Quit from anywhere |
-| Mouse click / wheel | Select tabs and packages, activate visible controls, or scroll the pane under the pointer |
+
+Package details:
+
+| Key | Action |
+| --- | --- |
+| `[`, `]` | Show the README (or homepage) or the changelog |
+| `t` | Show all repository tags, or collapse them |
+| `m` | Load 10 more GitHub releases when the changelog offers them |
+
+Search:
+
+| Key | Action |
+| --- | --- |
+| `tab` | Broaden the search: names, then descriptions, then changelogs, then READMEs |
+| `backspace`, `ctrl+u` | Delete a character, or clear the query |
+| `enter` | Apply the search and leave the input |
+| `esc` | Leave the input |
+
+Install and upgrade confirmation:
+
+| Key | Action |
+| --- | --- |
+| `y`, `enter` | Run the listed `brew` commands (`enter` uses whichever button has focus) |
+| `tab`, `←`, `→` | Move focus between the confirm and Cancel buttons |
+| `n`, `esc` | Cancel |
+| `esc` twice while Homebrew runs | Interrupt the running command and skip the rest |
+| `enter`, `esc` after a failure | Close the result |
+
+The mouse works too: click a tab, group, row, document tab, or modal button, and scroll the pane under the pointer with the wheel.
 
 ## Marking packages
 
-Press `space` on a row to mark its package, and again to unmark it. Marked rows carry a `●` and a tint, the status line counts them, and marks persist while you move between tabs, groups, and searches. `esc` clears every mark.
+Press `space` on a row to mark its package, and again to unmark it. Marked rows carry a `●` and a tint, the status line counts them, and marks persist while you move between tabs, groups, and searches. `esc` clears every mark. Marks last for the session only.
 
-With packages marked, `a` acts on all of them instead of the selected row. Cicerone splits the batch into as few `brew` commands as it can (one per verb and package type, such as `brew install --formula ripgrep fd` and `brew upgrade --cask iterm2`), shows them in the confirmation, and runs them one after another while streaming the output. A failed command doesn't stop the rest. Packages that succeed are unmarked; failed ones stay marked so you can retry. `g` likewise moves every marked package into the chosen group in one transaction.
+With packages marked, `a` acts on all of them instead of the selected row. Installed packages are upgraded and the rest are installed. Cicerone splits the batch into as few `brew` commands as it can (one per verb and package type, such as `brew install --formula ripgrep fd` and `brew upgrade --cask iterm2`) and lists them in the confirmation. Nothing runs until you confirm.
+
+Once confirmed, the commands run one after another. The modal shows a checklist of commands and the last lines of Homebrew's output. A failed command doesn't stop the rest. When everything succeeds the modal closes and the status line says what was installed and upgraded. Otherwise it stays open with the failed command's output until you close it. Packages that succeed are unmarked, failed ones stay marked so you can retry, and Cicerone refreshes installed state and the feed after any success.
+
+`g` likewise moves every marked package into the chosen group in one transaction.
 
 ## Groups
 
-Each type tab carries a group strip: All, Ungrouped, then any groups you have created in creation order, then Starred and Hidden. The strip filters the feed inside the current type tab. All shows everything except hidden packages; Ungrouped shows only packages not in any group; Starred and Hidden collect packages carrying that marker. The active group is remembered across restarts.
+Each type tab carries a group strip: All, Ungrouped, then any groups you have created in creation order, then Starred and Hidden. The strip filters the feed inside the current type tab. All shows everything except hidden packages; Ungrouped shows only packages not in any group; Starred and Hidden collect packages carrying that marker. The active group is remembered across restarts. When the strip is wider than the pane, it scrolls to keep the active group visible. The TUI currently has no key that stars or hides a package, so those two views only show markers set by earlier versions.
 
 Press `g` on a selected package to open the group modal. It lists a new-group field first, then existing groups as radio options with the first group highlighted, and marks the package's current group. Enter assigns, typing on the new-group row names a group to create and assign, and Enter on the package's current group removes it from that group. Tab reaches the Remove button, which deletes the highlighted group and returns its members to Ungrouped. Starred and Hidden cannot be removed from the modal. With packages marked, the modal lists them and assigns all of them at once; when they sit in different groups, no group reads as current and Enter always assigns.
 
 ## Feed behavior
 
-The default feed contains version events from the last 30 days. An installed package remains visible through its newest matching event even if that event is older than the horizon. Results are sorted newest-first with a stable identity tie-breaker. Roll-up occurs only for adjacent events of the same package after filters are applied, so changing a filter can change grouping.
+The default feed contains version events from the last 30 days. An installed package remains visible through its newest matching event even if that event is older than the horizon. Results are sorted newest-first with a stable identity tie-breaker. Roll-up occurs only for adjacent events of the same package after filters are applied, so changing a filter can change grouping. Starting a search turns roll-up on, and the setting is saved with your other feed preferences.
+
+Every event that appears in the feed is recorded as seen. On the next launch those rows move below the `previously seen` divider, so new updates stay at the top. Events that arrive during the current session stay above it until you restart.
 
 Search starts with package names. `tab` cycles through cumulative scopes: names; names and descriptions; those plus cached changelogs; then those plus cached READMEs. The local index uses prefix searches for unquoted terms (`rip gre` matches tokens beginning with `rip` and `gre`); quote the whole query for a non-prefix phrase search, such as `"rip grep"`. Cicerone also asks `brew search` for names and `brew search --desc` for descriptions.
 
