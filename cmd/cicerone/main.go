@@ -37,10 +37,6 @@ var openStore = openStorePreservingFailures
 var renameFile = os.Rename
 var storeOpen = store.Open
 
-type installedReader interface {
-	Installed(context.Context) ([]domain.InstalledPackage, error)
-}
-
 type catalogSearcher interface {
 	SearchCatalog(context.Context, string, bool) ([]domain.CatalogPackage, error)
 }
@@ -75,15 +71,6 @@ func searchScopeIncludesDescriptions(scope domain.SearchScope) bool {
 	default:
 		return false
 	}
-}
-
-type installedWriter interface {
-	SetInstalled(context.Context, []domain.InstalledPackage) error
-}
-
-type installedRefresher struct {
-	client installedReader
-	store  installedWriter
 }
 
 type changelogResolver interface {
@@ -215,14 +202,6 @@ func githubRepositoryURL(values ...string) string {
 	return ""
 }
 
-func (r installedRefresher) RefreshInstalled(ctx context.Context) error {
-	packages, err := r.client.Installed(ctx)
-	if err != nil {
-		return err
-	}
-	return r.store.SetInstalled(ctx, packages)
-}
-
 func (s syncStore) SyncFinished(ctx context.Context, source string, at time.Time, result syncer.Result, err error) error {
 	return s.Store.SyncFinished(ctx, source, at, store.SyncResult{Cursor: result.Cursor, Events: result.Events, Diagnostics: result.Diagnostics}, err)
 }
@@ -275,7 +254,7 @@ func run() (runErr error) {
 		runtime.coordinator.Start(runtime.ctx)
 		runtime.coordinator.WaitInitial()
 		return tui.InitialRefreshDone{}
-	}, runtime.brew,
+	}, runtime.brew, runtime.coordinator,
 		func(msg tea.Msg) {
 			if program != nil {
 				program.Send(msg)
@@ -297,10 +276,10 @@ func run() (runErr error) {
 	return runErr
 }
 
-func tuiDependencies(destination *store.Store, changelogs tui.ChangelogSource, ctx context.Context, onReady tea.Cmd, brew *homebrew.Client, send func(tea.Msg)) tui.Dependencies {
+func tuiDependencies(destination *store.Store, changelogs tui.ChangelogSource, ctx context.Context, onReady tea.Cmd, brew *homebrew.Client, installed tui.InstalledRefresher, send func(tea.Msg)) tui.Dependencies {
 	return tui.Dependencies{
 		Data: searchableFeedData{Store: destination, catalog: brew}, Changelog: changelogs, Context: ctx, OnReady: onReady,
-		Actions: brew, Installed: installedRefresher{client: brew, store: destination}, Send: send,
+		Actions: brew, Installed: installed, Send: send,
 	}
 }
 
@@ -442,7 +421,7 @@ const helpText = `Cicerone — a cached Homebrew update feed
 
 Usage: cicerone [--help] [--plain]
 
-Keys: h/j/k/l or arrows navigate · / searches · r refreshes · enter opens details · space marks packages · e expands roll-ups · a installs/upgrades · g groups · , and . switch groups · q quits (esc also quits from the feed)
+Keys: h/j/k/l or arrows navigate · / searches · r refreshes · s shows sync status · enter opens details · space marks packages · e expands roll-ups · a installs/upgrades · g groups · , and . switch groups · q quits (esc also quits from the feed)
 
 The feed shows 30 days of updates plus the newest matching event for every installed package.
 The cached feed appears immediately and refreshes as history batches are indexed; cached data remains available if refresh fails.

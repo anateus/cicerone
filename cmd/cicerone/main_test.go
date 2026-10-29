@@ -71,9 +71,17 @@ func TestRuntimeServicesWiresTUIDependenciesAndClosesIdempotently(t *testing.T) 
 	if runtime.store == nil || runtime.coordinator == nil || runtime.brew == nil || runtime.changelogs.cache == nil || runtime.changelogs.resolver == nil || runtime.changelogs.repository == nil {
 		t.Fatalf("runtime services not fully wired: %#v", runtime)
 	}
-	deps := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg { return nil }, runtime.brew, func(tea.Msg) {})
+	deps := tuiDependencies(runtime.store, runtime.changelogs, runtime.ctx, func() tea.Msg { return nil }, runtime.brew, runtime.coordinator, func(tea.Msg) {})
 	if deps.Actions == nil || deps.Installed == nil || deps.Changelog == nil {
 		t.Fatalf("TUI dependencies not fully wired: %#v", deps)
+	}
+	if deps.Installed != runtime.coordinator {
+		t.Fatalf("installed refresher = %T, want runtime coordinator", deps.Installed)
+	}
+	if _, ok := deps.Installed.(interface {
+		InstalledSnapshot() ([]domain.PackageID, bool)
+	}); !ok {
+		t.Fatalf("installed refresher %T does not provide authoritative snapshots", deps.Installed)
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
@@ -113,6 +121,50 @@ func TestPublishSyncEventPreservesQueueFallbackAndCancellation(t *testing.T) {
 	}
 	if event, ok := messages[10].(tui.SyncDone); !ok || event.Events != 3 || event.HistoricalFallback {
 		t.Fatalf("completion message=%#v", messages[10])
+	}
+}
+
+func TestPublishSyncEventPreservesSourcePhase(t *testing.T) {
+	var messages []tea.Msg
+	notify := func(msg tea.Msg) { messages = append(messages, msg) }
+	publishSyncEvent(notify, syncer.SyncPhase{Source: "homebrew-core", ID: 7, Phase: syncer.PhaseFetching})
+	publishSyncEvent(notify, syncer.SyncPhase{Source: "homebrew-cask", ID: 8, Phase: syncer.PhaseIndexing, HistoricalFallback: true})
+	if len(messages) != 4 {
+		t.Fatalf("messages=%#v, want mapped and raw events", messages)
+	}
+	if phase, ok := messages[0].(tui.SyncPhase); !ok || phase.Source != "homebrew-core" || phase.ID != 7 || phase.Phase != "fetching" || phase.HistoricalFallback {
+		t.Fatalf("fetching phase = %#v", messages[0])
+	}
+	if phase, ok := messages[2].(tui.SyncPhase); !ok || phase.Source != "homebrew-cask" || phase.ID != 8 || phase.Phase != "indexing" || !phase.HistoricalFallback {
+		t.Fatalf("history phase = %#v", messages[2])
+	}
+}
+
+func TestPublishSyncEventPreservesSetupSources(t *testing.T) {
+	var messages []tea.Msg
+	notify := func(msg tea.Msg) { messages = append(messages, msg) }
+	publishSyncEvent(notify, syncer.SyncStarted{Source: "installed", ID: 10})
+	publishSyncEvent(notify, syncer.SyncCommitted{Source: "installed", ID: 10})
+	publishSyncEvent(notify, syncer.SyncStarted{Source: "repositories", ID: 11})
+	publishSyncEvent(notify, syncer.SyncCommitted{Source: "repositories", ID: 11})
+	publishSyncEvent(notify, syncer.DatasetChanged{})
+	if len(messages) != 10 {
+		t.Fatalf("messages=%#v, want mapped and raw events", messages)
+	}
+	if started, ok := messages[0].(tui.SyncStarted); !ok || started.Source != "installed" || started.ID != 10 {
+		t.Fatalf("installed start = %#v", messages[0])
+	}
+	if done, ok := messages[2].(tui.SyncDone); !ok || done.Source != "installed" || done.ID != 10 {
+		t.Fatalf("installed completion = %#v", messages[2])
+	}
+	if started, ok := messages[4].(tui.SyncStarted); !ok || started.Source != "repositories" || started.ID != 11 {
+		t.Fatalf("repository start = %#v", messages[4])
+	}
+	if done, ok := messages[6].(tui.SyncDone); !ok || done.Source != "repositories" || done.ID != 11 {
+		t.Fatalf("repository completion = %#v", messages[6])
+	}
+	if _, ok := messages[8].(tui.DatasetChanged); !ok {
+		t.Fatalf("dataset publication = %#v", messages[8])
 	}
 }
 
@@ -198,11 +250,6 @@ func TestRuntimeCloseCancelsAllSubsystemsBeforeWaiting(t *testing.T) {
 
 func (f fakeInstalledClient) Installed(context.Context) ([]domain.InstalledPackage, error) {
 	return f.packages, f.err
-}
-
-type fakeInstalledStore struct {
-	packages []domain.InstalledPackage
-	err      error
 }
 
 type fakeChangelogResolver struct {
@@ -342,20 +389,30 @@ end`, "fixture 2.0", time.Now())
 	}
 }
 
-func (f *fakeInstalledStore) SetInstalled(_ context.Context, packages []domain.InstalledPackage) error {
-	f.packages = append([]domain.InstalledPackage(nil), packages...)
-	return f.err
-}
-
-func TestInstalledRefresherPersistsClientSnapshot(t *testing.T) {
-	want := []domain.InstalledPackage{{PackageID: "jq", Name: "jq", Version: "1.7", Type: domain.PackageFormula}}
-	destination := &fakeInstalledStore{}
-	refresher := installedRefresher{client: fakeInstalledClient{packages: want}, store: destination}
-	if err := refresher.RefreshInstalled(context.Background()); err != nil {
+func TestTUIDependenciesPersistInstalledSnapshotThroughCoordinator(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(destination.packages) != 1 || destination.packages[0] != want[0] {
-		t.Fatalf("persisted packages = %#v, want %#v", destination.packages, want)
+	defer destination.Close()
+	event := domain.UpdateEvent{ID: "jq-event", PackageID: "jq", Name: "jq", Type: domain.PackageFormula, Kind: domain.EventVersion, Time: time.Now()}
+	if err := destination.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	want := []domain.InstalledPackage{{PackageID: "jq", Name: "jq", Version: "1.7", Type: domain.PackageFormula}}
+	coordinator := syncer.New(syncer.Dependencies{Installed: fakeInstalledClient{packages: want}, Store: syncStore{destination}})
+	defer coordinator.Close()
+	deps := tuiDependencies(destination, nil, ctx, nil, nil, coordinator, nil)
+	if deps.Installed != coordinator {
+		t.Fatalf("installed refresher = %T, want coordinator", deps.Installed)
+	}
+	if err := deps.Installed.RefreshInstalled(ctx); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := destination.QueryFeed(ctx, domain.FeedFilter{Now: time.Now()})
+	if err != nil || len(groups) != 1 || !groups[0].Events[0].Installed {
+		t.Fatalf("persisted installed snapshot: groups=%#v err=%v", groups, err)
 	}
 }
 
@@ -399,14 +456,42 @@ func TestREADMECandidateURLsSupportCodeberg(t *testing.T) {
 	}
 }
 
-func TestInstalledRefresherDoesNotReplaceSnapshotWhenReadFails(t *testing.T) {
-	destination := &fakeInstalledStore{packages: []domain.InstalledPackage{{PackageID: "old"}}}
-	refresher := installedRefresher{client: fakeInstalledClient{err: errors.New("offline")}, store: destination}
-	if err := refresher.RefreshInstalled(context.Background()); err == nil {
-		t.Fatal("RefreshInstalled error = nil, want offline error")
+func TestTUIDependenciesKeepInstalledSnapshotWhenCoordinatorReadFails(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := destination.packages[0].PackageID; got != "old" {
-		t.Fatalf("stored package = %q, want old snapshot", got)
+	defer destination.Close()
+	old := domain.InstalledPackage{PackageID: "old", Name: "old", Type: domain.PackageFormula}
+	if err := destination.SetInstalled(ctx, []domain.InstalledPackage{old}); err != nil {
+		t.Fatal(err)
+	}
+	event := domain.UpdateEvent{ID: "old-event", PackageID: "old", Name: "old", Type: domain.PackageFormula, Kind: domain.EventVersion, Time: time.Now()}
+	if err := destination.UpsertEvents(ctx, []domain.UpdateEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("offline")
+	coordinator := syncer.New(syncer.Dependencies{Installed: fakeInstalledClient{err: wantErr}, Store: syncStore{destination}})
+	defer coordinator.Close()
+	deps := tuiDependencies(destination, nil, ctx, nil, nil, coordinator, nil)
+	if err := deps.Installed.RefreshInstalled(ctx); !errors.Is(err, wantErr) {
+		t.Fatalf("RefreshInstalled error = %v, want %v", err, wantErr)
+	}
+	groups, err := destination.QueryFeed(ctx, domain.FeedFilter{Now: time.Now()})
+	if err != nil || len(groups) != 1 || !groups[0].Events[0].Installed {
+		t.Fatalf("previous installed snapshot lost: groups=%#v err=%v", groups, err)
+	}
+}
+
+func TestTUIDependenciesPreserveInstalledRefreshCancellation(t *testing.T) {
+	coordinator := syncer.New(syncer.Dependencies{Installed: fakeInstalledClient{}})
+	defer coordinator.Close()
+	deps := tuiDependencies(nil, nil, context.Background(), nil, nil, coordinator, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := deps.Installed.RefreshInstalled(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RefreshInstalled error = %v, want context canceled", err)
 	}
 }
 
@@ -697,7 +782,9 @@ func TestProductionTUIDependenciesWireActionsInstalledAndSend(t *testing.T) {
 	brew := homebrew.NewClient(execx.NewRunner())
 	var sent tea.Msg
 	loader := changelogLoader{cache: destination}
-	deps := tuiDependencies(destination, loader, context.Background(), nil, brew, func(msg tea.Msg) { sent = msg })
+	coordinator := syncer.New(syncer.Dependencies{})
+	defer coordinator.Close()
+	deps := tuiDependencies(destination, loader, context.Background(), nil, brew, coordinator, func(msg tea.Msg) { sent = msg })
 	if deps.Data == nil || deps.Changelog == nil || deps.Actions == nil || deps.Installed == nil || deps.Send == nil {
 		t.Fatalf("incomplete production dependencies: %#v", deps)
 	}

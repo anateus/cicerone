@@ -453,9 +453,10 @@ func TestFeedTabsShowLatestSyncAndFreshnessWarnings(t *testing.T) {
 func TestSynchronizationIsVisibleBeforeFirstScanProgressAndFailureReplacesSyncNever(t *testing.T) {
 	now := time.Date(2026, 8, 7, 17, 0, 0, 0, time.Local)
 	m := NewModel(Dependencies{Now: func() time.Time { return now }})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
 	m = update(t, m, SyncStarted{Source: "homebrew-core"})
-	if got := m.freshnessText(); got != "Syncing homebrew-core…" {
-		t.Fatalf("active freshness = %q", got)
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "Sync: 1 active") {
+		t.Fatalf("active sync not in footer: %q", got)
 	}
 	m = update(t, m, SyncDone{Source: "homebrew-core"})
 	m = update(t, m, FreshnessLoaded{RequestID: m.freshnessRequestID, Status: store.FreshnessStatus{
@@ -468,22 +469,24 @@ func TestSynchronizationIsVisibleBeforeFirstScanProgressAndFailureReplacesSyncNe
 
 func TestSyncQueueAndFallbackLifecycleStayDistinct(t *testing.T) {
 	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 100, Height: 20})
 	m = update(t, m, SyncQueued{Source: "core", ID: 1, HistoricalFallback: true})
-	if got := m.freshnessText(); got != "Queued core…" || len(m.activeSync) != 0 {
-		t.Fatalf("queued freshness=%q active=%v", got, m.activeSync)
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "Sync: 1 queued") || len(m.activeSync) != 0 {
+		t.Fatalf("queued status=%q active=%v", got, m.activeSync)
 	}
+	m = update(t, m, key("s"))
 	m = update(t, m, SyncStarted{Source: "core", ID: 1, HistoricalFallback: true})
 	m = update(t, m, SyncQueued{Source: "core", ID: 2})
-	if got := m.freshnessText(); !strings.Contains(got, "Indexing history core") || !strings.Contains(got, "Queued core") {
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "Active · core · history indexing") || !strings.Contains(got, "Queued · core · refresh") {
 		t.Fatalf("fallback and queued refresh not both visible: %q", got)
 	}
 	m = update(t, m, SyncDone{Source: "core", ID: 1, HistoricalFallback: true, Reason: "yield for queued refresh at durable checkpoint"})
-	if got := m.freshnessText(); got != "Queued core…" || !strings.Contains(m.notification, "yield for queued refresh") {
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "Queued · core · refresh") || !strings.Contains(m.notification, "yield for queued refresh") {
 		t.Fatalf("yield status=%q notification=%q", got, m.notification)
 	}
 	m = update(t, m, SyncStarted{Source: "core", ID: 2})
 	m = update(t, m, SyncDone{Source: "core", ID: 1, HistoricalFallback: true, Reason: "shutdown"})
-	if got := m.freshnessText(); got != "Syncing core…" {
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "Active · core · synchronizing") {
 		t.Fatalf("old completion stopped newer refresh: %q", got)
 	}
 	m = update(t, m, SyncDone{Source: "core", ID: 2, Events: 3})
@@ -492,8 +495,8 @@ func TestSyncQueueAndFallbackLifecycleStayDistinct(t *testing.T) {
 	}
 	m = update(t, m, SyncStarted{Source: "core", ID: 3, HistoricalFallback: true})
 	m = update(t, m, SyncProgress{Source: "core", ID: 3, HistoricalFallback: true, Commits: 10, Batches: 1})
-	if !strings.Contains(m.notification, "core history") {
-		t.Fatalf("fallback progress not labeled: %q", m.notification)
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "Active · core · history indexing") || !strings.Contains(got, "10 commits") {
+		t.Fatalf("fallback progress not labeled: %q", got)
 	}
 	m = update(t, m, SyncDone{Source: "core", ID: 3, HistoricalFallback: true, Err: errors.New("blob read failed")})
 	if !strings.Contains(m.notification, "historical indexing failed: blob read failed") {
@@ -1002,6 +1005,35 @@ func TestMouseWheelScrollsFeedAndInspectorViewports(t *testing.T) {
 	}
 }
 
+func TestSyncHeaderPreservesManualMouseScroll(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
+	ids := make([]string, 30)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("row-%02d", i)
+	}
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups(ids...)})
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 1})
+	for range 4 {
+		m = update(t, m, tea.MouseWheelMsg{X: 5, Y: 10, Button: tea.MouseWheelDown})
+	}
+	offset := m.viewportOffset
+	if offset == 0 || m.selected != 0 {
+		t.Fatalf("wheel did not leave the selected row offscreen: offset=%d selected=%d", offset, m.selected)
+	}
+	for _, msg := range []tea.Msg{
+		SyncQueued{Source: "homebrew-core", ID: 2},
+		SyncStarted{Source: "homebrew-cask", ID: 3},
+		SyncPhase{Source: "homebrew-core", ID: 1, Phase: "fetching"},
+		SyncDone{Source: "homebrew-core", ID: 1},
+	} {
+		m = update(t, m, msg)
+		if m.viewportOffset != offset {
+			t.Fatalf("%T moved manual scroll from %d to %d", msg, offset, m.viewportOffset)
+		}
+	}
+}
+
 func TestNestedStylesPreserveSurfaceAndSelectionBackgrounds(t *testing.T) {
 	m := NewModel(Dependencies{})
 	inner := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#4FBF79")).Render("changed")
@@ -1215,8 +1247,9 @@ func TestSyncProgressRendersAuthoritativeCounts(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("determinate sync progress scheduled animation")
 	}
-	view := m.render()
-	for _, want := range []string{"homebrew-core", "100 commits scanned", "8 updates", "1 batches"} {
+	m = update(t, m, key("s"))
+	view := ansi.Strip(m.render())
+	for _, want := range []string{"homebrew-core", "100 commits", "8 updates", "1 batches"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q: %q", want, view)
 		}
@@ -1228,6 +1261,174 @@ func TestSyncProgressRendersAuthoritativeCounts(t *testing.T) {
 	m = update(t, m, SyncDone{Source: "homebrew-core"})
 	if len(m.activeSync) != 0 {
 		t.Fatalf("active=%v", m.activeSync)
+	}
+}
+
+func TestSyncWorkKeepsPerSourceProgressAcrossConcurrentRuns(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 1})
+	m = update(t, m, SyncProgress{Source: "homebrew-core", ID: 1, Commits: 123, Events: 6, Batches: 3})
+	m = update(t, m, SyncStarted{Source: "homebrew-cask", ID: 2, HistoricalFallback: true})
+	m = update(t, m, SyncProgress{Source: "homebrew-cask", ID: 2, HistoricalFallback: true, Commits: 47, Events: 4, Batches: 2})
+	m = update(t, m, key("s"))
+	view := ansi.Strip(m.render())
+	for _, want := range []string{
+		"homebrew-core · indexing",
+		"123 commits · 6 updates · 3 batches",
+		"homebrew-cask · history indexing",
+		"47 commits · 4 updates · 2 batches",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("sync modal missing %q:\n%s", want, view)
+		}
+	}
+
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 3})
+	m = update(t, m, SyncProgress{Source: "homebrew-core", ID: 1, Commits: 999, Events: 99, Batches: 9})
+	m = update(t, m, SyncDone{Source: "homebrew-core", ID: 1})
+	view = ansi.Strip(m.render())
+	if !strings.Contains(view, "homebrew-core · synchronizing") || strings.Contains(view, "999 commits") || strings.Contains(view, "123 commits") {
+		t.Fatalf("old progress replaced a new run:\n%s", view)
+	}
+	if !strings.Contains(view, "homebrew-cask · history indexing") || !strings.Contains(view, "47 commits") {
+		t.Fatalf("other source progress disappeared:\n%s", view)
+	}
+}
+
+func TestSyncPhasesShowFetchAndIndexPerSourceBeforeProgress(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 1})
+	m = update(t, m, SyncStarted{Source: "homebrew-cask", ID: 2})
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 1, Phase: "fetching"})
+	m = update(t, m, SyncPhase{Source: "homebrew-cask", ID: 2, Phase: "indexing"})
+	m = update(t, m, key("s"))
+	view := ansi.Strip(m.render())
+	for _, want := range []string{"homebrew-core · fetching/checking", "homebrew-cask · indexing"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q before first batch:\n%s", want, view)
+		}
+	}
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 1, Phase: "indexing"})
+	m = update(t, m, SyncProgress{Source: "homebrew-core", ID: 1, Commits: 9, Events: 2, Batches: 1})
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "homebrew-core · indexing") || !strings.Contains(got, "9 commits · 2 updates") {
+		t.Fatalf("indexing progress not visible: %s", got)
+	}
+
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 3})
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 3, Phase: "fetching"})
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 1, Phase: "indexing"})
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 0, Phase: "indexing"})
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 3, Phase: "indexing", HistoricalFallback: true})
+	m = update(t, m, SyncDone{Source: "homebrew-core", ID: 1})
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "homebrew-core · fetching/checking") {
+		t.Fatalf("stale phase or completion replaced current fetch: %s", got)
+	}
+	m = update(t, m, SyncDone{Source: "homebrew-core", ID: 3})
+	m = update(t, m, SyncPhase{Source: "homebrew-core", ID: 3, Phase: "indexing"})
+	if m.activeSync["homebrew-core"] || m.syncPhase["homebrew-core"] != "" {
+		t.Fatalf("completed phase revived source: active=%v phases=%v", m.activeSync, m.syncPhase)
+	}
+
+	m = update(t, m, SyncStarted{Source: "homebrew-cask", ID: 4, HistoricalFallback: true})
+	m = update(t, m, SyncPhase{Source: "homebrew-cask", ID: 4, Phase: "indexing", HistoricalFallback: true})
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "homebrew-cask · history indexing") {
+		t.Fatalf("historical phase mislabeled: %s", got)
+	}
+}
+
+func TestSetupPhasesAreVisibleUntilTheirOwnCompletion(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
+	m = update(t, m, SyncStarted{Source: "installed", ID: 1})
+	m = update(t, m, SyncStarted{Source: "repositories", ID: 2})
+	m = update(t, m, key("s"))
+	view := ansi.Strip(m.render())
+	for _, want := range []string{"refreshing installed packages", "preparing repositories"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("sync modal missing %q:\n%s", want, view)
+		}
+	}
+	m = update(t, m, SyncDone{Source: "installed", ID: 1})
+	view = ansi.Strip(m.render())
+	if strings.Contains(view, "refreshing installed packages") || !strings.Contains(view, "preparing repositories") {
+		t.Fatalf("setup completion changed the wrong phase:\n%s", view)
+	}
+}
+
+func TestSavedFiltersAndCachedRowsRemainVisibleDuringSync(t *testing.T) {
+	data := &recordingData{fakeData: fakeData{groups: groups("cached")}}
+	m := NewModel(Dependencies{Data: data})
+	m = update(t, m, WindowSize{Width: 120, Height: 20})
+	filter := domain.FeedFilter{
+		Horizon: 30 * 24 * time.Hour, Kinds: map[domain.EventKind]bool{domain.EventVersion: true},
+		Types: map[domain.PackageType]bool{domain.PackageFormula: true}, GroupScope: domain.GroupScopeUngrouped,
+		Query: "q", Search: domain.SearchNames,
+	}
+	next, command := m.Update(PreferencesLoaded{Filter: filter})
+	m = next.(Model)
+	m = update(t, m, feedResult(t, command))
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 1})
+	m = update(t, m, SyncProgress{Source: "homebrew-core", ID: 1, Commits: 8, Events: 2, Batches: 1})
+	m = update(t, m, DatasetChanged{})
+
+	view := ansi.Strip(m.render())
+	for _, want := range []string{"search names: \"q\"", "events: version", "last 30d", "[Ungrouped]", "pkg-cached", "Sync: 1 active"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+	if m.filter.Query != "q" || m.filter.GroupScope != domain.GroupScopeUngrouped ||
+		!m.filter.Types[domain.PackageFormula] || m.filter.Types[domain.PackageCask] ||
+		data.queried.Query != "q" || data.queried.GroupScope != domain.GroupScopeUngrouped {
+		t.Fatalf("sync changed saved filters: current=%#v queried=%#v", m.filter, data.queried)
+	}
+
+	m = update(t, m, WindowSize{Width: 72, Height: 10})
+	if !strings.Contains(ansi.Strip(m.render()), "pkg-cached") || m.feedViewport.Height() < 1 {
+		t.Fatalf("supplemental status crowded out cached rows: height=%d\n%s", m.feedViewport.Height(), ansi.Strip(m.render()))
+	}
+}
+
+func TestSyncHeaderKeepsCachedSelectionAndGroupClicksUsable(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 72, Height: 12})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: groups("a", "b", "c")})
+	m = update(t, m, key("j"))
+	m = update(t, m, SyncStarted{Source: "homebrew-core", ID: 1})
+	m = update(t, m, SyncStarted{Source: "homebrew-cask", ID: 2})
+	m = update(t, m, SyncStarted{Source: "installed", ID: 3})
+	if got := ansi.Strip(m.render()); !strings.Contains(got, "pkg-b") {
+		t.Fatalf("selected cached row hidden by sync header:\n%s", got)
+	}
+	m = update(t, m, tea.MouseClickMsg{X: 7, Y: m.feedHeaderRows() - 2, Button: tea.MouseLeft})
+	if m.filter.GroupScope != domain.GroupScopeUngrouped {
+		t.Fatalf("group click missed after header grew: %#v", m.filter)
+	}
+}
+
+func TestNoSelectedPackageTypesIsShownAsAFilter(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
+	m = update(t, m, ToggleTypeFilter{Type: domain.PackageFormula})
+	if got := ansi.Strip(m.renderFeedHeader(80)); !strings.Contains(got, "type: none") {
+		t.Fatalf("empty package type filter not visible:\n%s", got)
+	}
+}
+
+func TestEmptySavedTypeFilterRemainsUnrestricted(t *testing.T) {
+	data := &recordingData{}
+	m := NewModel(Dependencies{Data: data})
+	next, command := m.Update(PreferencesLoaded{Filter: domain.FeedFilter{Types: map[domain.PackageType]bool{}}})
+	m = next.(Model)
+	_ = feedResult(t, command)
+	if len(m.filter.Types) != 0 || len(data.queried.Types) != 0 {
+		t.Fatalf("empty saved type filter changed: current=%#v queried=%#v", m.filter.Types, data.queried.Types)
+	}
+	lines := strings.Split(ansi.Strip(m.feedControls(80)), "\n")
+	if len(lines) < 3 || !strings.Contains(lines[2], "╯     ╰") {
+		t.Fatalf("unrestricted type filter did not select All: %q", lines)
 	}
 }
 

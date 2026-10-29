@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,8 @@ import (
 type fakePlainRuntime struct {
 	out           *bytes.Buffer
 	queries       [][]domain.FeedGroup
+	filter        domain.FeedFilter
+	queryFilters  []domain.FeedFilter
 	notifications []tea.Msg
 	queryCount    int
 	started       bool
@@ -33,11 +36,12 @@ type failOnceStatusWriter struct {
 }
 
 type streamingPlainRuntime struct {
-	mu          sync.Mutex
-	queryCount  int
-	stream      chan tea.Msg
-	release     chan struct{}
-	incremental chan struct{}
+	mu            sync.Mutex
+	queryCount    int
+	stream        chan tea.Msg
+	release       chan struct{}
+	notifications []tea.Msg
+	incremental   chan struct{}
 }
 
 type synchronizedBuffer struct {
@@ -51,6 +55,45 @@ type realStorePlainRuntime struct {
 	published chan struct{}
 	release   chan struct{}
 	err       error
+}
+
+type phasePlainSource struct {
+	refreshStarted chan struct{}
+	refreshRelease chan struct{}
+	indexStarted   chan struct{}
+	indexRelease   chan struct{}
+}
+
+func (s *phasePlainSource) Name() string { return "core" }
+func (s *phasePlainSource) Refresh(ctx context.Context) error {
+	close(s.refreshStarted)
+	select {
+	case <-s.refreshRelease:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (s *phasePlainSource) Index(ctx context.Context, req syncer.Request) (syncer.Result, error) {
+	close(s.indexStarted)
+	select {
+	case <-s.indexRelease:
+		return syncer.Result{Events: 1}, nil
+	case <-ctx.Done():
+		return syncer.Result{}, ctx.Err()
+	}
+}
+
+type phaseErrorWriter struct {
+	buffer *bytes.Buffer
+	err    error
+}
+
+func (w *phaseErrorWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("· fetching/checking…")) {
+		return 0, w.err
+	}
+	return w.buffer.Write(p)
 }
 
 type slowPlainSource struct {
@@ -166,6 +209,9 @@ func (r *streamingPlainRuntime) StartSync(context.Context) {
 func (r *streamingPlainRuntime) WaitSync()                                { <-r.release }
 func (r *streamingPlainRuntime) plainNotificationChannel() <-chan tea.Msg { return r.stream }
 func (r *streamingPlainRuntime) plainNotifications() []tea.Msg {
+	if r.notifications != nil {
+		return r.notifications
+	}
 	return []tea.Msg{syncer.SyncStarted{Source: "homebrew-core"}, syncer.SyncCommitted{Source: "homebrew-core", Result: syncer.Result{Events: 1}}}
 }
 
@@ -234,6 +280,166 @@ func TestRunPlainStreamsFallbackFailureBeforeOtherWorkCompletes(t *testing.T) {
 	}
 }
 
+func TestRunPlainStreamsNormalLifecycleAndDeduplicatesRecap(t *testing.T) {
+	wantErr := errors.New("network unavailable")
+	events := []tea.Msg{
+		syncer.SyncStarted{Source: "core", ID: 1},
+		syncer.SyncFailed{Source: "core", ID: 1, Err: wantErr},
+		syncer.SyncStarted{Source: "core", ID: 2},
+		syncer.SyncCommitted{Source: "core", ID: 2, Result: syncer.Result{Events: 3}},
+		syncer.SyncStarted{Source: "core", ID: 1, HistoricalFallback: true},
+		syncer.SyncCancelled{Source: "core", ID: 1, HistoricalFallback: true, Reason: "paused"},
+		syncer.SyncStarted{Source: "cask", ID: 1},
+		syncer.SyncCancelled{Source: "cask", ID: 1, Reason: "stopped"},
+		syncer.SyncStarted{Source: "installed", ID: 3},
+		syncer.SyncCommitted{Source: "installed", ID: 3},
+	}
+	runtime := &streamingPlainRuntime{
+		stream: make(chan tea.Msg, len(events)+1), release: make(chan struct{}),
+		incremental: make(chan struct{}), notifications: events,
+	}
+	for _, event := range events {
+		runtime.stream <- event
+	}
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(context.Background(), runtime, &out) }()
+	select {
+	case <-runtime.incremental:
+	case <-time.After(time.Second):
+		t.Fatal("incremental feed was not queried")
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Synchronizing core…", "core synchronization failed · network unavailable",
+		"core synchronized · 3 updates", "Indexing core history…",
+		"core historical indexing canceled · paused", "cask synchronization canceled · stopped",
+		"Preparing installed…", "installed preparation complete",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing live %q: %s", want, got)
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("completed before release: %v", err)
+	default:
+	}
+	close(runtime.release)
+	err := <-done
+	if !errors.Is(err, wantErr) || strings.Count(err.Error(), wantErr.Error()) != 1 {
+		t.Fatalf("runPlain error=%v, want failure once", err)
+	}
+	got = out.String()
+	for _, check := range []struct {
+		text  string
+		count int
+	}{
+		{"Synchronizing core…", 2},
+		{"core synchronization failed · network unavailable", 1},
+		{"core synchronized · 3 updates", 1},
+		{"Indexing core history…", 1},
+		{"core historical indexing canceled · paused", 1},
+		{"Synchronizing cask…", 1},
+		{"cask synchronization canceled · stopped", 1},
+		{"Preparing installed…", 1},
+		{"installed preparation complete", 1},
+	} {
+		if count := strings.Count(got, check.text); count != check.count {
+			t.Errorf("%q appears %d times, want %d: %s", check.text, count, check.count, got)
+		}
+	}
+}
+
+func TestRunPlainRecapsCompanionFailureAfterLiveCancellation(t *testing.T) {
+	wantErr := errors.New("canceled during setup")
+	start := syncer.SyncStarted{Source: "core", ID: 5}
+	cancel := syncer.SyncCancelled{Source: "core", ID: 5, Reason: "shutdown"}
+	failure := syncer.SyncFailed{Source: "core", ID: 5, Err: wantErr}
+	runtime := &streamingPlainRuntime{
+		stream: make(chan tea.Msg, 3), release: make(chan struct{}),
+		incremental: make(chan struct{}), notifications: []tea.Msg{start, cancel, failure},
+	}
+	runtime.stream <- start
+	runtime.stream <- cancel
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(context.Background(), runtime, &out) }()
+	select {
+	case <-runtime.incremental:
+	case <-time.After(time.Second):
+		t.Fatal("incremental feed was not queried")
+	}
+	close(runtime.release)
+	err := <-done
+	if !errors.Is(err, wantErr) || strings.Count(err.Error(), wantErr.Error()) != 1 {
+		t.Fatalf("runPlain error=%v, want companion failure once", err)
+	}
+	for _, text := range []string{
+		"Synchronizing core…",
+		"core synchronization canceled · shutdown",
+		"core synchronization failed · canceled during setup",
+	} {
+		if count := strings.Count(out.String(), text); count != 1 {
+			t.Errorf("%q appears %d times, want once: %s", text, count, out.String())
+		}
+	}
+}
+
+func TestRunPlainRecapsSequentialRuns(t *testing.T) {
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{
+		out: &out, queries: [][]domain.FeedGroup{nil, nil},
+		notifications: []tea.Msg{
+			syncer.SyncStarted{Source: "core", ID: 1},
+			syncer.SyncCommitted{Source: "core", ID: 1, Result: syncer.Result{Events: 1}},
+			syncer.SyncStarted{Source: "core", ID: 2},
+			syncer.SyncCommitted{Source: "core", ID: 2, Result: syncer.Result{Events: 2}},
+		},
+	}
+	if err := runPlain(context.Background(), runtime, &out); err != nil {
+		t.Fatal(err)
+	}
+	want := "Cached feed\nSynchronizing core…\ncore synchronized · 1 updates\n" +
+		"Synchronizing core…\ncore synchronized · 2 updates\nRefreshed feed\n"
+	if got := out.String(); got != want {
+		t.Fatalf("output mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRunPlainShowsSavedFiltersWithoutChangingQueries(t *testing.T) {
+	filter := domain.FeedFilter{
+		Types:      map[domain.PackageType]bool{domain.PackageCask: true},
+		GroupScope: domain.GroupScopeUser, GroupTarget: 42,
+		Kinds: map[domain.EventKind]bool{domain.EventRevision: true},
+		Query: "editor", Search: domain.SearchChangelogs, Horizon: 48 * time.Hour,
+	}
+	wantFilter := filter
+	wantFilter.Types = map[domain.PackageType]bool{domain.PackageCask: true}
+	wantFilter.Kinds = map[domain.EventKind]bool{domain.EventRevision: true}
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{out: &out, filter: filter, queries: [][]domain.FeedGroup{nil, nil}}
+	if err := runPlain(context.Background(), runtime, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, visible := range []string{"cask", "42", "revision", "editor", "changelogs"} {
+		if !strings.Contains(out.String(), visible) {
+			t.Errorf("plain feed does not show active filter %q:\n%s", visible, out.String())
+		}
+	}
+	if len(runtime.queryFilters) != 2 {
+		t.Fatalf("query count=%d, want 2", len(runtime.queryFilters))
+	}
+	for _, got := range runtime.queryFilters {
+		if !reflect.DeepEqual(got, wantFilter) {
+			t.Fatalf("query filter=%#v, want %#v", got, wantFilter)
+		}
+	}
+	if !reflect.DeepEqual(runtime.filter, wantFilter) {
+		t.Fatalf("preferences changed: %#v", runtime.filter)
+	}
+}
+
 func TestProductionPlainRuntimeCompletesOneSlowSync(t *testing.T) {
 	ctx := context.Background()
 	destination, err := store.Open(ctx, filepath.Join(t.TempDir(), "plain.db"))
@@ -281,6 +487,204 @@ func TestProductionPlainRuntimeCompletesOneSlowSync(t *testing.T) {
 	}
 }
 
+func TestProductionPlainRuntimeStreamsFetchingAndIndexing(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, filepath.Join(t.TempDir(), "plain-phases.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	source := &phasePlainSource{
+		refreshStarted: make(chan struct{}), refreshRelease: make(chan struct{}),
+		indexStarted: make(chan struct{}), indexRelease: make(chan struct{}),
+	}
+	var releaseRefresh, releaseIndex sync.Once
+	runtime := &productionPlainRuntime{stream: make(chan tea.Msg, 32)}
+	coordinator := syncer.New(syncer.Dependencies{
+		Store: syncStore{destination}, Sources: []syncer.Source{source},
+		Notify: func(event syncer.Event) { publishSyncEvent(runtime.notify, event) },
+	})
+	runtime.services = &runtimeServices{store: destination, coordinator: coordinator}
+	defer func() {
+		releaseRefresh.Do(func() { close(source.refreshRelease) })
+		releaseIndex.Do(func() { close(source.indexRelease) })
+		coordinator.Close()
+	}()
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(ctx, runtime, &out) }()
+	select {
+	case <-source.refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(out.String(), "core · fetching/checking…") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Synchronizing core…") || !strings.Contains(got, "core · fetching/checking…") ||
+		strings.Contains(got, "core · indexing…") || strings.Contains(got, "core synchronized") {
+		t.Fatalf("output during refresh: %q", got)
+	}
+	releaseRefresh.Do(func() { close(source.refreshRelease) })
+	select {
+	case <-source.indexStarted:
+	case <-time.After(time.Second):
+		t.Fatal("index did not start")
+	}
+	deadline = time.Now().Add(time.Second)
+	for !strings.Contains(out.String(), "core · indexing…") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	got = out.String()
+	if !strings.Contains(got, "core · indexing…") || strings.Contains(got, "core synchronized") ||
+		strings.Index(got, "core · fetching/checking…") > strings.Index(got, "core · indexing…") {
+		t.Fatalf("output during indexing: %q", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("completed before indexing release: %v", err)
+	default:
+	}
+	releaseIndex.Do(func() { close(source.indexRelease) })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plain sync did not finish")
+	}
+	got = out.String()
+	for _, text := range []string{"core · fetching/checking…", "core · indexing…", "core synchronized · 1 updates"} {
+		if count := strings.Count(got, text); count != 1 {
+			t.Errorf("%q appears %d times: %s", text, count, got)
+		}
+	}
+	var phases []syncer.Phase
+	for _, event := range runtime.plainNotifications() {
+		if phase, ok := event.(syncer.SyncPhase); ok {
+			phases = append(phases, phase.Phase)
+		}
+	}
+	if !reflect.DeepEqual(phases, []syncer.Phase{syncer.PhaseFetching, syncer.PhaseIndexing}) {
+		t.Fatalf("recorded phases=%v", phases)
+	}
+}
+
+func TestRunPlainRecapsMissingPhasesByFullKey(t *testing.T) {
+	fetch := syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseFetching}
+	index := syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseIndexing}
+	fallback := syncer.SyncPhase{Source: "core", ID: 1, HistoricalFallback: true, Phase: syncer.PhaseIndexing}
+	otherID := syncer.SyncPhase{Source: "core", ID: 2, Phase: syncer.PhaseFetching}
+	otherSource := syncer.SyncPhase{Source: "cask", ID: 1, Phase: syncer.PhaseFetching}
+	events := []tea.Msg{fetch, index, fallback, otherID, otherSource}
+	runtime := &streamingPlainRuntime{
+		stream: make(chan tea.Msg, 4), release: make(chan struct{}),
+		incremental: make(chan struct{}), notifications: events,
+	}
+	runtime.stream <- fetch
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(runtime.release) })
+	runtime.stream <- fallback
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(context.Background(), runtime, &out) }()
+	select {
+	case <-runtime.incremental:
+	case <-time.After(time.Second):
+		t.Fatal("incremental feed was not queried")
+	}
+	got := out.String()
+	if !strings.Contains(got, "core · fetching/checking…") || !strings.Contains(got, "core history · indexing…") ||
+		strings.Contains(got, "core · indexing…") || strings.Contains(got, "core history · fetching/checking…") {
+		t.Fatalf("partial live output: %q", got)
+	}
+	releaseOnce.Do(func() { close(runtime.release) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got = out.String()
+	for _, check := range []struct {
+		text  string
+		count int
+	}{
+		{"core · fetching/checking…", 2},
+		{"core · indexing…", 1},
+		{"core history · indexing…", 1},
+		{"core history · fetching/checking…", 0},
+		{"cask · fetching/checking…", 1},
+	} {
+		if count := strings.Count(got, check.text); count != check.count {
+			t.Errorf("%q appears %d times, want %d: %s", check.text, count, check.count, got)
+		}
+	}
+}
+
+func TestRunPlainRecapsPhasesWithoutStream(t *testing.T) {
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{
+		out: &out, queries: [][]domain.FeedGroup{nil, nil},
+		notifications: []tea.Msg{
+			syncer.SyncStarted{Source: "core", ID: 1},
+			syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseFetching},
+			syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseIndexing},
+			syncer.SyncCommitted{Source: "core", ID: 1},
+			syncer.SyncStarted{Source: "core", ID: 2, HistoricalFallback: true},
+			syncer.SyncPhase{Source: "core", ID: 2, HistoricalFallback: true, Phase: syncer.PhaseIndexing},
+		},
+	}
+	if err := runPlain(context.Background(), runtime, &out); err != nil {
+		t.Fatal(err)
+	}
+	want := "Cached feed\nSynchronizing core…\ncore · fetching/checking…\ncore · indexing…\n" +
+		"core synchronized · 0 updates\nIndexing core history…\ncore history · indexing…\nRefreshed feed\n"
+	if got := out.String(); got != want {
+		t.Fatalf("output mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRunPlainReturnsLivePhaseWriterError(t *testing.T) {
+	wantErr := errors.New("live phase output failed")
+	phase := syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseFetching}
+	runtime := &streamingPlainRuntime{
+		stream: make(chan tea.Msg, 2), release: make(chan struct{}),
+		incremental: make(chan struct{}), notifications: []tea.Msg{phase},
+	}
+	runtime.stream <- phase
+	close(runtime.release)
+	var out bytes.Buffer
+	err := runPlain(context.Background(), runtime, &phaseErrorWriter{buffer: &out, err: wantErr})
+	if !errors.Is(err, wantErr) || strings.Count(err.Error(), wantErr.Error()) != 1 {
+		t.Fatalf("runPlain error=%v, want live writer error once", err)
+	}
+}
+
+func TestRunPlainRecapsPhasesWithoutStreamAndReturnsWriterError(t *testing.T) {
+	wantErr := errors.New("phase output failed")
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{
+		out: &out, queries: [][]domain.FeedGroup{nil, nil},
+		notifications: []tea.Msg{
+			syncer.SyncStarted{Source: "core", ID: 1},
+			syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseFetching},
+			syncer.SyncPhase{Source: "core", ID: 1, Phase: syncer.PhaseIndexing},
+			syncer.SyncCommitted{Source: "core", ID: 1},
+		},
+	}
+	err := runPlain(context.Background(), runtime, &phaseErrorWriter{buffer: &out, err: wantErr})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runPlain error=%v, want writer error", err)
+	}
+	got := out.String()
+	for _, text := range []string{"Synchronizing core…", "core · indexing…", "core synchronized · 0 updates"} {
+		if !strings.Contains(got, text) {
+			t.Errorf("missing %q: %s", text, got)
+		}
+	}
+}
+
 func (w *failOnceStatusWriter) Write(p []byte) (int, error) {
 	if !w.failed && bytes.HasPrefix(p, []byte("Synchronizing ")) {
 		w.failed = true
@@ -290,10 +694,11 @@ func (w *failOnceStatusWriter) Write(p []byte) (int, error) {
 }
 
 func (f *fakePlainRuntime) Preferences(context.Context) (domain.FeedFilter, error) {
-	return domain.FeedFilter{}, nil
+	return f.filter, nil
 }
 
-func (f *fakePlainRuntime) QueryFeed(context.Context, domain.FeedFilter) ([]domain.FeedGroup, error) {
+func (f *fakePlainRuntime) QueryFeed(_ context.Context, filter domain.FeedFilter) ([]domain.FeedGroup, error) {
+	f.queryFilters = append(f.queryFilters, filter)
 	if f.queryCount == 0 && f.started {
 		panic("initial query happened after synchronization started")
 	}
@@ -306,7 +711,7 @@ func (f *fakePlainRuntime) QueryFeed(context.Context, domain.FeedFilter) ([]doma
 }
 
 func (f *fakePlainRuntime) StartSync(context.Context) {
-	if !strings.HasPrefix(f.out.String(), "Cached feed\n") {
+	if !strings.HasPrefix(f.out.String(), "Cached feed") {
 		panic("synchronization started before cached output was written")
 	}
 	f.started = true

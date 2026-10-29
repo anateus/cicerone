@@ -30,6 +30,9 @@ func (m Model) render() string {
 		h = 24
 	}
 	status := m.statusText()
+	if m.syncStatusOpen {
+		status = "Sync status"
+	}
 	var body string
 	maxBody := h - statusHeight
 	p := m.palette()
@@ -55,6 +58,11 @@ func (m Model) render() string {
 	}
 	if modal := m.renderGroupModal(); modal != "" {
 		body = m.overlayGroupModal(body, modal, w, maxBody)
+	}
+	if m.syncStatusOpen {
+		if modal, bounds := m.syncStatusModalView(w, maxBody); modal != "" {
+			body = m.overlaySyncStatusModal(body, modal, bounds, w, maxBody)
+		}
 	}
 	lines := strings.Split(body, "\n")
 	if len(lines) > maxBody {
@@ -98,6 +106,13 @@ func (m Model) statusText() string {
 			status = "Loading…"
 		} else {
 			status = "Ready"
+		}
+	}
+	if sync := m.syncFooterStatus(); sync != "" {
+		if status == "Ready" {
+			status = sync
+		} else {
+			status = sync + " · " + status
 		}
 	}
 	if m.detailProgress.Active > 0 || m.detailProgress.Pending > 0 {
@@ -194,6 +209,19 @@ func (m *Model) syncViewports() {
 	m.inspectorViewport.SetContent(m.renderInspector(inspectorWidth))
 }
 
+func (m *Model) syncFeedHeader() {
+	wasVisible := false
+	if m.hasSelection() {
+		line := m.selectedFeedLine()
+		top := m.feedViewport.YOffset()
+		wasVisible = line >= top && line < top+m.feedViewport.Height()
+	}
+	m.syncViewports()
+	if wasVisible && m.hasSelection() {
+		m.keepSelectionVisible()
+	}
+}
+
 func (m Model) paneWidths() (feed, inspector int) {
 	width := m.width
 	if width <= 0 {
@@ -215,6 +243,9 @@ func (m *Model) keepSelectionVisible() {
 	rowBottom := line + m.feedGroupHeight(m.groups[m.selected], m.feedViewport.Width()) - 1
 	if rowBottom >= top+height {
 		top = rowBottom - height + 1
+		if top > line {
+			top = line
+		}
 	}
 	m.feedViewport.SetYOffset(top)
 	m.viewportOffset = m.feedViewport.YOffset()
@@ -242,10 +273,11 @@ func feedRowHeight(width int) int {
 }
 
 func (m Model) feedHeaderRows() int {
+	rows := feedHeaderHeight + len(m.supplementalFeedRows())
 	if m.searching {
-		return feedHeaderHeight + 1
+		rows++
 	}
-	return feedHeaderHeight
+	return rows
 }
 
 type palette struct {
@@ -320,6 +352,8 @@ type footerHint struct {
 func (m Model) footerHints(width int, status string) []footerHint {
 	var hints []footerHint
 	switch {
+	case m.syncStatusOpen:
+		hints = []footerHint{{"↑↓", "scroll", 1}, {"esc", "close", 0}}
 	case m.searching:
 		hints = []footerHint{{"enter", "apply", 0}, {"tab", "broaden", 0}, {"esc", "done", 0}}
 	case m.action != nil && m.action.phase == actionConfirm:
@@ -349,6 +383,9 @@ func (m Model) footerHints(width int, status string) []footerHint {
 			hints = append(hints, footerHint{"a", m.actionHintLabel(), 0})
 		}
 		hints = append(hints, footerHint{"q", "quit", 2})
+	}
+	if m.syncStatusAvailable() && !m.syncStatusOpen && !m.searching && m.action == nil && m.groupAssign == nil {
+		hints = append(hints, footerHint{"s", "sync", 0})
 	}
 
 	reservedStatus := min(width, ansi.StringWidth(status)+1)
@@ -449,12 +486,14 @@ func (m Model) seenSeparator(width int) string {
 }
 func (m Model) feedControls(width int) string {
 	formulae, casks := m.filter.Types[domain.PackageFormula], m.filter.Types[domain.PackageCask]
-	caskActive, allActive := casks && !formulae, formulae && casks
-	active := 0
-	if caskActive {
-		active = 1
-	} else if allActive {
+	active := -1
+	switch {
+	case len(m.filter.Types) == 0 || formulae && casks:
 		active = 2
+	case formulae:
+		active = 0
+	case casks:
+		active = 1
 	}
 	controls := "   " + m.freshnessText()
 	controls += fmt.Sprintf("   roll-up %s", onOff(m.filter.RollUp))
@@ -462,14 +501,71 @@ func (m Model) feedControls(width int) string {
 	if !validSearchScope(scope) {
 		scope = domain.SearchNames
 	}
-	if !m.searching && strings.TrimSpace(m.filter.Query) != "" {
-		controls += "   search " + string(scope) + ": " + fit(m.filter.Query, 18)
+	extra := m.supplementalFeedRows()
+	// On very short screens, keep a search indicator beside the tabs rather
+	// than replacing the last visible feed row with another header row.
+	if !m.searching && strings.TrimSpace(m.filter.Query) != "" && len(extra) == 0 {
+		controls = fmt.Sprintf("   search %s: %s   %s", scope, m.filter.Query, m.freshnessText())
 	}
 	rows := m.tabStrip([]string{"FORMULAE", "CASKS", "ALL"}, active, width, m.palette().feedBG, controls)
+	lines := append([]string(nil), rows[:]...)
 	if m.searching {
-		return strings.Join([]string{rows[0], rows[1], rows[2], m.searchInputLine(scope, width), m.groupStrip(width)}, "\n")
+		lines = append(lines, m.searchInputLine(scope, width))
 	}
-	return strings.Join(rows[:], "\n") + "\n" + m.groupStrip(width)
+	for _, line := range extra {
+		lines = append(lines, m.surfaceLine(line, width, m.palette().feedBG))
+	}
+	lines = append(lines, m.groupStrip(width))
+	return strings.Join(lines, "\n")
+}
+
+// supplementalFeedRows reserves space for one feed row even on a short
+// terminal while preserving visible filter context.
+func (m Model) supplementalFeedRows() []string {
+	var rows []string
+	if !m.searching && strings.TrimSpace(m.filter.Query) != "" {
+		scope := m.filter.Search
+		if !validSearchScope(scope) {
+			scope = domain.SearchNames
+		}
+		rows = append(rows, fmt.Sprintf(" search %s: %q", scope, m.filter.Query))
+	}
+	var constraints []string
+	if len(m.filter.Types) > 0 && !m.filter.Types[domain.PackageFormula] && !m.filter.Types[domain.PackageCask] {
+		constraints = append(constraints, "type: none")
+	}
+	if len(m.filter.Kinds) > 0 {
+		var kinds []string
+		for kind, enabled := range m.filter.Kinds {
+			if enabled {
+				kinds = append(kinds, string(kind))
+			}
+		}
+		sort.Strings(kinds)
+		if len(kinds) == 0 {
+			kinds = append(kinds, "none")
+		}
+		constraints = append(constraints, "events: "+strings.Join(kinds, ", "))
+	}
+	if m.filter.Horizon > 0 {
+		horizon := m.filter.Horizon.String()
+		if m.filter.Horizon%(24*time.Hour) == 0 {
+			horizon = fmt.Sprintf("%dd", m.filter.Horizon/(24*time.Hour))
+		}
+		constraints = append(constraints, "last "+horizon)
+	}
+	if len(constraints) > 0 {
+		rows = append(rows, " "+strings.Join(constraints, " · "))
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	reserved := statusHeight + feedHeaderHeight + 1 // status, header, one feed row
+	if m.searching {
+		reserved++
+	}
+	return rows[:min(len(rows), max(0, height-reserved))]
 }
 
 // groupStrip renders the scrollable group tab row shared by every type tab.
@@ -563,39 +659,6 @@ func (m Model) groupTabAt(y, x int) (bool, groupTab) {
 }
 
 func (m Model) freshnessText() string {
-	var syncing, indexing, queued []string
-	for source := range m.activeSync {
-		if m.fallbackSync[source] {
-			indexing = append(indexing, source)
-		} else {
-			syncing = append(syncing, source)
-		}
-	}
-	if len(m.queuedSync) > 0 {
-		queuedSources := make(map[string]bool, len(m.queuedSync))
-		for _, job := range m.queuedSync {
-			queuedSources[job.Source] = true
-		}
-		for source := range queuedSources {
-			queued = append(queued, source)
-		}
-	}
-	sort.Strings(syncing)
-	sort.Strings(indexing)
-	sort.Strings(queued)
-	var activity []string
-	if len(syncing) > 0 {
-		activity = append(activity, "Syncing "+strings.Join(syncing, ", ")+"…")
-	}
-	if len(indexing) > 0 {
-		activity = append(activity, "Indexing history "+strings.Join(indexing, ", ")+"…")
-	}
-	if len(queued) > 0 {
-		activity = append(activity, "Queued "+strings.Join(queued, ", ")+"…")
-	}
-	if len(activity) > 0 {
-		return strings.Join(activity, " · ")
-	}
 	if m.freshness.LastError != "" && (m.freshness.LastSync.IsZero() || m.freshness.LastAttempt.After(m.freshness.LastSync)) {
 		label := "Sync failed "
 		failure := m.freshness.LastError

@@ -13,6 +13,10 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	mouse := msg.Mouse()
+	if m.syncStatusOpen {
+		m.syncStatusOpen = false
+		return m, nil
+	}
 	if m.groupAssign != nil {
 		// Any click outside the modal dismisses it; the modal is keyboard-first.
 		m.groupAssign = nil
@@ -32,6 +36,12 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 	if mouse.Y == m.height-1 {
 		hints := m.footerHints(m.width, m.statusText())
+		leftWidth := m.width - footerHintsWidth(hints)
+		if !m.searching && mouse.X >= 0 && mouse.X < leftWidth {
+			m.syncStatusOpen = true
+			m.syncStatusOffset = 0
+			return m, nil
+		}
 		x := m.width - footerHintsWidth(hints)
 		for i, hint := range hints {
 			if i > 0 {
@@ -40,6 +50,11 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			end := x + ansi.StringWidth(hint.key) + ansi.StringWidth(hint.label) + 3
 			if hint.key == "a" && mouse.X >= x && mouse.X < end {
 				return m.requestSelectedAction()
+			}
+			if hint.key == "s" && mouse.X >= x && mouse.X < end {
+				m.syncStatusOpen = true
+				m.syncStatusOffset = 0
+				return m, nil
 			}
 			x = end
 		}
@@ -108,6 +123,15 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	if m.syncStatusOpen {
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.scrollSyncStatus(-1)
+		case tea.MouseWheelDown:
+			m.scrollSyncStatus(1)
+		}
+		return m, nil
+	}
 	mouse := msg.Mouse()
 	feedWidth := m.width
 	if m.width >= narrowBreakpoint {

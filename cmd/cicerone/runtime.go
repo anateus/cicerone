@@ -146,6 +146,8 @@ func publishSyncEvent(notify func(tea.Msg), event syncer.Event) {
 		notify(tui.SyncQueued{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback})
 	case syncer.SyncStarted:
 		notify(tui.SyncStarted{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback})
+	case syncer.SyncPhase:
+		notify(tui.SyncPhase{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback, Phase: string(event.Phase)})
 	case syncer.SyncProgress:
 		notify(tui.SyncProgress{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback, Commits: event.Progress.Commits, Events: event.Progress.Events, Diagnostics: event.Progress.Diagnostics, Batches: event.Progress.Batches})
 	case syncer.SyncCommitted:

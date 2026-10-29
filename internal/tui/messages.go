@@ -38,6 +38,12 @@ type SyncStarted struct {
 	ID                 uint64
 	HistoricalFallback bool
 }
+type SyncPhase struct {
+	Source             string
+	ID                 uint64
+	HistoricalFallback bool
+	Phase              string
+}
 type SyncDone struct {
 	Source             string
 	ID                 uint64

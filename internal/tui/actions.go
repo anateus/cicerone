@@ -147,6 +147,58 @@ func summarizeNames(names []string) string {
 	return fmt.Sprintf("%s and %d more", strings.Join(names[:2], ", "), len(names)-2)
 }
 
+type installedSnapshotSource interface {
+	InstalledSnapshot() ([]domain.PackageID, bool)
+}
+
+func (m Model) withInstalledSnapshot() (Model, bool) {
+	source, ok := m.deps.Installed.(installedSnapshotSource)
+	if !ok {
+		return m, true
+	}
+	if m.installedRetrying {
+		m.installedSnapshot = nil
+		return m, false
+	}
+	packages, ready := source.InstalledSnapshot()
+	if !ready {
+		m.installedSnapshot = nil
+		return m, false
+	}
+	snapshot := make(map[domain.PackageID]bool, len(packages))
+	for _, id := range packages {
+		snapshot[id] = true
+	}
+	m.installedSnapshot = snapshot
+	return m, true
+}
+
+func (m Model) actionsMatchInstalledSnapshot(actions []homebrew.Action) bool {
+	if m.installedSnapshot == nil {
+		_, hasSnapshotSource := m.deps.Installed.(installedSnapshotSource)
+		return !hasSnapshotSource
+	}
+	for _, action := range actions {
+		for _, id := range action.Packages {
+			if action.Kind == homebrew.Install && m.installedSnapshot[id] ||
+				action.Kind == homebrew.Upgrade && !m.installedSnapshot[id] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (m Model) waitForInstalledSnapshot() (tea.Model, tea.Cmd) {
+	if m.installedSnapshotErr != nil && !m.installedRetrying {
+		m.installedRetrying = true
+		m.notification = "Retrying installed package lookup…"
+		return m, m.refreshInstalled()
+	}
+	m.notification = "Waiting for installed package lookup…"
+	return m, nil
+}
+
 // actionTargets returns the packages an action would cover: every marked
 // package when any are marked, otherwise the selected row.
 func (m Model) actionTargets() []homebrew.ActionTarget {
@@ -154,7 +206,11 @@ func (m Model) actionTargets() []homebrew.ActionTarget {
 		targets := make([]homebrew.ActionTarget, 0, len(m.markOrder))
 		for _, id := range m.markOrder {
 			mark := m.marked[id]
-			targets = append(targets, homebrew.ActionTarget{Package: id, Type: mark.Type, Installed: mark.Installed})
+			installed := mark.Installed
+			if m.installedSnapshot != nil {
+				installed = m.installedSnapshot[id]
+			}
+			targets = append(targets, homebrew.ActionTarget{Package: id, Type: mark.Type, Installed: installed})
 		}
 		return targets
 	}
@@ -162,11 +218,21 @@ func (m Model) actionTargets() []homebrew.ActionTarget {
 		return nil
 	}
 	e := m.selectedEvent()
-	return []homebrew.ActionTarget{{Package: e.PackageID, Type: e.Type, Installed: e.Installed}}
+	installed := e.Installed
+	if m.installedSnapshot != nil {
+		installed = m.installedSnapshot[e.PackageID]
+	}
+	return []homebrew.ActionTarget{{Package: e.PackageID, Type: e.Type, Installed: installed}}
 }
 
 // actionHintLabel is the footer label for a: install, upgrade, or a count.
 func (m Model) actionHintLabel() string {
+	if _, ok := m.deps.Installed.(installedSnapshotSource); ok && (m.installedSnapshot == nil || m.installedRetrying) {
+		if m.installedSnapshotErr != nil && !m.installedRetrying {
+			return "retry installed lookup"
+		}
+		return "waiting for installed"
+	}
 	targets := m.actionTargets()
 	install, upgrade := false, false
 	for _, target := range targets {
@@ -187,6 +253,14 @@ func (m Model) actionHintLabel() string {
 }
 
 func (m Model) requestSelectedAction() (tea.Model, tea.Cmd) {
+	if len(m.markOrder) == 0 && !m.hasSelection() {
+		return m, nil
+	}
+	var ready bool
+	m, ready = m.withInstalledSnapshot()
+	if !ready {
+		return m.waitForInstalledSnapshot()
+	}
 	actions := homebrew.PlanActions(m.actionTargets())
 	if len(actions) == 0 {
 		return m, nil
@@ -197,13 +271,19 @@ func (m Model) requestSelectedAction() (tea.Model, tea.Cmd) {
 func (m Model) startActionSession(actions []homebrew.Action) Model {
 	m.actionSessionID++
 	m.action = newActionSession(m.actionSessionID, actions)
-	m.actionAnchor = m.anchor()
 	return m
 }
 
 // confirmAction begins running the first step of a confirmed session.
 func (m Model) confirmAction() (tea.Model, tea.Cmd) {
 	if m.action == nil || m.action.phase != actionConfirm {
+		return m, nil
+	}
+	var ready bool
+	m, ready = m.withInstalledSnapshot()
+	if !ready || !m.actionsMatchInstalledSnapshot(m.action.steps) {
+		m.action = nil
+		m.notification = "Installed packages changed or are updating; review the action again"
 		return m, nil
 	}
 	session := *m.action
@@ -275,6 +355,10 @@ func (m Model) finishActionStep(msg ActionFinished) (tea.Model, tea.Cmd) {
 	}
 	if len(succeeded) == 0 {
 		return m, nil
+	}
+	if _, ok := m.deps.Installed.(installedSnapshotSource); ok {
+		m.installedSnapshot = nil
+		m.installedRetrying = true
 	}
 	return m, m.refreshInstalled()
 }

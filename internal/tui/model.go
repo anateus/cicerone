@@ -174,14 +174,20 @@ type Model struct {
 	manualRefreshRunning                                              bool
 	action                                                            *actionSession
 	actionSessionID                                                   uint64
-	actionAnchor                                                      domain.Anchor
+	installedSnapshot                                                 map[domain.PackageID]bool
+	installedSnapshotErr                                              error
+	installedRetrying                                                 bool
 	marked                                                            map[domain.PackageID]markedPackage
 	markOrder                                                         []domain.PackageID
 	syncProgress                                                      map[string]SyncProgress
+	syncPhase                                                         map[string]string
 	activeSync                                                        map[string]bool
 	activeSyncIDs                                                     map[string]uint64
 	fallbackSync                                                      map[string]bool
 	queuedSync                                                        map[uint64]SyncQueued
+	syncFailures                                                      map[syncFailureKey]string
+	syncStatusOpen                                                    bool
+	syncStatusOffset                                                  int
 	searching                                                         bool
 	searchQueryCancel                                                 context.CancelFunc
 	userGroups                                                        []domain.PackageGroup
@@ -208,8 +214,8 @@ func NewModel(deps Dependencies) Model {
 			Search: domain.SearchNames,
 		},
 		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor), refreshSelectionIDs: make(map[uint64]uint64),
-		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool), activeSyncIDs: make(map[string]uint64),
-		fallbackSync: make(map[string]bool), queuedSync: make(map[uint64]SyncQueued),
+		syncProgress: make(map[string]SyncProgress), syncPhase: make(map[string]string), activeSync: make(map[string]bool),
+		activeSyncIDs: make(map[string]uint64), fallbackSync: make(map[string]bool), queuedSync: make(map[uint64]SyncQueued), syncFailures: make(map[syncFailureKey]string),
 		packageDescriptions: make(map[domain.PackageID]string), descriptionRequests: make(map[domain.PackageID]bool),
 		catalogPending: make(map[domain.PackageID]uint64), catalogLoading: make(map[domain.PackageID]bool),
 		catalogAttempted:  make(map[domain.PackageID]bool),
@@ -331,41 +337,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case SyncQueued:
 		m.queuedSync[msg.ID] = msg
-		if msg.HistoricalFallback {
-			m.notification = "Historical indexing queued for " + msg.Source
-		} else {
-			m.notification = "Refresh queued for " + msg.Source
-		}
+		// Queued and running work is represented by the sync status footer.
 	case SyncStarted:
 		delete(m.queuedSync, msg.ID)
+		delete(m.syncProgress, msg.Source)
+		delete(m.syncPhase, msg.Source)
 		m.activeSync[msg.Source] = true
 		m.activeSyncIDs[msg.Source] = msg.ID
 		m.fallbackSync[msg.Source] = msg.HistoricalFallback
-		if msg.HistoricalFallback {
-			m.notification = "Indexing history for " + msg.Source + "…"
-		} else {
-			m.notification = "Fetching latest " + msg.Source + "…"
+		if msg.Source == "installed" {
+			if _, ok := m.deps.Installed.(installedSnapshotSource); ok {
+				m.installedSnapshot = nil
+				m.installedSnapshotErr = nil
+				if m.action != nil && m.action.phase == actionConfirm {
+					m.action = nil
+				}
+			}
+		}
+	case SyncPhase:
+		activeID, active := m.activeSyncIDs[msg.Source]
+		if !active || activeID != msg.ID || m.fallbackSync[msg.Source] != msg.HistoricalFallback {
+			return m, nil
+		}
+		switch msg.Phase {
+		case "fetching", "indexing":
+			m.syncPhase[msg.Source] = msg.Phase
 		}
 	case SyncProgress:
+		if activeID, active := m.activeSyncIDs[msg.Source]; active && activeID != 0 && msg.ID != 0 && activeID != msg.ID {
+			return m, nil
+		}
+		// Progress is kept per source for the status modal.
 		m.syncProgress[msg.Source] = msg
 		m.activeSync[msg.Source] = true
 		m.activeSyncIDs[msg.Source] = msg.ID
 		m.fallbackSync[msg.Source] = msg.HistoricalFallback
-		label := msg.Source
-		if msg.HistoricalFallback {
-			label += " history"
-		}
-		m.notification = fmt.Sprintf("%s · %d commits scanned · %d updates · %d batches", label, msg.Commits, msg.Events, msg.Batches)
 	case SyncDone:
+		activeID, active := m.activeSyncIDs[msg.Source]
+		currentInstalled := msg.Source == "installed" && (msg.ID == 0 || !active || activeID == msg.ID)
 		delete(m.queuedSync, msg.ID)
+		current := msg.ID == 0 || !active || activeID == msg.ID
+		if current {
+			key := syncFailureKey{source: msg.Source, history: msg.HistoricalFallback}
+			if msg.Err != nil {
+				m.syncFailures[key] = msg.Err.Error()
+			} else if msg.Reason == "" {
+				delete(m.syncFailures, key)
+			}
+		}
 		if msg.ID == 0 || m.activeSyncIDs[msg.Source] == msg.ID {
 			delete(m.activeSync, msg.Source)
 			delete(m.activeSyncIDs, msg.Source)
 			delete(m.fallbackSync, msg.Source)
+			delete(m.syncProgress, msg.Source)
+			delete(m.syncPhase, msg.Source)
+		}
+		if currentInstalled {
+			if _, ok := m.deps.Installed.(installedSnapshotSource); ok {
+				switch {
+				case msg.Err != nil:
+					m.installedSnapshot = nil
+					m.installedSnapshotErr = msg.Err
+				case msg.Reason != "":
+					m.installedSnapshot = nil
+					m.installedSnapshotErr = fmt.Errorf("installed package lookup canceled: %s", msg.Reason)
+				default:
+					m.installedSnapshotErr = nil
+					m, _ = m.withInstalledSnapshot()
+				}
+			}
 		}
 		activity := "synchronization"
 		if msg.HistoricalFallback {
 			activity = "historical indexing"
+		}
+		if msg.Source == "installed" {
+			activity = "package refresh"
+		} else if msg.Source == "repositories" {
+			activity = "setup"
 		}
 		switch {
 		case msg.Err != nil:
@@ -373,6 +422,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notification = fmt.Sprintf("%s %s failed: %v", msg.Source, activity, msg.Err)
 		case msg.Reason != "":
 			m.notification = fmt.Sprintf("%s %s canceled: %s", msg.Source, activity, msg.Reason)
+		case msg.Source == "installed":
+			m.notification = "Installed packages refreshed"
+		case msg.Source == "repositories":
+			m.notification = "Repositories prepared"
 		case msg.HistoricalFallback:
 			m.notification = fmt.Sprintf("%s historical indexing complete · %d updates", msg.Source, msg.Events)
 		default:
@@ -389,9 +442,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Filter.Types == nil {
 				msg.Filter.Types = map[domain.PackageType]bool{}
 			}
-			if len(msg.Filter.Types) == 0 {
-				msg.Filter.Types[domain.PackageFormula] = true
-			}
 			if !validSearchScope(msg.Filter.Search) {
 				msg.Filter.Search = domain.SearchNames
 			}
@@ -400,6 +450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// A saved tab may point at a group emptied since last run.
 				m.leaveEmptyGroup()
 			}
+			m.syncFeedHeader()
 			m.loading = true
 			m.feedRequestID++
 			return m, m.queryFeed(m.feedRequestID)
@@ -647,6 +698,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.action != nil || len(msg.Actions) == 0 {
 			return m, nil
 		}
+		var ready bool
+		m, ready = m.withInstalledSnapshot()
+		if !ready {
+			m.notification = "Installed packages are updating; review the action again"
+			return m, nil
+		}
+		if !m.actionsMatchInstalledSnapshot(msg.Actions) {
+			m.notification = "Installed packages changed; review the action again"
+			return m, nil
+		}
 		return m.startActionSession(msg.Actions), nil
 	case ActionConfirmed:
 		return m.confirmAction()
@@ -667,15 +728,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.action = &session
 		return m, m.actionSpinner(session.id)
 	case installedRefreshed:
+		m.installedRetrying = false
 		if msg.Err != nil {
+			m.installedSnapshot = nil
+			m.installedSnapshotErr = msg.Err
 			m.err = msg.Err
 			m.notification = "Error: " + msg.Err.Error()
 			return m, nil
 		}
-		m.stale, m.loading = true, true
-		m.feedRequestID++
-		m.captureRefreshAnchor(m.feedRequestID, m.actionAnchor)
-		return m, m.queryFeed(m.feedRequestID)
+		m.installedSnapshotErr = nil
+		m, _ = m.withInstalledSnapshot()
+		return m.refreshDataset()
 	case groupsLoaded:
 		if msg.Err != nil {
 			return m, nil
@@ -798,6 +861,9 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.syncStatusOpen {
+		return m.handleSyncStatusKey(key)
+	}
 	if m.groupAssign != nil {
 		return m.handleGroupModalKey(key)
 	}
@@ -809,6 +875,11 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.action != nil {
 		return m.handleActionKey(key)
+	}
+	if key.String() == "s" {
+		m.syncStatusOpen = true
+		m.syncStatusOffset = 0
+		return m, nil
 	}
 	if key.String() == "esc" {
 		if m.width >= narrowBreakpoint && m.focus == inspectorPane {
@@ -1075,6 +1146,7 @@ func (m *Model) setPackageScope(formulae, casks bool) {
 
 func (m Model) filterChanged() (tea.Model, tea.Cmd) {
 	m.cancelSearchQuery()
+	m.syncFeedHeader()
 	m.loading = true
 	m.feedRequestID++
 	return m, tea.Batch(m.queryFeed(m.feedRequestID), m.savePreferences())

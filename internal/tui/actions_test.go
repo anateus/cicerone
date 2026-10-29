@@ -57,6 +57,26 @@ type fakeInstalled struct {
 
 func (f *fakeInstalled) RefreshInstalled(context.Context) error { f.refreshes++; return f.err }
 
+type fakeInstalledSnapshot struct {
+	packages  []domain.PackageID
+	ready     bool
+	err       error
+	refreshes int
+}
+
+func (f *fakeInstalledSnapshot) RefreshInstalled(context.Context) error {
+	f.refreshes++
+	if f.err != nil {
+		return f.err
+	}
+	f.ready = true
+	return nil
+}
+
+func (f *fakeInstalledSnapshot) InstalledSnapshot() ([]domain.PackageID, bool) {
+	return append([]domain.PackageID(nil), f.packages...), f.ready
+}
+
 func action() homebrew.Action {
 	return homebrew.Action{Kind: homebrew.Upgrade, Packages: []domain.PackageID{"pkg-b"}, Type: domain.PackageFormula}
 }
@@ -458,6 +478,207 @@ func TestActionKeyRequestsInstallOrUpgradeAndIsDocumented(t *testing.T) {
 				t.Fatalf("confirmation keys were not presented cleanly in the footer: %q", view)
 			}
 		})
+	}
+}
+
+func TestActionWaitsForAuthoritativeInstalledSnapshot(t *testing.T) {
+	for _, kind := range []domain.PackageType{domain.PackageFormula, domain.PackageCask} {
+		t.Run(string(kind), func(t *testing.T) {
+			installed := &fakeInstalledSnapshot{packages: []domain.PackageID{"foo"}}
+			m := NewModel(Dependencies{Actions: &fakeActions{}, Installed: installed, OnReady: func() tea.Msg { return nil }})
+			e := installedEvent("foo-event", "foo", false, kind)
+			m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(e)})
+			next, cmd := m.Update(key("a"))
+			m = next.(Model)
+			if cmd != nil || m.action != nil || !strings.Contains(m.notification, "installed") {
+				t.Fatalf("planned action before startup lookup: cmd=%v action=%v status=%q", cmd != nil, m.action, m.notification)
+			}
+			if !strings.Contains(ansi.Strip(m.render()), "foo") {
+				t.Fatal("waiting for installed status hid cached rows")
+			}
+
+			m = update(t, m, SyncStarted{Source: "installed", ID: 1})
+			installed.ready = true
+			m = update(t, m, SyncDone{Source: "installed", ID: 1})
+			next, cmd = m.Update(key("a"))
+			m = next.(Model)
+			request, ok := runCommand[ActionRequested](t, cmd)
+			if !ok || len(request.Actions) != 1 || request.Actions[0].Kind != homebrew.Upgrade || request.Actions[0].Type != kind {
+				t.Fatalf("action from installed snapshot = %#v", request.Actions)
+			}
+		})
+	}
+}
+
+func TestMarkedHiddenTargetsUseInstalledSnapshot(t *testing.T) {
+	installed := &fakeInstalledSnapshot{packages: []domain.PackageID{"foo"}, ready: true}
+	m := NewModel(Dependencies{Actions: &fakeActions{}, Installed: installed})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(
+		installedEvent("foo-event", "foo", false, domain.PackageFormula),
+		installedEvent("bar-event", "bar", false, domain.PackageFormula),
+	)})
+	m = update(t, m, key("space"))
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(
+		installedEvent("bar-event", "bar", false, domain.PackageFormula),
+	)})
+	next, cmd := m.Update(key("a"))
+	m = next.(Model)
+	request, ok := runCommand[ActionRequested](t, cmd)
+	if !ok || len(request.Actions) != 1 || request.Actions[0].Kind != homebrew.Upgrade ||
+		!reflect.DeepEqual(request.Actions[0].Packages, []domain.PackageID{"foo"}) {
+		t.Fatalf("action for hidden marked package = %#v", request.Actions)
+	}
+}
+
+func TestInstalledSnapshotChangeInvalidatesPendingAndOpenActions(t *testing.T) {
+	installed := &fakeInstalledSnapshot{ready: true}
+	runner := &fakeActions{}
+	m := NewModel(Dependencies{Actions: runner, Installed: installed})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(
+		installedEvent("foo-event", "foo", false, domain.PackageFormula),
+	)})
+	next, cmd := m.Update(key("a"))
+	m = next.(Model)
+	request, ok := runCommand[ActionRequested](t, cmd)
+	if !ok || request.Actions[0].Kind != homebrew.Install {
+		t.Fatalf("initial action = %#v", request.Actions)
+	}
+	installed.packages = []domain.PackageID{"foo"}
+	m = update(t, m, request)
+	if m.action != nil {
+		t.Fatal("opened a confirmation based on a stale installed snapshot")
+	}
+
+	installed.packages = nil
+	next, cmd = m.Update(key("a"))
+	m = next.(Model)
+	request, ok = runCommand[ActionRequested](t, cmd)
+	if !ok {
+		t.Fatal("action was not replanned")
+	}
+	m = update(t, m, request)
+	installed.packages = []domain.PackageID{"foo"}
+	next, cmd = m.Update(ActionConfirmed{})
+	m = next.(Model)
+	if cmd != nil || m.action != nil || runner.count() != 0 || !strings.Contains(m.notification, "changed") {
+		t.Fatalf("stale confirmation was executed: cmd=%v action=%v calls=%d status=%q", cmd != nil, m.action, runner.count(), m.notification)
+	}
+}
+
+func TestInstalledRefreshClosesAnOpenActionConfirmation(t *testing.T) {
+	installed := &fakeInstalledSnapshot{ready: true}
+	m := NewModel(Dependencies{Actions: &fakeActions{}, Installed: installed})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(
+		installedEvent("foo-event", "foo", false, domain.PackageFormula),
+	)})
+	next, cmd := m.Update(key("a"))
+	m = next.(Model)
+	request, ok := runCommand[ActionRequested](t, cmd)
+	if !ok {
+		t.Fatal("action request missing")
+	}
+	m = update(t, m, request)
+	installed.ready = false
+	m = update(t, m, SyncStarted{Source: "installed", ID: 2})
+	if m.action != nil {
+		t.Fatal("installed refresh left the old confirmation open")
+	}
+	next, cmd = m.Update(ActionConfirmed{})
+	if cmd != nil || next.(Model).action != nil {
+		t.Fatal("confirmed the invalidated action")
+	}
+}
+
+func TestFailedInstalledLookupCanBeRetriedBeforePlanning(t *testing.T) {
+	installed := &fakeInstalledSnapshot{packages: []domain.PackageID{"foo"}}
+	m := NewModel(Dependencies{Actions: &fakeActions{}, Installed: installed, OnReady: func() tea.Msg { return nil }})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(
+		installedEvent("foo-event", "foo", false, domain.PackageFormula),
+	)})
+	m = update(t, m, SyncStarted{Source: "installed", ID: 1})
+	m = update(t, m, SyncDone{Source: "installed", ID: 1, Err: errors.New("offline")})
+	next, cmd := m.Update(key("a"))
+	m = next.(Model)
+	result, ok := runCommand[installedRefreshed](t, cmd)
+	if !ok || result.Err != nil || installed.refreshes != 1 {
+		t.Fatalf("installed retry result=%#v refreshes=%d", result, installed.refreshes)
+	}
+	m = update(t, m, result)
+	next, cmd = m.Update(key("a"))
+	m = next.(Model)
+	request, ok := runCommand[ActionRequested](t, cmd)
+	if !ok || len(request.Actions) != 1 || request.Actions[0].Kind != homebrew.Upgrade {
+		t.Fatalf("action after successful installed retry = %#v", request.Actions)
+	}
+}
+
+func TestInstalledRetryKeepsCurrentScrollWhenFeedRefreshes(t *testing.T) {
+	installed := &fakeInstalledSnapshot{}
+	ids := make([]string, 30)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("row-%02d", i)
+	}
+	data := &fakeData{groups: groups(ids...)}
+	m := NewModel(Dependencies{Data: data, Actions: &fakeActions{}, Installed: installed})
+	m = update(t, m, WindowSize{Width: 80, Height: 20})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: data.groups})
+	m = update(t, m, SyncStarted{Source: "installed", ID: 1})
+	m = update(t, m, SyncDone{Source: "installed", ID: 1, Err: errors.New("offline")})
+	next, retry := m.Update(key("a"))
+	m = next.(Model)
+	for range 4 {
+		m = update(t, m, tea.MouseWheelMsg{X: 5, Y: 10, Button: tea.MouseWheelDown})
+	}
+	offset := m.viewportOffset
+	if offset == 0 {
+		t.Fatal("mouse wheel did not scroll while lookup retried")
+	}
+	result, ok := runCommand[installedRefreshed](t, retry)
+	if !ok || result.Err != nil {
+		t.Fatalf("retry result = %#v", result)
+	}
+	next, query := m.Update(result)
+	m = next.(Model)
+	m = update(t, m, feedResult(t, query))
+	if m.viewportOffset != offset {
+		t.Fatalf("retry refresh moved scroll from %d to %d", offset, m.viewportOffset)
+	}
+}
+
+func TestSuccessfulActionWaitsForARefreshedInstalledSnapshot(t *testing.T) {
+	installed := &fakeInstalledSnapshot{ready: true}
+	runner := &fakeActions{}
+	m := NewModel(Dependencies{Actions: runner, Installed: installed})
+	m = update(t, m, FeedLoaded{RequestID: m.feedRequestID, Groups: feedOf(
+		installedEvent("foo-event", "foo", false, domain.PackageFormula),
+	)})
+	next, cmd := m.Update(key("a"))
+	m = next.(Model)
+	request, ok := runCommand[ActionRequested](t, cmd)
+	if !ok || request.Actions[0].Kind != homebrew.Install {
+		t.Fatalf("initial action = %#v", request.Actions)
+	}
+	m = update(t, m, request)
+	m, refresh := confirmAndRun(t, m)
+	if runner.count() != 1 {
+		t.Fatalf("action calls = %d, want 1", runner.count())
+	}
+	next, cmd = m.Update(key("a"))
+	m = next.(Model)
+	if cmd != nil || m.action != nil {
+		t.Fatal("planned another action before installed refresh started")
+	}
+	installed.packages = []domain.PackageID{"foo"}
+	result, ok := runCommand[installedRefreshed](t, refresh)
+	if !ok || result.Err != nil {
+		t.Fatalf("installed refresh = %#v", result)
+	}
+	m = update(t, m, result)
+	next, cmd = m.Update(key("a"))
+	m = next.(Model)
+	request, ok = runCommand[ActionRequested](t, cmd)
+	if !ok || len(request.Actions) != 1 || request.Actions[0].Kind != homebrew.Upgrade {
+		t.Fatalf("action after refresh = %#v", request.Actions)
 	}
 }
 

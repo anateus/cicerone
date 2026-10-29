@@ -571,10 +571,13 @@ func TestIndexerDoesNotTreatSecondParentAsResumableMainline(t *testing.T) {
 }
 
 func TestIndexerCancellationCheckpointsPartialBatch(t *testing.T) {
+	const totalCommits = 25
+	const completedBeforeCancel = 6
 	now := time.Now().UTC().Truncate(time.Second)
 	repo := testutil.NewGitRepo(t)
-	for version := 0; version < 25; version++ {
-		repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-25)*time.Minute))
+	var commits []string
+	for version := range totalCommits {
+		commits = append(commits, repo.Commit("Formula/foo.rb", formula(fmt.Sprintf("%d", version)), fmt.Sprintf("version %d", version), now.Add(time.Duration(version-totalCommits)*time.Minute)))
 	}
 	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "db"))
 	if err != nil {
@@ -583,21 +586,74 @@ func TestIndexerCancellationCheckpointsPartialBatch(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	source := gitrepo.Source{Name: "core", Path: repo.Path}
 	ctx, cancel := context.WithCancel(context.Background())
-	request := Request{Since: now.Add(-time.Hour), Progress: func(progress Progress) {
-		if progress.Commits == 21 {
-			cancel()
-		}
-	}}
-	_, err = NewIndexer(gitrepo.New(source, execx.NewRunner()), s).Index(ctx, source, request)
+	defer cancel()
+	// The first commit is durable on its own. Interrupt the seventh commit
+	// while five more completed commits are still in the next ten-commit batch.
+	interrupted := commits[len(commits)-completedBeforeCancel-1]
+	runner := &cancelOnCommitRunner{Runner: execx.NewRunner(), commit: interrupted, path: "Formula/foo.rb", cancel: cancel}
+	request := Request{Since: now.Add(-time.Hour)}
+	_, err = NewIndexer(gitrepo.New(source, runner), s).Index(ctx, source, request)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Index error=%v, want context cancellation", err)
 	}
-	progress, err := s.HistoryScanProgress(context.Background(), "core", historyScanKey("initial", time.Time{}, time.Time{}, request, false))
+	scanKey := historyScanKey("initial", time.Time{}, time.Time{}, request, false)
+	progress, err := s.HistoryScanProgress(context.Background(), "core", scanKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(progress) != 21 {
-		t.Fatalf("checkpointed commits=%d, want first batch plus a partial batch", len(progress))
+	if len(progress) != completedBeforeCancel {
+		t.Fatalf("checkpointed commits=%d, want first batch plus five complete commits from the partial batch", len(progress))
+	}
+	checkpointed := make(map[string]bool, completedBeforeCancel)
+	for _, commit := range commits[len(commits)-completedBeforeCancel:] {
+		checkpointed[commit] = true
+	}
+	for _, item := range progress {
+		if !checkpointed[item.Commit] {
+			t.Fatalf("unexpected or partial checkpoint %#v", item)
+		}
+		delete(checkpointed, item.Commit)
+	}
+	if len(checkpointed) != 0 {
+		t.Fatalf("missing checkpointed commits %v", checkpointed)
+	}
+	frontier := commits[len(commits)-completedBeforeCancel]
+	cursor, ok, err := s.HistoryScanCursor(context.Background(), "core", scanKey)
+	if err != nil || !ok || cursor.Head != commits[len(commits)-1] || cursor.Frontier != frontier {
+		t.Fatalf("partial cursor=%#v ok=%v err=%v, want frontier %s", cursor, ok, err, frontier)
+	}
+	if state, ok, err := s.HistoryState(context.Background(), "core"); err != nil || ok {
+		t.Fatalf("canceled state=%#v ok=%v err=%v", state, ok, err)
+	}
+	retryRunner := &countingRunner{Runner: execx.NewRunner()}
+	if _, err := NewIndexer(gitrepo.New(source, retryRunner), s).Index(context.Background(), source, request); err != nil {
+		t.Fatalf("resume partial batch: %v", err)
+	}
+	for _, revision := range retryRunner.revisions {
+		commit := strings.TrimSuffix(strings.SplitN(revision, ":", 2)[0], "^")
+		for _, checkpoint := range commits[len(commits)-completedBeforeCancel:] {
+			if commit == checkpoint {
+				t.Fatalf("resume reopened checkpointed commit %s", commit)
+			}
+		}
+	}
+	groups, err := s.QueryFeed(context.Background(), domain.FeedFilter{})
+	if err != nil || countEvents(groups) != totalCommits {
+		t.Fatalf("resumed events=%d err=%v, want %d", countEvents(groups), err, totalCommits)
+	}
+	seen := make(map[string]bool, totalCommits)
+	for _, group := range groups {
+		for _, event := range group.Events {
+			if seen[event.Commit] {
+				t.Fatalf("duplicate resumed event for %s", event.Commit)
+			}
+			seen[event.Commit] = true
+		}
+	}
+	for _, commit := range commits {
+		if !seen[commit] {
+			t.Fatalf("missing resumed event for %s", commit)
+		}
 	}
 }
 

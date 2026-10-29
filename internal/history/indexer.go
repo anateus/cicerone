@@ -26,8 +26,7 @@ type Progress struct{ Commits, Events, Diagnostics, Batches int }
 const (
 	historyScanFormatVersion   = "mainline-merges-v1"
 	historyInitialBatchCommits = 1
-	historyBatchCommits        = 100
-	historyProgressCommits     = 10
+	historyBatchCommits        = 10
 	historyCancelFlushWindow   = 500 * time.Millisecond
 )
 
@@ -55,8 +54,8 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			err = errors.Join(err, blobs.Close())
 		}
 	}()
-	definition := func(revision, path string, absent bool) (*Definition, []string, error) {
-		if absent || path == "" {
+	definition := func(revision, path string) (*Definition, []string, error) {
+		if path == "" {
 			return nil, nil, nil
 		}
 		if blobs == nil {
@@ -166,6 +165,8 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	encountered := map[string]bool{}
 	batchCommits := 0
 	batchLimit := historyInitialBatchCommits
+	prefetchOwned := i.repository.Source().Owned
+	var prefetcher *gitrepo.BlobPrefetcher
 	var scanCursor *store.HistoryScanCursor
 	flush := func(flushCtx context.Context, scanKey string) error {
 		if batchCommits == 0 {
@@ -252,18 +253,15 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			diagnosticsBefore := progress.Diagnostics
 			progress.Commits++
 			for _, change := range commit.Changes {
-				if filepath.Ext(change.Path) != ".rb" && filepath.Ext(change.OldPath) != ".rb" {
+				beforePath, afterPath := historyDefinitionPaths(change)
+				if beforePath == "" && afterPath == "" {
 					continue
 				}
-				beforePath := change.Path
-				if change.OldPath != "" {
-					beforePath = change.OldPath
-				}
-				before, bd, e := definition(commit.Hash+"^", beforePath, change.Status == "A")
+				before, bd, e := definition(commit.Hash+"^", beforePath)
 				if e != nil {
 					return e
 				}
-				after, ad, e := definition(commit.Hash, change.Path, change.Status == "D")
+				after, ad, e := definition(commit.Hash, afterPath)
 				if e != nil {
 					return e
 				}
@@ -328,14 +326,73 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			if batchCommits == batchLimit {
 				return flush(ctx, scanKey)
 			}
-			if batchCommits%historyProgressCommits == 0 && req.Progress != nil {
-				req.Progress(progress)
-			}
 			return nil
 		}
 		walk := func(requested gitrepo.Range) error {
 			lastWalkCommit = ""
-			e := i.repository.WalkCommits(ctx, requested, processCommit)
+			// Keep the first commit immediate and bound later lookahead to the
+			// next publication batch. Resolve exactly the same before/after
+			// definitions as processCommit, without changing Git's rename diff.
+			var pending []gitrepo.Commit
+			if prefetchOwned {
+				pending = make([]gitrepo.Commit, 0, historyBatchCommits)
+			}
+			consume := func() error {
+				if len(pending) == 0 {
+					return nil
+				}
+				var refs []gitrepo.BlobRef
+				if prefetchOwned && (prefetcher == nil || prefetcher.Enabled()) {
+					for _, commit := range pending {
+						if seen[commit.Hash] || checkpoint[commit.Hash] ||
+							(rangeIndex == fallbackIndex && !since.IsZero() && !commit.AuthorTime.Before(since)) {
+							continue
+						}
+						for _, change := range commit.Changes {
+							beforePath, afterPath := historyDefinitionPaths(change)
+							if beforePath != "" {
+								refs = append(refs, gitrepo.BlobRef{Revision: commit.Hash + "^", Path: beforePath})
+							}
+							if afterPath != "" {
+								refs = append(refs, gitrepo.BlobRef{Revision: commit.Hash, Path: afterPath})
+							}
+						}
+					}
+				}
+				if len(refs) > 0 {
+					if prefetcher == nil {
+						var openErr error
+						prefetcher, openErr = i.repository.NewBlobPrefetcher(ctx)
+						if openErr != nil {
+							return openErr
+						}
+					}
+					if err := prefetcher.Prefetch(ctx, refs); err != nil {
+						return err
+					}
+				}
+				for _, commit := range pending {
+					if err := processCommit(commit); err != nil {
+						return err
+					}
+				}
+				clear(pending)
+				pending = pending[:0]
+				return nil
+			}
+			e := i.repository.WalkCommits(ctx, requested, func(commit gitrepo.Commit) error {
+				if !prefetchOwned || (prefetcher != nil && !prefetcher.Enabled()) {
+					return processCommit(commit)
+				}
+				pending = append(pending, commit)
+				if len(pending) >= batchLimit-batchCommits {
+					return consume()
+				}
+				return nil
+			})
+			if e == nil {
+				e = consume()
+			}
 			if e != nil {
 				if batchCommits > 0 && ctx.Err() != nil {
 					flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), historyCancelFlushWindow)
@@ -484,6 +541,23 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 		return Result{}, err
 	}
 	return Result{Events: progress.Events, Diagnostics: progress.Diagnostics, Head: head, Since: since}, nil
+}
+
+func historyDefinitionPaths(change gitrepo.Change) (before, after string) {
+	if filepath.Ext(change.Path) != ".rb" && filepath.Ext(change.OldPath) != ".rb" {
+		return "", ""
+	}
+	before, after = change.Path, change.Path
+	if change.OldPath != "" {
+		before = change.OldPath
+	}
+	if change.Status == "A" {
+		before = ""
+	}
+	if change.Status == "D" {
+		after = ""
+	}
+	return before, after
 }
 
 func historyScanKey(label string, since, until time.Time, req Request, includeInstalled bool) string {
