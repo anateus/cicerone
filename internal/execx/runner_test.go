@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -42,6 +43,55 @@ func TestRunCancellationDoesNotWaitForInheritedPipes(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("Run() cancellation took %v while a descendant held its pipes", elapsed)
+	}
+}
+
+func TestRunCancellationAfterExitWithInheritedPipes(t *testing.T) {
+	for _, code := range []int{0, 17, -int(syscall.SIGKILL)} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "child-pid")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := execx.NewRunner().Run(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "exit-with-inherited-pipes", marker, strconv.Itoa(code))
+				done <- err
+			}()
+			waitForProcessExit(t, marker, code < 0)
+			select {
+			case err := <-done:
+				t.Fatalf("Run returned before cancellation while a descendant held pipes: %v", err)
+			default:
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Run error = %v, want cancellation", err)
+				}
+				var processErr *execx.ProcessError
+				if code == 0 {
+					if errors.As(err, &processErr) {
+						t.Fatalf("Run error = %v, want cancellation without a process failure", err)
+					}
+				} else {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatalf("Run error = %v, want independent process failure", err)
+					}
+					if code < 0 {
+						status, ok := exitErr.Sys().(syscall.WaitStatus)
+						if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+							t.Fatalf("process status = %v, want independent SIGKILL", exitErr.Sys())
+						}
+					} else if exitErr.ExitCode() != code {
+						t.Fatalf("Run error = %v, want independent exit code %d", err, code)
+					}
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Run remained blocked after cancellation")
+			}
+		})
 	}
 }
 
@@ -120,6 +170,33 @@ func TestStreamCancellation(t *testing.T) {
 	_, _ = io.ReadAll(reader)
 	if err := stream.Close(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Close() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestStreamCancellationKillsProducerBeforeClosingFullStdout(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "stdout-full")
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := execx.NewRunner().Stream(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "fill-stdout", marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = stream.Close()
+	})
+	waitForFile(t, marker)
+	var first [1]byte
+	if _, err := io.ReadFull(stream, first[:]); err != nil || first[0] != 'x' {
+		t.Fatalf("read producer output = %q, %v", first, err)
+	}
+
+	cancel()
+	_, _ = io.Copy(io.Discard, stream)
+	err = stream.Close()
+	var processErr *execx.ProcessError
+	var exitErr *exec.ExitError
+	if !errors.Is(err, context.Canceled) || errors.As(err, &processErr) || errors.As(err, &exitErr) {
+		t.Fatalf("Close() error = %v, want cancellation without a producer failure", err)
 	}
 }
 
@@ -279,6 +356,70 @@ func TestDuplexCancellationUnblocksWrite(t *testing.T) {
 	}
 }
 
+func TestDuplexCancellationUnblocksInheritedStdin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := execx.NewRunner().(execx.DuplexRunner).Start(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "ready-spawn-pipe-holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cancel()
+		_ = stream.Close()
+	}()
+	if ready, err := bufio.NewReader(stream).ReadString('\n'); err != nil || ready != "ready\n" {
+		t.Fatalf("read readiness = %q, %v", ready, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.Write(bytes.Repeat([]byte("x"), 2<<20))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("write returned before cancellation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EPIPE) {
+			t.Fatalf("write error = %v, want cancellation without pipe artifacts", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("write remained blocked while a descendant held stdin")
+	}
+	if err := stream.Close(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close error = %v, want context.Canceled", err)
+	}
+}
+
+func TestDuplexCancellationKillsProducerBeforeClosingFullStdout(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "duplex-stdout-full")
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := execx.NewRunner().(execx.DuplexRunner).Start(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "fill-stdout", marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = stream.Close()
+	})
+	waitForFile(t, marker)
+	var first [1]byte
+	if _, err := io.ReadFull(stream, first[:]); err != nil || first[0] != 'x' {
+		t.Fatalf("read producer output = %q, %v", first, err)
+	}
+
+	cancel()
+	err = stream.Close()
+	var processErr *execx.ProcessError
+	var exitErr *exec.ExitError
+	if !errors.Is(err, context.Canceled) || errors.As(err, &processErr) || errors.As(err, &exitErr) {
+		t.Fatalf("Close() error = %v, want cancellation without a producer failure", err)
+	}
+}
+
 func TestCancellationErrorFiltersOnlyCanceledPipeLeaves(t *testing.T) {
 	realErr := errors.New("independent failure")
 	mixed := fmt.Errorf("read: %w", errors.Join(io.EOF, io.ErrUnexpectedEOF, io.ErrClosedPipe, os.ErrClosed, syscall.EPIPE, realErr))
@@ -355,6 +496,136 @@ func TestDuplexCancellationPreservesIndependentProcessFailure(t *testing.T) {
 	}
 }
 
+func TestCancellationPreservesIndependentSIGPIPE(t *testing.T) {
+	starts := map[string]func(context.Context) (io.ReadCloser, error){
+		"stream": func(ctx context.Context) (io.ReadCloser, error) {
+			return execx.NewRunner().Stream(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "fail-sigpipe")
+		},
+		"duplex": func(ctx context.Context) (io.ReadCloser, error) {
+			return execx.NewRunner().(execx.DuplexRunner).Start(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "fail-sigpipe")
+		},
+	}
+	for name, start := range starts {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stream, err := start(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				cancel()
+				_ = stream.Close()
+			})
+			if _, err := io.Copy(io.Discard, stream); err != nil {
+				t.Fatalf("reading child output: %v", err)
+			}
+			cancel()
+			err = stream.Close()
+			var exitErr *exec.ExitError
+			if !errors.Is(err, context.Canceled) || !errors.As(err, &exitErr) {
+				t.Fatalf("Close error = %v, want cancellation and independent SIGPIPE", err)
+			}
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGPIPE {
+				t.Fatalf("process status = %v, want SIGPIPE", exitErr.Sys())
+			}
+		})
+	}
+}
+
+func TestCancellationPreservesIndependentSIGKILLAfterExit(t *testing.T) {
+	starts := map[string]func(context.Context, string) (io.ReadCloser, error){
+		"stream": func(ctx context.Context, marker string) (io.ReadCloser, error) {
+			return execx.NewRunner().Stream(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "exit-with-inherited-pipes", marker, strconv.Itoa(-int(syscall.SIGKILL)))
+		},
+		"duplex": func(ctx context.Context, marker string) (io.ReadCloser, error) {
+			return execx.NewRunner().(execx.DuplexRunner).Start(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", "exit-with-inherited-pipes", marker, strconv.Itoa(-int(syscall.SIGKILL)))
+		},
+	}
+	for name, start := range starts {
+		t.Run(name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "child-pid")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stream, err := start(ctx, marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- stream.Close() }()
+			waitForProcessExit(t, marker, true)
+			select {
+			case err := <-done:
+				t.Fatalf("Close returned before cancellation while a descendant held stderr: %v", err)
+			default:
+			}
+			cancel()
+			select {
+			case err := <-done:
+				var exitErr *exec.ExitError
+				if !errors.Is(err, context.Canceled) || !errors.As(err, &exitErr) {
+					t.Fatalf("Close error = %v, want cancellation and independent SIGKILL", err)
+				}
+				status, ok := exitErr.Sys().(syscall.WaitStatus)
+				if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+					t.Fatalf("process status = %v, want independent SIGKILL", exitErr.Sys())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Close remained blocked after cancellation")
+			}
+		})
+	}
+}
+
+func waitForProcessExit(t *testing.T, marker string, kill bool) {
+	t.Helper()
+	waitForFile(t, marker)
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kill {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatalf("killing child independently: %v", err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("checking child process: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child was not reaped")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, err := os.Stat(path)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat %q: %v", path, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %q", path)
+}
+
 func TestHelperProcess(t *testing.T) {
 	separator := -1
 	for i, arg := range os.Args {
@@ -368,6 +639,42 @@ func TestHelperProcess(t *testing.T) {
 	}
 
 	switch os.Args[separator+1] {
+	case "fail-sigpipe":
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			os.Exit(6)
+		}
+		_ = reader.Close()
+		if err := syscall.Close(int(os.Stderr.Fd())); err != nil {
+			os.Exit(6)
+		}
+		fd, err := syscall.Dup(int(writer.Fd()))
+		if err != nil || fd != int(os.Stderr.Fd()) {
+			os.Exit(6)
+		}
+		_ = writer.Close()
+		_, _ = os.Stderr.Write([]byte("broken pipe"))
+		os.Exit(18)
+	case "fill-stdout":
+		payload := bytes.Repeat([]byte("x"), 4<<20)
+		started := make(chan struct{})
+		finished := make(chan struct{})
+		go func() {
+			close(started)
+			_, _ = os.Stdout.Write(payload)
+			close(finished)
+		}()
+		<-started
+		select {
+		case <-finished:
+			os.Exit(18)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err := os.WriteFile(os.Args[separator+2], []byte("blocked"), 0o600); err != nil {
+			os.Exit(6)
+		}
+		<-finished
+		os.Exit(18)
 	case "block":
 		time.Sleep(time.Hour)
 	case "ready-block":
@@ -380,9 +687,31 @@ func TestHelperProcess(t *testing.T) {
 			os.Exit(4)
 		}
 		time.Sleep(time.Hour)
-	case "ready-spawn-pipe-holder":
+	case "exit-with-inherited-pipes":
 		child := exec.Command(os.Args[0], "-test.run=TestHelperProcess", "--", "short-block")
 		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(4)
+		}
+		marker := os.Args[separator+2]
+		if err := os.WriteFile(marker+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			os.Exit(6)
+		}
+		if err := os.Rename(marker+".tmp", marker); err != nil {
+			os.Exit(6)
+		}
+		code, err := strconv.Atoi(os.Args[separator+3])
+		if err != nil {
+			os.Exit(6)
+		}
+		if code < 0 {
+			time.Sleep(time.Hour)
+			os.Exit(6)
+		}
+		os.Exit(code)
+	case "ready-spawn-pipe-holder":
+		child := exec.Command(os.Args[0], "-test.run=TestHelperProcess", "--", "short-block")
+		child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := child.Start(); err != nil {
 			os.Exit(4)
 		}

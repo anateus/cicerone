@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -21,11 +22,16 @@ type Result struct {
 
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (Result, error)
+
+	// Stream exposes stdout. Cancellation signals the child before closing
+	// the pipe; the caller must still close the reader to reap it.
 	Stream(ctx context.Context, name string, args ...string) (io.ReadCloser, error)
 }
 
 // DuplexRunner starts a process whose stdin and stdout remain available until
 // the returned stream is closed. Close closes both pipes and reaps the child.
+// Cancellation signals the child before closing the pipes; Close is still
+// required to reap it.
 type DuplexRunner interface {
 	Start(ctx context.Context, name string, args ...string) (io.ReadWriteCloser, error)
 }
@@ -45,6 +51,8 @@ func NewRunner() Runner {
 func (runner) Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = processWaitDelay
+	var killSent atomic.Bool
+	cmd.Cancel = cancelCommand(cmd, nil, nil, &killSent)
 	var stdout bytes.Buffer
 	stderr := &limitedBuffer{remaining: maxStderrBytes}
 	cmd.Stdout = &stdout
@@ -55,7 +63,11 @@ func (runner) Run(ctx context.Context, name string, args ...string) (Result, err
 		return result, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return result, fmt.Errorf("run %s %s: %w", name, strings.Join(args, " "), ctxErr)
+		cancelErr := fmt.Errorf("run %s %s: %w", name, strings.Join(args, " "), ctxErr)
+		if !canceledProcessExit(err, killSent.Load()) && !errors.Is(err, exec.ErrWaitDelay) {
+			return result, errors.Join(cancelErr, processError(name, args, err, stderr.String()))
+		}
+		return result, cancelErr
 	}
 	return result, processError(name, args, err, stderr.String())
 }
@@ -69,12 +81,12 @@ func (runner) Stream(ctx context.Context, name string, args ...string) (io.ReadC
 	}
 	stderr := &limitedBuffer{remaining: maxStderrBytes}
 	cmd.Stderr = stderr
+	var killSent atomic.Bool
+	cmd.Cancel = cancelCommand(cmd, nil, stdout, &killSent)
 	if err := cmd.Start(); err != nil {
 		return nil, errors.Join(processError(name, args, err, stderr.String()), closePipe(stdout))
 	}
-	reader := &processReader{ReadCloser: stdout, cmd: cmd, ctx: ctx, name: name, args: append([]string(nil), args...), stderr: stderr}
-	reader.stopCancel = context.AfterFunc(ctx, func() { _ = stdout.Close() })
-	return reader, nil
+	return &processReader{ReadCloser: stdout, cmd: cmd, ctx: ctx, name: name, args: append([]string(nil), args...), stderr: stderr, killSent: &killSent}, nil
 }
 
 func (runner) Start(ctx context.Context, name string, args ...string) (io.ReadWriteCloser, error) {
@@ -90,22 +102,17 @@ func (runner) Start(ctx context.Context, name string, args ...string) (io.ReadWr
 	}
 	stderr := &limitedBuffer{remaining: maxStderrBytes}
 	cmd.Stderr = stderr
+	var killSent atomic.Bool
+	cmd.Cancel = cancelCommand(cmd, stdin, stdout, &killSent)
 	if err := cmd.Start(); err != nil {
 		stdinErr := closePipe(stdin)
 		stdoutErr := closePipe(stdout)
 		return nil, errors.Join(processError(name, args, err, stderr.String()), stdinErr, stdoutErr)
 	}
-	p := &processDuplex{
+	return &processDuplex{
 		stdin: stdin, stdout: stdout, cmd: cmd, ctx: ctx,
-		name: name, args: append([]string(nil), args...), stderr: stderr,
-	}
-	// A descendant may inherit the pipes even after CommandContext kills the
-	// child. Close our ends as well so a blocked Read or Write can return.
-	p.stopCancel = context.AfterFunc(ctx, func() {
-		_ = stdin.Close()
-		_ = stdout.Close()
-	})
-	return p, nil
+		name: name, args: append([]string(nil), args...), stderr: stderr, killSent: &killSent,
+	}, nil
 }
 
 // ProcessError reports a failed command separately from pipe cleanup errors.
@@ -125,7 +132,7 @@ func processError(name string, args []string, err error, stderr string) error {
 	return &ProcessError{message: fmt.Sprintf("run %s %s: exit code %d: %v; stderr: %s", name, strings.Join(args, " "), exitCode, err, stderr), err: err}
 }
 
-func canceledProcessExit(err error) bool {
+func canceledProcessExit(err error, killSent bool) bool {
 	if err == nil || err == context.Canceled || err == context.DeadlineExceeded {
 		return true
 	}
@@ -134,7 +141,7 @@ func canceledProcessExit(err error) bool {
 		return false
 	}
 	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
+	return killSent && ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }
 
 // CancellationError classifies an error from context-owned I/O. If the context
@@ -196,6 +203,27 @@ func closePipe(pipe io.Closer) error {
 	return err
 }
 
+func cancelCommand(cmd *exec.Cmd, stdin, stdout io.Closer, killSent *atomic.Bool) func() error {
+	var once sync.Once
+	var killErr error
+	return func() error {
+		once.Do(func() {
+			// Signal the producer before closing stdout, or a blocked write
+			// can terminate it with SIGPIPE instead of the cancellation signal.
+			killErr = cmd.Process.Kill()
+			killSent.Store(killErr == nil)
+			// Descendants may keep the pipes open after the child is killed.
+			if stdin != nil {
+				_ = stdin.Close()
+			}
+			if stdout != nil {
+				_ = stdout.Close()
+			}
+		})
+		return killErr
+	}
+}
+
 type limitedBuffer struct {
 	buffer    bytes.Buffer
 	remaining int
@@ -217,21 +245,23 @@ func (b *limitedBuffer) String() string { return b.buffer.String() }
 
 type processReader struct {
 	io.ReadCloser
-	cmd        *exec.Cmd
-	ctx        context.Context
-	name       string
-	args       []string
-	stderr     *limitedBuffer
-	stopCancel func() bool
+	cmd      *exec.Cmd
+	ctx      context.Context
+	name     string
+	args     []string
+	stderr   *limitedBuffer
+	killSent *atomic.Bool
 }
 
 func (r *processReader) Close() error {
-	r.stopCancel()
+	if r.ctx.Err() != nil {
+		_ = r.cmd.Cancel()
+	}
 	closeErr := closePipe(r.ReadCloser)
 	waitErr := r.cmd.Wait()
 	if ctxErr := r.ctx.Err(); ctxErr != nil {
 		closeErr, _ = stripPipeErrors(closeErr, true)
-		if !canceledProcessExit(waitErr) {
+		if !canceledProcessExit(waitErr, r.killSent.Load()) {
 			waitErr = processError(r.name, r.args, waitErr, r.stderr.String())
 		} else {
 			waitErr = nil
@@ -245,16 +275,16 @@ func (r *processReader) Close() error {
 }
 
 type processDuplex struct {
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	cmd        *exec.Cmd
-	ctx        context.Context
-	name       string
-	args       []string
-	stderr     *limitedBuffer
-	stopCancel func() bool
-	closeOnce  sync.Once
-	closeErr   error
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	cmd       *exec.Cmd
+	ctx       context.Context
+	name      string
+	args      []string
+	stderr    *limitedBuffer
+	killSent  *atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (p *processDuplex) Read(b []byte) (int, error) {
@@ -269,7 +299,9 @@ func (p *processDuplex) Write(b []byte) (int, error) {
 
 func (p *processDuplex) Close() error {
 	p.closeOnce.Do(func() {
-		p.stopCancel()
+		if p.ctx.Err() != nil {
+			_ = p.cmd.Cancel()
+		}
 		stdinErr := closePipe(p.stdin)
 		stdoutErr := closePipe(p.stdout)
 
@@ -295,7 +327,7 @@ func (p *processDuplex) Close() error {
 		if ctxErr := p.ctx.Err(); ctxErr != nil {
 			stdinErr, _ = stripPipeErrors(stdinErr, true)
 			stdoutErr, _ = stripPipeErrors(stdoutErr, true)
-			if !canceledProcessExit(waitErr) {
+			if !canceledProcessExit(waitErr, p.killSent.Load()) {
 				waitErr = processError(p.name, p.args, waitErr, p.stderr.String())
 			} else {
 				waitErr = nil
