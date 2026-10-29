@@ -69,8 +69,8 @@ func TestMigrationUpgradesVersionOneChangelogData(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 17 {
-		t.Fatalf("user_version=%d,want 17", version)
+	if version != 18 {
+		t.Fatalf("user_version=%d,want 18", version)
 	}
 	artifacts, err := s.ChangelogArtifacts(ctx, "widget")
 	if err != nil {

@@ -35,7 +35,7 @@ type productionPlainRuntime struct {
 
 func (r *productionPlainRuntime) notify(msg tea.Msg) {
 	switch msg.(type) {
-	case syncer.SyncStarted, syncer.SyncProgress, syncer.SyncCommitted, syncer.SyncFailed:
+	case syncer.SyncQueued, syncer.SyncStarted, syncer.SyncProgress, syncer.SyncCommitted, syncer.SyncFailed, syncer.SyncCancelled:
 		r.mu.Lock()
 		r.events = append(r.events, msg)
 		r.mu.Unlock()
@@ -70,18 +70,64 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 	}
 	runtime.StartSync(ctx)
 	var liveErrors []error
+	type fallbackKey struct {
+		source string
+		id     uint64
+	}
+	liveFallbackResults := make(map[fallbackKey]bool)
+	liveFallbackStarts := make(map[string]bool)
 	if source, ok := runtime.(plainNotificationStream); ok && source.plainNotificationChannel() != nil {
 		stream := source.plainNotificationChannel()
 		handleProgress := func(msg tea.Msg) {
-			event, ok := msg.(syncer.SyncProgress)
-			if !ok {
-				return
-			}
-			if _, err := fmt.Fprintf(out, "%s · %d commits scanned · %d updates · %d batches\n", event.Source, event.Progress.Commits, event.Progress.Events, event.Progress.Batches); err != nil {
-				liveErrors = append(liveErrors, err)
-			}
-			if err := writePlainFeedSeen(ctx, runtime, out, "", seen); err != nil {
-				liveErrors = append(liveErrors, err)
+			switch event := msg.(type) {
+			case syncer.SyncQueued:
+				activity := "synchronization"
+				if event.HistoricalFallback {
+					activity = "historical indexing"
+				}
+				if _, err := fmt.Fprintf(out, "%s %s queued\n", event.Source, activity); err != nil {
+					liveErrors = append(liveErrors, err)
+				}
+			case syncer.SyncStarted:
+				if event.HistoricalFallback {
+					liveFallbackStarts[event.Source] = true
+					if _, err := fmt.Fprintf(out, "Indexing %s history…\n", event.Source); err != nil {
+						liveErrors = append(liveErrors, err)
+					}
+				}
+			case syncer.SyncProgress:
+				label := event.Source
+				if event.HistoricalFallback {
+					label += " history"
+				}
+				if _, err := fmt.Fprintf(out, "%s · %d commits scanned · %d updates · %d batches\n", label, event.Progress.Commits, event.Progress.Events, event.Progress.Batches); err != nil {
+					liveErrors = append(liveErrors, err)
+				}
+				if err := writePlainFeedSeen(ctx, runtime, out, "", seen); err != nil {
+					liveErrors = append(liveErrors, err)
+				}
+			case syncer.SyncCommitted:
+				if event.HistoricalFallback {
+					liveFallbackResults[fallbackKey{event.Source, event.ID}] = true
+					if _, err := fmt.Fprintf(out, "%s historical indexing complete · %d updates\n", event.Source, event.Result.Events); err != nil {
+						liveErrors = append(liveErrors, err)
+					}
+				}
+			case syncer.SyncFailed:
+				if event.HistoricalFallback {
+					liveFallbackResults[fallbackKey{event.Source, event.ID}] = true
+					if _, err := fmt.Fprintf(out, "%s historical indexing failed · %v\n", event.Source, event.Err); err != nil {
+						liveErrors = append(liveErrors, err)
+					}
+					liveErrors = append(liveErrors, event.Err)
+				}
+			case syncer.SyncCancelled:
+				if event.HistoricalFallback {
+					liveFallbackResults[fallbackKey{event.Source, event.ID}] = true
+					if _, err := fmt.Fprintf(out, "%s historical indexing canceled · %s\n", event.Source, event.Reason); err != nil {
+						liveErrors = append(liveErrors, err)
+					}
+				}
 			}
 		}
 		done := make(chan struct{})
@@ -108,26 +154,40 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 
 	failures := liveErrors
 	if source, ok := runtime.(plainNotificationSource); ok {
-		type sourceNotifications struct {
+		type stageNotifications struct {
 			started bool
 			result  tea.Msg
 		}
+		type sourceNotifications struct {
+			normal, fallback stageNotifications
+		}
 		bySource := make(map[string]sourceNotifications)
 		for _, msg := range source.plainNotifications() {
+			var name string
+			var fallback, started bool
 			switch event := msg.(type) {
 			case syncer.SyncStarted:
-				record := bySource[event.Source]
-				record.started = true
-				bySource[event.Source] = record
+				name, fallback, started = event.Source, event.HistoricalFallback, true
 			case syncer.SyncCommitted:
-				record := bySource[event.Source]
-				record.result = event
-				bySource[event.Source] = record
+				name, fallback = event.Source, event.HistoricalFallback
 			case syncer.SyncFailed:
-				record := bySource[event.Source]
-				record.result = event
-				bySource[event.Source] = record
+				name, fallback = event.Source, event.HistoricalFallback
+			case syncer.SyncCancelled:
+				name, fallback = event.Source, event.HistoricalFallback
+			default:
+				continue
 			}
+			record := bySource[name]
+			stage := &record.normal
+			if fallback {
+				stage = &record.fallback
+			}
+			if started {
+				stage.started = true
+			} else {
+				stage.result = msg
+			}
+			bySource[name] = record
 		}
 		sources := make([]string, 0, len(bySource))
 		for name := range bySource {
@@ -136,12 +196,12 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 		sort.Strings(sources)
 		for _, name := range sources {
 			record := bySource[name]
-			if record.started {
+			if record.normal.started {
 				if _, err := fmt.Fprintf(out, "Synchronizing %s…\n", name); err != nil {
 					failures = append(failures, err)
 				}
 			}
-			switch event := record.result.(type) {
+			switch event := record.normal.result.(type) {
 			case syncer.SyncCommitted:
 				if _, err := fmt.Fprintf(out, "%s synchronized · %d updates\n", name, event.Result.Events); err != nil {
 					failures = append(failures, err)
@@ -151,6 +211,39 @@ func runPlain(ctx context.Context, runtime plainRuntime, out io.Writer) error {
 					failures = append(failures, err)
 				}
 				failures = append(failures, event.Err)
+			case syncer.SyncCancelled:
+				if _, err := fmt.Fprintf(out, "%s synchronization canceled · %s\n", name, event.Reason); err != nil {
+					failures = append(failures, err)
+				}
+			}
+			if record.fallback.started && !liveFallbackStarts[name] {
+				if _, err := fmt.Fprintf(out, "Indexing %s history…\n", name); err != nil {
+					failures = append(failures, err)
+				}
+			}
+			switch event := record.fallback.result.(type) {
+			case syncer.SyncCommitted:
+				if liveFallbackResults[fallbackKey{event.Source, event.ID}] {
+					continue
+				}
+				if _, err := fmt.Fprintf(out, "%s historical indexing complete · %d updates\n", name, event.Result.Events); err != nil {
+					failures = append(failures, err)
+				}
+			case syncer.SyncFailed:
+				if liveFallbackResults[fallbackKey{event.Source, event.ID}] {
+					continue
+				}
+				if _, err := fmt.Fprintf(out, "%s historical indexing failed · %v\n", name, event.Err); err != nil {
+					failures = append(failures, err)
+				}
+				failures = append(failures, event.Err)
+			case syncer.SyncCancelled:
+				if liveFallbackResults[fallbackKey{event.Source, event.ID}] {
+					continue
+				}
+				if _, err := fmt.Fprintf(out, "%s historical indexing canceled · %s\n", name, event.Reason); err != nil {
+					failures = append(failures, err)
+				}
 			}
 		}
 	}
@@ -205,7 +298,7 @@ func executePlainProduction(stdout, stderr io.Writer) (code int) {
 		return 1
 	}
 	plain := &productionPlainRuntime{stream: make(chan tea.Msg, 32)}
-	services, err := newRuntime(home, plain.notify)
+	services, err := newRuntime(home, plain.notify, 0)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

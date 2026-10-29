@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"path"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/anateus/cicerone/internal/execx"
 )
 
 type Range struct {
@@ -38,6 +41,87 @@ func (r Repository) MergeBase(ctx context.Context, a, b string) (string, error) 
 		return "", fmt.Errorf("merge base %s %s: %w", a, b, err)
 	}
 	return strings.TrimSpace(string(result.Stdout)), nil
+}
+
+// FirstParent returns the first parent of a commit, or an empty string for a
+// root commit. Only full object IDs are accepted.
+func (r Repository) FirstParent(ctx context.Context, hash string) (string, error) {
+	if !isObjectID(hash) {
+		return "", fmt.Errorf("invalid commit hash")
+	}
+	result, err := r.runner.Run(ctx, "git", "-C", r.source.Path, "rev-list", "--parents", "-n1", hash, "--")
+	if err != nil {
+		return "", fmt.Errorf("read first parent of %s: %w", hash, err)
+	}
+	fields := strings.Fields(string(result.Stdout))
+	if len(fields) == 0 || fields[0] != hash {
+		return "", fmt.Errorf("read first parent of %s: malformed response", hash)
+	}
+	if len(fields) == 1 {
+		return "", nil
+	}
+	if !isObjectID(fields[1]) {
+		return "", fmt.Errorf("read first parent of %s: malformed parent", hash)
+	}
+	return fields[1], nil
+}
+
+// IsFirstParentAncestor checks the new first-parent prefix without rendering
+// any commits or paths already reachable from ancestor. A missing ancestor is
+// not an ancestor, while repository and process errors remain errors.
+func (r Repository) IsFirstParentAncestor(ctx context.Context, ancestor, descendant string) (matched bool, err error) {
+	if !isObjectID(ancestor) || !isObjectID(descendant) {
+		return false, fmt.Errorf("invalid commit hash")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	result, lookupErr := r.runner.Run(ctx, "git", "-C", r.source.Path, "cat-file", "-e", ancestor)
+	if lookupErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, errors.Join(ctxErr, lookupErr)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(lookupErr, &exitErr) && exitErr.ExitCode() == 1 && len(result.Stderr) == 0 {
+			return false, nil
+		}
+		return false, fmt.Errorf("check saved ancestor %s: %w", ancestor, lookupErr)
+	}
+	if ancestor == descendant {
+		return true, nil
+	}
+	stream, err := r.runner.Stream(ctx, "git", "-C", r.source.Path, "log", "--first-parent", "--format=%P", ancestor+".."+descendant, "--")
+	if err != nil {
+		return false, fmt.Errorf("check first-parent ancestry: %w", err)
+	}
+	defer func() { err = errors.Join(err, stream.Close()) }()
+	reader := bufio.NewReader(stream)
+	var lastParent string
+	atLineStart := true
+	for {
+		part, readErr := reader.ReadSlice('\n')
+		if atLineStart && len(part) > 0 {
+			end := bytes.IndexAny(part, " \n")
+			if end < 0 {
+				return false, fmt.Errorf("check first-parent ancestry: malformed parent list")
+			}
+			lastParent = string(part[:end])
+			if lastParent != "" && !isObjectID(lastParent) {
+				return false, fmt.Errorf("check first-parent ancestry: malformed parent")
+			}
+			atLineStart = false
+		}
+		switch {
+		case readErr == nil:
+			atLineStart = true
+		case errors.Is(readErr, bufio.ErrBufferFull):
+			continue
+		case errors.Is(readErr, io.EOF) && len(part) == 0 && atLineStart:
+			return lastParent == ancestor, nil
+		default:
+			return false, fmt.Errorf("check first-parent ancestry: %w", readErr)
+		}
+	}
 }
 
 func (r Repository) Commits(ctx context.Context, requested Range) ([]Commit, error) {
@@ -158,8 +242,17 @@ func (r Repository) walkCommitArgs(ctx context.Context, args []string, yield fun
 			}
 		}
 	}
+	canceledRead := func(readErr error) error {
+		if readErr == nil || ctx.Err() == nil {
+			return nil
+		}
+		return execx.CancellationError(ctx, readErr)
+	}
 	readHeader := func(hash string) (Commit, error) {
 		encodedTime, readErr := next()
+		if err := canceledRead(readErr); err != nil {
+			return Commit{}, err
+		}
 		if readErr != nil {
 			return Commit{}, fmt.Errorf("malformed header")
 		}
@@ -168,12 +261,18 @@ func (r Repository) walkCommitArgs(ctx context.Context, args []string, yield fun
 			return Commit{}, fmt.Errorf("author time: %w", parseErr)
 		}
 		subject, readErr := next()
+		if err := canceledRead(readErr); err != nil {
+			return Commit{}, err
+		}
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return Commit{}, readErr
 		}
 		return Commit{Hash: hash, AuthorTime: authorTime, Subject: subject}, nil
 	}
 	hash, readErr := next()
+	if err := canceledRead(readErr); err != nil {
+		return fmt.Errorf("parse commits: %w", err)
+	}
 	if errors.Is(readErr, io.EOF) && hash == "" {
 		return nil
 	}
@@ -187,6 +286,9 @@ func (r Repository) walkCommitArgs(ctx context.Context, args []string, yield fun
 	}
 	for {
 		token, tokenErr := next()
+		if err := canceledRead(tokenErr); err != nil {
+			return fmt.Errorf("parse commits: %w", err)
+		}
 		if errors.Is(tokenErr, io.EOF) && token == "" {
 			return yield(commit)
 		}
@@ -205,12 +307,18 @@ func (r Repository) walkCommitArgs(ctx context.Context, args []string, yield fun
 			return fmt.Errorf("parse commits: empty change status")
 		}
 		path, pathErr := next()
+		if err := canceledRead(pathErr); err != nil {
+			return fmt.Errorf("parse commits: %w", err)
+		}
 		if path == "" || (pathErr != nil && !errors.Is(pathErr, io.EOF)) {
 			return fmt.Errorf("parse commits: missing path for %s", token)
 		}
 		change := Change{Status: token[:1]}
 		if change.Status == "R" || change.Status == "C" {
 			newPath, newPathErr := next()
+			if err := canceledRead(newPathErr); err != nil {
+				return fmt.Errorf("parse commits: %w", err)
+			}
 			if newPath == "" || (newPathErr != nil && !errors.Is(newPathErr, io.EOF)) {
 				return fmt.Errorf("parse commits: missing rename path")
 			}

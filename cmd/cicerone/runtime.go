@@ -40,7 +40,7 @@ type runtimeServices struct {
 	closeErr    error
 }
 
-func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
+func newRuntime(home string, notify func(tea.Msg), refreshInterval time.Duration) (*runtimeServices, error) {
 	paths := runtimePaths(home)
 	for _, dir := range []string{paths.DataDir, paths.CacheDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -79,26 +79,8 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 	}
 	coordinator := syncer.New(syncer.Dependencies{
 		Installed: brew, Store: syncStore{destination}, LoadSources: loadSources,
-		InitialSince: time.Now().Add(-30 * 24 * time.Hour), RefreshInterval: backgroundRefreshInterval, Notify: func(event syncer.Event) {
-			if notify == nil {
-				return
-			}
-			switch event := event.(type) {
-			case syncer.SyncStarted:
-				notify(tui.SyncStarted{Source: event.Source})
-				notify(tui.Notify{Text: "Synchronizing " + event.Source + "…"})
-			case syncer.SyncProgress:
-				notify(tui.SyncProgress{Source: event.Source, Commits: event.Progress.Commits, Events: event.Progress.Events, Diagnostics: event.Progress.Diagnostics, Batches: event.Progress.Batches})
-			case syncer.SyncCommitted:
-				notify(tui.SyncDone{Source: event.Source})
-				notify(tui.Notify{Text: fmt.Sprintf("%s synchronized · %d updates", event.Source, event.Result.Events)})
-			case syncer.SyncFailed:
-				notify(tui.SyncDone{Source: event.Source})
-				notify(tui.Notify{Text: event.Source + " synchronization failed", Err: event.Err})
-			case syncer.DatasetChanged:
-				notify(tui.DatasetChanged{})
-			}
-			notify(event)
+		InitialSince: time.Now().Add(-30 * 24 * time.Hour), RefreshInterval: refreshInterval, Notify: func(event syncer.Event) {
+			publishSyncEvent(notify, event)
 		},
 	})
 	fetcher := &changelog.Fetcher{}
@@ -155,8 +137,34 @@ func newRuntime(home string, notify func(tea.Msg)) (*runtimeServices, error) {
 	return &runtimeServices{ctx: ctx, store: destination, brew: brew, coordinator: coordinator, changelogs: loader, details: details, downloads: downloads, cancel: cancel}, nil
 }
 
+func publishSyncEvent(notify func(tea.Msg), event syncer.Event) {
+	if notify == nil {
+		return
+	}
+	switch event := event.(type) {
+	case syncer.SyncQueued:
+		notify(tui.SyncQueued{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback})
+	case syncer.SyncStarted:
+		notify(tui.SyncStarted{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback})
+	case syncer.SyncProgress:
+		notify(tui.SyncProgress{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback, Commits: event.Progress.Commits, Events: event.Progress.Events, Diagnostics: event.Progress.Diagnostics, Batches: event.Progress.Batches})
+	case syncer.SyncCommitted:
+		notify(tui.SyncDone{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback, Events: event.Result.Events})
+	case syncer.SyncFailed:
+		notify(tui.SyncDone{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback, Err: event.Err})
+	case syncer.SyncCancelled:
+		notify(tui.SyncDone{Source: event.Source, ID: event.ID, HistoricalFallback: event.HistoricalFallback, Reason: event.Reason})
+	case syncer.DatasetChanged:
+		notify(tui.DatasetChanged{})
+	}
+	notify(event)
+}
+
 func (r *runtimeServices) Close() error {
 	r.closeOnce.Do(func() {
+		if r.coordinator != nil {
+			r.coordinator.Stop()
+		}
 		r.cancel()
 		var closing sync.WaitGroup
 		if r.coordinator != nil {

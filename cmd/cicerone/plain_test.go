@@ -53,6 +53,28 @@ type realStorePlainRuntime struct {
 	err       error
 }
 
+type slowPlainSource struct {
+	started chan struct{}
+	release <-chan struct{}
+	calls   int
+}
+
+func (s *slowPlainSource) Name() string                  { return "core" }
+func (s *slowPlainSource) Refresh(context.Context) error { return nil }
+func (s *slowPlainSource) Index(ctx context.Context, req syncer.Request) (syncer.Result, error) {
+	s.calls++
+	if req.Progress != nil {
+		req.Progress(syncer.Progress{Commits: 1, Batches: 1})
+	}
+	close(s.started)
+	select {
+	case <-s.release:
+		return syncer.Result{Events: 1}, nil
+	case <-ctx.Done():
+		return syncer.Result{}, ctx.Err()
+	}
+}
+
 func (r *realStorePlainRuntime) Preferences(context.Context) (domain.FeedFilter, error) {
 	return domain.FeedFilter{}, nil
 }
@@ -148,7 +170,9 @@ func (r *streamingPlainRuntime) plainNotifications() []tea.Msg {
 }
 
 func TestRunPlainRendersBatchesBeforeCompletion(t *testing.T) {
-	runtime := &streamingPlainRuntime{stream: make(chan tea.Msg, 2), release: make(chan struct{}), incremental: make(chan struct{})}
+	runtime := &streamingPlainRuntime{stream: make(chan tea.Msg, 4), release: make(chan struct{}), incremental: make(chan struct{})}
+	runtime.stream <- syncer.SyncQueued{Source: "homebrew-core", ID: 2, HistoricalFallback: true}
+	runtime.stream <- syncer.SyncStarted{Source: "homebrew-core", ID: 2, HistoricalFallback: true}
 	var out synchronizedBuffer
 	done := make(chan error, 1)
 	go func() { done <- runPlain(context.Background(), runtime, &out) }()
@@ -161,7 +185,8 @@ func TestRunPlainRendersBatchesBeforeCompletion(t *testing.T) {
 	for !strings.Contains(out.String(), "foo 2.0") && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if got := out.String(); !strings.Contains(got, "100 commits scanned") || !strings.Contains(got, "foo 2.0") {
+	if got := out.String(); !strings.Contains(got, "100 commits scanned") || !strings.Contains(got, "foo 2.0") ||
+		!strings.Contains(got, "homebrew-core historical indexing queued") || !strings.Contains(got, "Indexing homebrew-core history") {
 		t.Fatalf("output before completion=%q", got)
 	}
 	select {
@@ -175,6 +200,84 @@ func TestRunPlainRendersBatchesBeforeCompletion(t *testing.T) {
 	}
 	if strings.Count(out.String(), "foo 2.0") != 1 || strings.Contains(out.String(), "\x1b[") {
 		t.Fatalf("output=%q", out.String())
+	}
+}
+
+func TestRunPlainStreamsFallbackFailureBeforeOtherWorkCompletes(t *testing.T) {
+	wantErr := errors.New("history read failed")
+	runtime := &streamingPlainRuntime{stream: make(chan tea.Msg, 4), release: make(chan struct{}), incremental: make(chan struct{})}
+	runtime.stream <- syncer.SyncStarted{Source: "homebrew-core", ID: 2, HistoricalFallback: true}
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(context.Background(), runtime, &out) }()
+	select {
+	case <-runtime.incremental:
+	case <-time.After(time.Second):
+		t.Fatal("incremental feed was not queried")
+	}
+	runtime.stream <- syncer.SyncFailed{Source: "homebrew-core", ID: 2, HistoricalFallback: true, Err: wantErr}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(out.String(), "historical indexing failed") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := out.String(); !strings.Contains(got, "homebrew-core historical indexing failed · history read failed") {
+		t.Fatalf("fallback failure not visible while waiting: %q", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("completed before release: %v", err)
+	default:
+	}
+	close(runtime.release)
+	if err := <-done; !errors.Is(err, wantErr) {
+		t.Fatalf("runPlain error=%v, want fallback failure", err)
+	}
+}
+
+func TestProductionPlainRuntimeCompletesOneSlowSync(t *testing.T) {
+	ctx := context.Background()
+	destination, err := store.Open(ctx, filepath.Join(t.TempDir(), "plain.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	source := &slowPlainSource{started: started, release: release}
+	runtime := &productionPlainRuntime{stream: make(chan tea.Msg, 32)}
+	coordinator := syncer.New(syncer.Dependencies{
+		Store: syncStore{destination}, Sources: []syncer.Source{source}, RefreshInterval: 0,
+		Notify: func(event syncer.Event) { publishSyncEvent(runtime.notify, event) },
+	})
+	runtime.services = &runtimeServices{store: destination, coordinator: coordinator}
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		coordinator.Close()
+	}()
+	var out synchronizedBuffer
+	done := make(chan error, 1)
+	go func() { done <- runPlain(ctx, runtime, &out) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("plain sync did not start")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("plain sync finished before its source: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("one-shot plain sync did not finish")
+	}
+	if source.calls != 1 {
+		t.Fatalf("plain source calls=%d, want one sync", source.calls)
 	}
 }
 
@@ -266,6 +369,46 @@ func TestRunPlainReturnsCollectedSyncFailures(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "homebrew-cask synchronization failed · network unavailable\n") {
 		t.Fatalf("failure output missing detail:\n%s", got)
+	}
+}
+
+func TestRunPlainKeepsFallbackFailuresSeparateFromSuccessfulRefresh(t *testing.T) {
+	wantErr := errors.New("history blob unavailable")
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{
+		out: &out, queries: [][]domain.FeedGroup{nil, nil},
+		notifications: []tea.Msg{
+			syncer.SyncStarted{Source: "core", ID: 1},
+			syncer.SyncCommitted{Source: "core", ID: 1, Result: syncer.Result{Events: 7}},
+			syncer.SyncStarted{Source: "core", ID: 2, HistoricalFallback: true},
+			syncer.SyncFailed{Source: "core", ID: 2, HistoricalFallback: true, Err: wantErr},
+		},
+	}
+	err := runPlain(context.Background(), runtime, &out)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runPlain error=%v, want fallback failure", err)
+	}
+	for _, want := range []string{"core synchronized · 7 updates", "Indexing core history", "core historical indexing failed · history blob unavailable"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q: %s", want, out.String())
+		}
+	}
+}
+
+func TestRunPlainReportsFallbackCancellationReason(t *testing.T) {
+	var out bytes.Buffer
+	runtime := &fakePlainRuntime{
+		out: &out, queries: [][]domain.FeedGroup{nil, nil},
+		notifications: []tea.Msg{
+			syncer.SyncStarted{Source: "core", HistoricalFallback: true},
+			syncer.SyncCancelled{Source: "core", HistoricalFallback: true, Reason: "yield for queued refresh at durable checkpoint"},
+		},
+	}
+	if err := runPlain(context.Background(), runtime, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "core historical indexing canceled · yield for queued refresh at durable checkpoint") {
+		t.Fatalf("fallback cancellation missing from %s", out.String())
 	}
 }
 

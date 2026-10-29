@@ -45,9 +45,33 @@ func NewIndexer(repository gitrepo.Repository, destination *store.Store) *Indexe
 	return &Indexer{repository: repository, store: destination}
 }
 
-func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request) (Result, error) {
+func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request) (result Result, err error) {
 	if i == nil || i.store == nil {
 		return Result{}, fmt.Errorf("history indexer requires a store")
+	}
+	var blobs *gitrepo.BlobReader
+	defer func() {
+		if blobs != nil {
+			err = errors.Join(err, blobs.Close())
+		}
+	}()
+	definition := func(revision, path string, absent bool) (*Definition, []string, error) {
+		if absent || path == "" {
+			return nil, nil, nil
+		}
+		if blobs == nil {
+			var openErr error
+			blobs, openErr = i.repository.OpenBlobReader(ctx)
+			if openErr != nil {
+				return nil, nil, openErr
+			}
+		}
+		body, readErr := blobs.Blob(revision, path)
+		if readErr != nil {
+			return nil, nil, readErr
+		}
+		parsed, diagnostics := ParseDefinition(path, body)
+		return parsed, diagnostics, nil
 	}
 	head, err := i.repository.Head(ctx)
 	if err != nil {
@@ -142,11 +166,12 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 	encountered := map[string]bool{}
 	batchCommits := 0
 	batchLimit := historyInitialBatchCommits
+	var scanCursor *store.HistoryScanCursor
 	flush := func(flushCtx context.Context, scanKey string) error {
 		if batchCommits == 0 {
 			return nil
 		}
-		if err := i.store.ApplyHistoryBatch(flushCtx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, Processed: processed}); err != nil {
+		if err := i.store.ApplyHistoryBatch(flushCtx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, Cursor: scanCursor, Events: events, Aliases: aliases, Diagnostics: persistedDiagnostics, Processed: processed}); err != nil {
 			return err
 		}
 		progress.Batches++
@@ -159,13 +184,17 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 		processed = nil
 		batchCommits = 0
 		batchLimit = historyBatchCommits
-		return nil
+		return flushCtx.Err()
 	}
 	for rangeIndex, r := range ranges {
+		scanCursor = nil
 		scanKey := rangeKeys[rangeIndex]
 		checkpointRows, e := i.store.HistoryScanProgress(ctx, source.Name, scanKey)
 		if e != nil {
 			return Result{}, e
+		}
+		if rangeIndex == fallbackIndex && len(missing) == 0 && len(checkpointRows) == 0 {
+			continue
 		}
 		checkpoint := make(map[string]bool, len(checkpointRows))
 		for _, item := range checkpointRows {
@@ -183,7 +212,15 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				req.Progress(progress)
 			}
 		}
-		e = i.repository.WalkCommits(ctx, r, func(commit gitrepo.Commit) error {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+		var lastWalkCommit string
+		processCommit := func(commit gitrepo.Commit) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			lastWalkCommit = commit.Hash
 			encountered[commit.Hash] = true
 			if seen[commit.Hash] {
 				return nil
@@ -196,10 +233,24 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				return nil
 			}
 			seen[commit.Hash] = true
+			savedProgress := progress
+			eventStart, aliasStart, diagnosticStart := len(events), len(aliases), len(persistedDiagnostics)
+			var foundMissing []store.HistoryCoverage
+			complete := false
+			defer func() {
+				if !complete {
+					events = events[:eventStart]
+					aliases = aliases[:aliasStart]
+					persistedDiagnostics = persistedDiagnostics[:diagnosticStart]
+					progress = savedProgress
+					for _, coverage := range foundMissing {
+						missing[string(coverage.PackageID)+"\x00"+string(coverage.Kind)] = coverage
+					}
+				}
+			}()
 			eventsBefore := progress.Events
 			diagnosticsBefore := progress.Diagnostics
 			progress.Commits++
-			batchCommits++
 			for _, change := range commit.Changes {
 				if filepath.Ext(change.Path) != ".rb" && filepath.Ext(change.OldPath) != ".rb" {
 					continue
@@ -208,11 +259,11 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				if change.OldPath != "" {
 					beforePath = change.OldPath
 				}
-				before, bd, e := i.definition(ctx, commit.Hash+"^", beforePath, change.Status == "A")
+				before, bd, e := definition(commit.Hash+"^", beforePath, change.Status == "A")
 				if e != nil {
 					return e
 				}
-				after, ad, e := i.definition(ctx, commit.Hash, change.Path, change.Status == "D")
+				after, ad, e := definition(commit.Hash, change.Path, change.Status == "D")
 				if e != nil {
 					return e
 				}
@@ -263,9 +314,17 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				}
 				events = append(events, event)
 				progress.Events++
-				delete(missing, key)
+				if coverage, ok := missing[key]; ok {
+					foundMissing = append(foundMissing, coverage)
+					delete(missing, key)
+				}
 			}
 			processed = append(processed, store.HistoryProgress{Commit: commit.Hash, Events: progress.Events - eventsBefore, Diagnostics: progress.Diagnostics - diagnosticsBefore})
+			batchCommits++
+			if scanCursor != nil {
+				scanCursor.Frontier = commit.Hash
+			}
+			complete = true
 			if batchCommits == batchLimit {
 				return flush(ctx, scanKey)
 			}
@@ -273,31 +332,135 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 				req.Progress(progress)
 			}
 			return nil
-		})
+		}
+		walk := func(requested gitrepo.Range) error {
+			lastWalkCommit = ""
+			e := i.repository.WalkCommits(ctx, requested, processCommit)
+			if e != nil {
+				if batchCommits > 0 && ctx.Err() != nil {
+					flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), historyCancelFlushWindow)
+					flushErr := flush(flushCtx, scanKey)
+					cancelFlush()
+					if flushErr != nil {
+						return errors.Join(e, flushErr)
+					}
+				}
+				return e
+			}
+			return nil
+		}
+		floor := ""
+		if before, after, ok := strings.Cut(r.Revision, ".."); ok && after == head {
+			floor = before
+		}
+		fallbackSince := time.Time{}
+		if rangeIndex == fallbackIndex {
+			fallbackSince = since
+		}
+		savedCursor, hasCursor, e := i.store.HistoryScanCursor(ctx, source.Name, scanKey)
 		if e != nil {
-			if batchCommits > 0 && ctx.Err() != nil {
-				flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), historyCancelFlushWindow)
-				flushErr := flush(flushCtx, scanKey)
-				cancelFlush()
-				if flushErr != nil {
-					return Result{}, errors.Join(e, flushErr)
+			return Result{}, e
+		}
+		validCursor := hasCursor && checkpoint[savedCursor.Frontier] &&
+			savedCursor.Floor == floor && savedCursor.Since.Equal(r.Since) &&
+			savedCursor.Until.Equal(r.Until) && savedCursor.FallbackSince.Equal(fallbackSince)
+		// A pruned saved head is not an ancestor; retain its checkpoint rows
+		// for reconciliation while clearing the unusable frontier below.
+		if validCursor && savedCursor.Head != head {
+			validCursor, e = i.repository.IsFirstParentAncestor(ctx, savedCursor.Head, head)
+			if e != nil {
+				return Result{}, e
+			}
+		}
+		if hasCursor && (!validCursor || savedCursor.Head != head) {
+			// A changed prefix can be interrupted or rewritten before it is complete.
+			// Invalidate the old frontier before publishing any of that prefix.
+			if err := i.store.ApplyHistoryBatch(ctx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, ClearScanCursor: true}); err != nil {
+				return Result{}, err
+			}
+		}
+		if validCursor && savedCursor.Head != head {
+			prefix := r
+			prefix.Revision = savedCursor.Head + ".." + head
+			if err := walk(prefix); err != nil {
+				return Result{}, err
+			}
+			if err := flush(ctx, scanKey); err != nil {
+				return Result{}, err
+			}
+			// Git's --since can stop traversal before reaching the old head.
+			// Resume from the frontier only if the filtered prefix reached it.
+			reachedOldHead := r.Since.IsZero()
+			if lastWalkCommit != "" {
+				parent, err := i.repository.FirstParent(ctx, lastWalkCommit)
+				if err != nil {
+					return Result{}, err
+				}
+				reachedOldHead = reachedOldHead || parent == savedCursor.Head
+			}
+			if reachedOldHead {
+				savedCursor.Head = head
+				if err := i.store.ApplyHistoryBatch(ctx, store.HistoryBatch{Repository: source.Name, ScanKey: scanKey, Cursor: &savedCursor}); err != nil {
+					return Result{}, err
+				}
+			} else {
+				validCursor = false
+			}
+		}
+		if validCursor {
+			// These rows were committed together with a contiguous frontier on
+			// this exact first-parent history and with these exact scan bounds.
+			for _, item := range checkpointRows {
+				encountered[item.Commit] = true
+				seen[item.Commit] = true
+			}
+			scanCursor = &savedCursor
+			parent, err := i.repository.FirstParent(ctx, savedCursor.Frontier)
+			if err != nil {
+				return Result{}, err
+			}
+			if parent != "" {
+				tail := r
+				tail.Revision = parent
+				if floor != "" {
+					tail.Revision = floor + ".." + parent
+				}
+				if err := walk(tail); err != nil {
+					return Result{}, err
 				}
 			}
-			return Result{}, e
+		} else {
+			if len(checkpointRows) == 0 {
+				scanCursor = &store.HistoryScanCursor{Head: head, Floor: floor, Since: r.Since, Until: r.Until, FallbackSince: fallbackSince}
+			}
+			if err := walk(r); err != nil {
+				return Result{}, err
+			}
 		}
 		if err := flush(ctx, scanKey); err != nil {
 			return Result{}, err
 		}
 		if fallbackIndex > 0 && rangeIndex == fallbackIndex-1 {
-			if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{
-				Repository:        source.Name,
-				Path:              source.Path,
-				Head:              head,
-				Since:             since,
-				RemoveCommits:     remove,
-				CompletedScanKeys: append([]string(nil), rangeKeys[:fallbackIndex]...),
-			}); err != nil {
-				return Result{}, err
+			allCheckpointsEncountered := true
+			for commit := range loadedCheckpoints {
+				if !encountered[commit] {
+					allCheckpointsEncountered = false
+					break
+				}
+			}
+			// Keep primary checkpoints until fallback finishes if they still
+			// need reconciliation against the remaining history.
+			if allCheckpointsEncountered {
+				if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{
+					Repository:        source.Name,
+					Path:              source.Path,
+					Head:              head,
+					Since:             since,
+					RemoveCommits:     remove,
+					CompletedScanKeys: append([]string(nil), rangeKeys[:fallbackIndex]...),
+				}); err != nil {
+					return Result{}, err
+				}
 			}
 		}
 	}
@@ -317,7 +480,7 @@ func (i *Indexer) Index(ctx context.Context, source gitrepo.Source, req Request)
 			exhausted = append(exhausted, coverage)
 		}
 	}
-	if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, RemoveCommits: remove, Exhausted: exhausted}); err != nil {
+	if err := i.store.FinalizeHistory(ctx, store.HistoryBatch{Repository: source.Name, Path: source.Path, Head: head, Since: since, RemoveCommits: remove, Exhausted: exhausted, CompletedScanKeys: rangeKeys}); err != nil {
 		return Result{}, err
 	}
 	return Result{Events: progress.Events, Diagnostics: progress.Diagnostics, Head: head, Since: since}, nil

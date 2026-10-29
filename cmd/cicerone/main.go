@@ -262,7 +262,7 @@ func run() (runErr error) {
 		if program != nil {
 			program.Send(msg)
 		}
-	})
+	}, backgroundRefreshInterval)
 	if err != nil {
 		return err
 	}

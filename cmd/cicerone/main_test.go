@@ -24,6 +24,7 @@ import (
 	"github.com/anateus/cicerone/internal/store"
 	"github.com/anateus/cicerone/internal/syncer"
 	"github.com/anateus/cicerone/internal/testutil"
+	"github.com/anateus/cicerone/internal/tui"
 )
 
 type fakeInstalledClient struct {
@@ -63,7 +64,7 @@ func TestRuntimeServicesWiresTUIDependenciesAndClosesIdempotently(t *testing.T) 
 	}
 	t.Cleanup(func() { newExecRunner, runtimePaths = previousRunner, previousPaths })
 
-	runtime, err := newRuntime("ignored", func(tea.Msg) {})
+	runtime, err := newRuntime("ignored", func(tea.Msg) {}, backgroundRefreshInterval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +80,39 @@ func TestRuntimeServicesWiresTUIDependenciesAndClosesIdempotently(t *testing.T) 
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("second Close() = %v, want nil", err)
+	}
+}
+
+func TestPublishSyncEventPreservesQueueFallbackAndCancellation(t *testing.T) {
+	var messages []tea.Msg
+	notify := func(msg tea.Msg) { messages = append(messages, msg) }
+	publishSyncEvent(notify, syncer.SyncQueued{Source: "core", ID: 4, HistoricalFallback: true})
+	publishSyncEvent(notify, syncer.SyncStarted{Source: "core", ID: 4, HistoricalFallback: true})
+	publishSyncEvent(notify, syncer.SyncProgress{Source: "core", ID: 4, HistoricalFallback: true, Progress: syncer.Progress{Commits: 11, Batches: 2}})
+	publishSyncEvent(notify, syncer.SyncCancelled{Source: "core", ID: 4, HistoricalFallback: true, Reason: "yield for queued refresh at durable checkpoint"})
+	wantErr := errors.New("history failed")
+	publishSyncEvent(notify, syncer.SyncFailed{Source: "core", ID: 5, HistoricalFallback: true, Err: wantErr})
+	publishSyncEvent(notify, syncer.SyncCommitted{Source: "core", ID: 6, Result: syncer.Result{Events: 3}})
+	if len(messages) != 12 {
+		t.Fatalf("messages=%#v, want mapped and raw events", messages)
+	}
+	if event, ok := messages[0].(tui.SyncQueued); !ok || event.ID != 4 || !event.HistoricalFallback {
+		t.Fatalf("queued message=%#v", messages[0])
+	}
+	if event, ok := messages[2].(tui.SyncStarted); !ok || event.ID != 4 || !event.HistoricalFallback {
+		t.Fatalf("started message=%#v", messages[2])
+	}
+	if event, ok := messages[4].(tui.SyncProgress); !ok || event.Commits != 11 || event.Batches != 2 || !event.HistoricalFallback {
+		t.Fatalf("progress message=%#v", messages[4])
+	}
+	if event, ok := messages[6].(tui.SyncDone); !ok || event.Reason != "yield for queued refresh at durable checkpoint" || !event.HistoricalFallback {
+		t.Fatalf("yield message=%#v", messages[6])
+	}
+	if event, ok := messages[8].(tui.SyncDone); !ok || event.Err != wantErr || !event.HistoricalFallback {
+		t.Fatalf("failure message=%#v", messages[8])
+	}
+	if event, ok := messages[10].(tui.SyncDone); !ok || event.Events != 3 || event.HistoricalFallback {
+		t.Fatalf("completion message=%#v", messages[10])
 	}
 }
 
@@ -99,15 +133,21 @@ func (s shutdownTestSource) Index(ctx context.Context, _ syncer.Request) (syncer
 
 func TestRuntimeCloseCancelsAllSubsystemsBeforeWaiting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	destination, err := store.Open(ctx, ":memory:")
+	dbPath := filepath.Join(t.TempDir(), "shutdown.db")
+	destination, err := store.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sourceStarted, sourceCanceled, releaseSource := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	downloadStarted, downloadCanceled, releaseDownload := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	coordinator := syncer.New(syncer.Dependencies{Sources: []syncer.Source{shutdownTestSource{
+	canceledEvents := make(chan syncer.SyncCancelled, 1)
+	coordinator := syncer.New(syncer.Dependencies{Store: syncStore{destination}, Sources: []syncer.Source{shutdownTestSource{
 		started: sourceStarted, canceled: sourceCanceled, release: releaseSource,
-	}}})
+	}}, Notify: func(event syncer.Event) {
+		if event, ok := event.(syncer.SyncCancelled); ok {
+			canceledEvents <- event
+		}
+	}})
 	downloads := download.NewQueue(download.Options{Context: ctx, Workers: 1, HostInterval: -1})
 	if _, err := downloads.Enqueue(download.Request{URL: "https://example.test/document", Fetch: func(fetchCtx context.Context) (any, error) {
 		close(downloadStarted)
@@ -136,6 +176,23 @@ func TestRuntimeCloseCancelsAllSubsystemsBeforeWaiting(t *testing.T) {
 		close(releaseDownload)
 		<-closed
 		t.Fatal("download cancellation waited for repository shutdown")
+	}
+	select {
+	case event := <-canceledEvents:
+		if event.Reason != "shutdown" {
+			t.Fatalf("runtime shutdown reason = %q", event.Reason)
+		}
+	default:
+		t.Fatal("runtime did not publish the shutdown cancellation reason")
+	}
+	reopened, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	status, found, err := reopened.SyncStatus(context.Background(), "core")
+	if err != nil || !found || !strings.Contains(status.Error, "canceled (shutdown)") {
+		t.Fatalf("persisted shutdown status=%#v found=%v err=%v", status, found, err)
 	}
 }
 

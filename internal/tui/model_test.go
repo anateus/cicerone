@@ -466,6 +466,59 @@ func TestSynchronizationIsVisibleBeforeFirstScanProgressAndFailureReplacesSyncNe
 	}
 }
 
+func TestSyncQueueAndFallbackLifecycleStayDistinct(t *testing.T) {
+	m := NewModel(Dependencies{})
+	m = update(t, m, SyncQueued{Source: "core", ID: 1, HistoricalFallback: true})
+	if got := m.freshnessText(); got != "Queued core…" || len(m.activeSync) != 0 {
+		t.Fatalf("queued freshness=%q active=%v", got, m.activeSync)
+	}
+	m = update(t, m, SyncStarted{Source: "core", ID: 1, HistoricalFallback: true})
+	m = update(t, m, SyncQueued{Source: "core", ID: 2})
+	if got := m.freshnessText(); !strings.Contains(got, "Indexing history core") || !strings.Contains(got, "Queued core") {
+		t.Fatalf("fallback and queued refresh not both visible: %q", got)
+	}
+	m = update(t, m, SyncDone{Source: "core", ID: 1, HistoricalFallback: true, Reason: "yield for queued refresh at durable checkpoint"})
+	if got := m.freshnessText(); got != "Queued core…" || !strings.Contains(m.notification, "yield for queued refresh") {
+		t.Fatalf("yield status=%q notification=%q", got, m.notification)
+	}
+	m = update(t, m, SyncStarted{Source: "core", ID: 2})
+	m = update(t, m, SyncDone{Source: "core", ID: 1, HistoricalFallback: true, Reason: "shutdown"})
+	if got := m.freshnessText(); got != "Syncing core…" {
+		t.Fatalf("old completion stopped newer refresh: %q", got)
+	}
+	m = update(t, m, SyncDone{Source: "core", ID: 2, Events: 3})
+	if m.notification != "core synchronized · 3 updates" || len(m.activeSync) != 0 {
+		t.Fatalf("completion notification=%q active=%v", m.notification, m.activeSync)
+	}
+	m = update(t, m, SyncStarted{Source: "core", ID: 3, HistoricalFallback: true})
+	m = update(t, m, SyncProgress{Source: "core", ID: 3, HistoricalFallback: true, Commits: 10, Batches: 1})
+	if !strings.Contains(m.notification, "core history") {
+		t.Fatalf("fallback progress not labeled: %q", m.notification)
+	}
+	m = update(t, m, SyncDone{Source: "core", ID: 3, HistoricalFallback: true, Err: errors.New("blob read failed")})
+	if !strings.Contains(m.notification, "historical indexing failed: blob read failed") {
+		t.Fatalf("fallback error not visible: %q", m.notification)
+	}
+}
+
+func TestPersistedCancellationAndFallbackErrorsAreDistinguished(t *testing.T) {
+	now := time.Date(2026, 8, 7, 17, 0, 0, 0, time.Local)
+	for _, tc := range []struct{ err, want string }{
+		{"canceled (shutdown): context canceled", "Sync canceled (shutdown)"},
+		{"historical fallback: canceled (shutdown): context canceled", "History indexing canceled (shutdown)"},
+		{"historical fallback: blob read failed", "History indexing failed"},
+		{"network unavailable", "Sync failed"},
+	} {
+		m := NewModel(Dependencies{Now: func() time.Time { return now }})
+		m = update(t, m, FreshnessLoaded{RequestID: m.freshnessRequestID, Status: store.FreshnessStatus{
+			LastAttempt: now, LastError: tc.err,
+		}})
+		if got := m.freshnessText(); !strings.Contains(got, tc.want) {
+			t.Fatalf("freshness error %q rendered as %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
 func TestGlobalQuitKeys(t *testing.T) {
 	states := []struct {
 		name    string

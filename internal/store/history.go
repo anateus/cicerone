@@ -23,6 +23,13 @@ type HistoryProgress struct {
 	Commit              string
 	Events, Diagnostics int
 }
+
+// HistoryScanCursor certifies a processed first-parent prefix for one scan.
+// Frontier and its progress rows are written in the same transaction.
+type HistoryScanCursor struct {
+	Head, Frontier, Floor       string
+	Since, Until, FallbackSince time.Time
+}
 type HistoryCoverage struct {
 	PackageID domain.PackageID
 	Kind      domain.EventKind
@@ -31,6 +38,8 @@ type HistoryBatch struct {
 	Repository, Path, Head string
 	ScanKey                string
 	CompletedScanKeys      []string
+	Cursor                 *HistoryScanCursor
+	ClearScanCursor        bool
 	Since                  time.Time
 	Events                 []domain.UpdateEvent
 	Aliases                []HistoryAlias
@@ -125,6 +134,28 @@ func (s *Store) HistoryScanProgress(ctx context.Context, repository, scanKey str
 	return progress, rows.Err()
 }
 
+func (s *Store) HistoryScanCursor(ctx context.Context, repository, scanKey string) (HistoryScanCursor, bool, error) {
+	var cursor HistoryScanCursor
+	var since, until, fallbackSince string
+	err := s.db.QueryRowContext(ctx, `SELECT head_commit,frontier_commit,range_floor,since,until,fallback_since FROM history_scan_cursors WHERE repository=? AND scan_key=?`, repository, scanKey).Scan(&cursor.Head, &cursor.Frontier, &cursor.Floor, &since, &until, &fallbackSince)
+	if err == sql.ErrNoRows {
+		return HistoryScanCursor{}, false, nil
+	}
+	if err != nil {
+		return HistoryScanCursor{}, false, err
+	}
+	if cursor.Since, err = time.Parse(time.RFC3339Nano, since); err != nil {
+		return HistoryScanCursor{}, false, err
+	}
+	if cursor.Until, err = time.Parse(time.RFC3339Nano, until); err != nil {
+		return HistoryScanCursor{}, false, err
+	}
+	if cursor.FallbackSince, err = time.Parse(time.RFC3339Nano, fallbackSince); err != nil {
+		return HistoryScanCursor{}, false, err
+	}
+	return cursor, true, nil
+}
+
 // ApplyHistory makes events, aliases, reconciliation, range and cursor visible atomically.
 func (s *Store) ApplyHistory(ctx context.Context, batch HistoryBatch) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
@@ -179,6 +210,16 @@ func applyHistoryRows(ctx context.Context, tx *sql.Tx, batch HistoryBatch) error
 				return err
 			}
 		}
+		if batch.ClearScanCursor {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM history_scan_cursors WHERE repository=? AND scan_key=?`, batch.Repository, batch.ScanKey); err != nil {
+				return err
+			}
+		}
+		if cursor := batch.Cursor; cursor != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO history_scan_cursors(repository,scan_key,head_commit,frontier_commit,range_floor,since,until,fallback_since) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(repository,scan_key) DO UPDATE SET head_commit=excluded.head_commit,frontier_commit=excluded.frontier_commit,range_floor=excluded.range_floor,since=excluded.since,until=excluded.until,fallback_since=excluded.fallback_since`, batch.Repository, batch.ScanKey, cursor.Head, cursor.Frontier, cursor.Floor, cursor.Since.UTC().Format(time.RFC3339Nano), cursor.Until.UTC().Format(time.RFC3339Nano), cursor.FallbackSince.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -196,6 +237,15 @@ func finalizeHistory(ctx context.Context, tx *sql.Tx, batch HistoryBatch) error 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM history_diagnostics WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`)`, args...); err != nil {
+			return err
+		}
+		// Removed events must not remain marked as processed in another
+		// interrupted scan, or a later rewrite back could skip them.
+		cursorArgs := append([]any{batch.Repository, batch.Repository}, args[1:]...)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM history_scan_cursors WHERE repository=? AND scan_key IN (SELECT scan_key FROM history_scan_progress WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`))`, cursorArgs...); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM history_scan_progress WHERE repository=? AND commit_hash IN (`+placeholders(len(batch.RemoveCommits))+`)`, args...); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM history_fallback_coverage WHERE repository=?`, batch.Repository); err != nil {
@@ -221,9 +271,11 @@ func finalizeHistory(ctx context.Context, tx *sql.Tx, batch HistoryBatch) error 
 		for _, scanKey := range batch.CompletedScanKeys {
 			args = append(args, scanKey)
 		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM history_scan_progress WHERE repository=? AND scan_key IN (`+placeholders(len(batch.CompletedScanKeys))+`)`, args...)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM history_scan_progress WHERE repository=? AND scan_key IN (`+placeholders(len(batch.CompletedScanKeys))+`)`, args...); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM history_scan_cursors WHERE repository=? AND scan_key IN (`+placeholders(len(batch.CompletedScanKeys))+`)`, args...)
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM history_scan_progress WHERE repository=?`, batch.Repository)
-	return err
+	return nil
 }

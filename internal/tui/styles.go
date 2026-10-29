@@ -563,16 +563,55 @@ func (m Model) groupTabAt(y, x int) (bool, groupTab) {
 }
 
 func (m Model) freshnessText() string {
-	if len(m.activeSync) > 0 {
-		var sources []string
-		for source := range m.activeSync {
-			sources = append(sources, source)
+	var syncing, indexing, queued []string
+	for source := range m.activeSync {
+		if m.fallbackSync[source] {
+			indexing = append(indexing, source)
+		} else {
+			syncing = append(syncing, source)
 		}
-		sort.Strings(sources)
-		return "Syncing " + strings.Join(sources, ", ") + "…"
+	}
+	if len(m.queuedSync) > 0 {
+		queuedSources := make(map[string]bool, len(m.queuedSync))
+		for _, job := range m.queuedSync {
+			queuedSources[job.Source] = true
+		}
+		for source := range queuedSources {
+			queued = append(queued, source)
+		}
+	}
+	sort.Strings(syncing)
+	sort.Strings(indexing)
+	sort.Strings(queued)
+	var activity []string
+	if len(syncing) > 0 {
+		activity = append(activity, "Syncing "+strings.Join(syncing, ", ")+"…")
+	}
+	if len(indexing) > 0 {
+		activity = append(activity, "Indexing history "+strings.Join(indexing, ", ")+"…")
+	}
+	if len(queued) > 0 {
+		activity = append(activity, "Queued "+strings.Join(queued, ", ")+"…")
+	}
+	if len(activity) > 0 {
+		return strings.Join(activity, " · ")
 	}
 	if m.freshness.LastError != "" && (m.freshness.LastSync.IsZero() || m.freshness.LastAttempt.After(m.freshness.LastSync)) {
-		return "Sync failed " + m.freshness.LastAttempt.In(time.Local).Format("Jan 2 2006 15:04")
+		label := "Sync failed "
+		failure := m.freshness.LastError
+		if strings.HasPrefix(failure, "historical fallback: ") {
+			label = "History indexing failed "
+			failure = strings.TrimPrefix(failure, "historical fallback: ")
+		}
+		if strings.HasPrefix(failure, "canceled (") {
+			reason, _, _ := strings.Cut(strings.TrimPrefix(failure, "canceled ("), ")")
+			if strings.HasPrefix(m.freshness.LastError, "historical fallback: ") {
+				label = "History indexing canceled (" + reason + ") "
+			} else {
+				label = "Sync canceled (" + reason + ") "
+			}
+		}
+		return label + m.freshness.LastAttempt.In(time.Local).Format("Jan 2 2006 15:04")
 	}
 	if m.freshness.LastSync.IsZero() {
 		if m.freshnessErr != nil {

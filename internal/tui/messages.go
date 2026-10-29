@@ -22,12 +22,30 @@ type DatasetChanged struct{ Stale bool }
 type InitialRefreshDone struct{}
 type RefreshDone struct{}
 type WindowSize struct{ Width, Height int }
+type SyncQueued struct {
+	Source             string
+	ID                 uint64
+	HistoricalFallback bool
+}
 type SyncProgress struct {
 	Source                                string
+	ID                                    uint64
 	Commits, Events, Diagnostics, Batches int
+	HistoricalFallback                    bool
 }
-type SyncStarted struct{ Source string }
-type SyncDone struct{ Source string }
+type SyncStarted struct {
+	Source             string
+	ID                 uint64
+	HistoricalFallback bool
+}
+type SyncDone struct {
+	Source             string
+	ID                 uint64
+	HistoricalFallback bool
+	Events             int
+	Err                error
+	Reason             string
+}
 
 type ChangelogLoaded struct {
 	RequestID   uint64

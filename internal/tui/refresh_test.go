@@ -64,7 +64,7 @@ func TestDatasetRefreshMakesProgressWhileBatchesArrive(t *testing.T) {
 	}
 }
 
-func TestRefreshKeyPreemptsInitialRefresh(t *testing.T) {
+func TestRefreshKeyQueuesDuringInitialRefresh(t *testing.T) {
 	refreshes := 0
 	m := NewModel(Dependencies{
 		OnReady: func() tea.Msg { return InitialRefreshDone{} },

@@ -179,6 +179,9 @@ type Model struct {
 	markOrder                                                         []domain.PackageID
 	syncProgress                                                      map[string]SyncProgress
 	activeSync                                                        map[string]bool
+	activeSyncIDs                                                     map[string]uint64
+	fallbackSync                                                      map[string]bool
+	queuedSync                                                        map[uint64]SyncQueued
 	searching                                                         bool
 	searchQueryCancel                                                 context.CancelFunc
 	userGroups                                                        []domain.PackageGroup
@@ -205,7 +208,8 @@ func NewModel(deps Dependencies) Model {
 			Search: domain.SearchNames,
 		},
 		feedViewport: viewport.New(), inspectorViewport: viewport.New(), refreshAnchors: make(map[uint64]domain.Anchor), refreshSelectionIDs: make(map[uint64]uint64),
-		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool),
+		syncProgress: make(map[string]SyncProgress), activeSync: make(map[string]bool), activeSyncIDs: make(map[string]uint64),
+		fallbackSync: make(map[string]bool), queuedSync: make(map[uint64]SyncQueued),
 		packageDescriptions: make(map[domain.PackageID]string), descriptionRequests: make(map[domain.PackageID]bool),
 		catalogPending: make(map[domain.PackageID]uint64), catalogLoading: make(map[domain.PackageID]bool),
 		catalogAttempted:  make(map[domain.PackageID]bool),
@@ -325,15 +329,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			m.freshness = msg.Status
 		}
+	case SyncQueued:
+		m.queuedSync[msg.ID] = msg
+		if msg.HistoricalFallback {
+			m.notification = "Historical indexing queued for " + msg.Source
+		} else {
+			m.notification = "Refresh queued for " + msg.Source
+		}
 	case SyncStarted:
+		delete(m.queuedSync, msg.ID)
 		m.activeSync[msg.Source] = true
-		m.notification = "Fetching latest " + msg.Source + "…"
+		m.activeSyncIDs[msg.Source] = msg.ID
+		m.fallbackSync[msg.Source] = msg.HistoricalFallback
+		if msg.HistoricalFallback {
+			m.notification = "Indexing history for " + msg.Source + "…"
+		} else {
+			m.notification = "Fetching latest " + msg.Source + "…"
+		}
 	case SyncProgress:
 		m.syncProgress[msg.Source] = msg
 		m.activeSync[msg.Source] = true
-		m.notification = fmt.Sprintf("%s · %d commits scanned · %d updates · %d batches", msg.Source, msg.Commits, msg.Events, msg.Batches)
+		m.activeSyncIDs[msg.Source] = msg.ID
+		m.fallbackSync[msg.Source] = msg.HistoricalFallback
+		label := msg.Source
+		if msg.HistoricalFallback {
+			label += " history"
+		}
+		m.notification = fmt.Sprintf("%s · %d commits scanned · %d updates · %d batches", label, msg.Commits, msg.Events, msg.Batches)
 	case SyncDone:
-		delete(m.activeSync, msg.Source)
+		delete(m.queuedSync, msg.ID)
+		if msg.ID == 0 || m.activeSyncIDs[msg.Source] == msg.ID {
+			delete(m.activeSync, msg.Source)
+			delete(m.activeSyncIDs, msg.Source)
+			delete(m.fallbackSync, msg.Source)
+		}
+		activity := "synchronization"
+		if msg.HistoricalFallback {
+			activity = "historical indexing"
+		}
+		switch {
+		case msg.Err != nil:
+			m.err = msg.Err
+			m.notification = fmt.Sprintf("%s %s failed: %v", msg.Source, activity, msg.Err)
+		case msg.Reason != "":
+			m.notification = fmt.Sprintf("%s %s canceled: %s", msg.Source, activity, msg.Reason)
+		case msg.HistoricalFallback:
+			m.notification = fmt.Sprintf("%s historical indexing complete · %d updates", msg.Source, msg.Events)
+		default:
+			m.notification = fmt.Sprintf("%s synchronized · %d updates", msg.Source, msg.Events)
+		}
 		m.freshnessRequestID++
 		return m, m.loadFreshness(m.freshnessRequestID)
 	case PreferencesLoaded:
@@ -822,7 +866,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.manualRefreshRunning = true
-		m.notification = "Refreshing latest updates…"
+		m.notification = "Refresh requested…"
 		return m, m.deps.Refresh
 	case "t":
 		m.repositoryTagsExpanded = !m.repositoryTagsExpanded
